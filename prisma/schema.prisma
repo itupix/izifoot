@@ -1,0 +1,39 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  isPremium    Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+  plannings    Planning[]
+}
+
+model Planning {
+  id        String       @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id])
+  date      DateTime
+  data      String
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  shares    ShareToken[]
+
+  @@unique([userId, date])
+}
+
+model ShareToken {
+  id         String    @id @default(cuid())
+  token      String    @unique
+  planningId String
+  planning   Planning  @relation(fields: [planningId], references: [id])
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+}
