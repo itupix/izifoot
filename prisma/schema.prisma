@@ -37,3 +37,104 @@ model ShareToken {
   expiresAt  DateTime?
   createdAt  DateTime  @default(now())
 }
+
+// === FOOT DOMAIN ===
+
+model Player {
+  id                 String            @id @default(cuid())
+  name               String
+  primary_position   String
+  secondary_position String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  scorers            Scorer[]
+  Attendance         Attendance[]
+  MatchTeamPlayer    MatchTeamPlayer[]
+}
+
+model Training {
+  id            String          @id @default(cuid())
+  date          DateTime
+  status        String          @default("PLANNED") // <= DOIT être là
+  attendance    Attendance[]
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  TrainingDrill TrainingDrill[]
+}
+
+model Plateau {
+  id         String       @id @default(cuid())
+  date       DateTime
+  lieu       String
+  matches    Match[]
+  attendance Attendance[]
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+}
+
+model Attendance {
+  id           String    @id @default(cuid())
+  session_type String
+  session_id   String
+  player       Player    @relation(fields: [playerId], references: [id])
+  playerId     String
+  Training     Training? @relation(fields: [trainingId], references: [id])
+  trainingId   String?
+  Plateau      Plateau?  @relation(fields: [plateauId], references: [id])
+  plateauId    String?
+
+  @@unique([session_type, session_id, playerId])
+}
+
+model Match {
+  id        String      @id @default(cuid())
+  type      String
+  plateau   Plateau?    @relation(fields: [plateauId], references: [id])
+  plateauId String?
+  teams     MatchTeam[]
+  scorers   Scorer[]
+  createdAt DateTime    @default(now())
+}
+
+model MatchTeam {
+  id      String            @id @default(cuid())
+  match   Match             @relation(fields: [matchId], references: [id])
+  matchId String
+  side    String
+  players MatchTeamPlayer[]
+  score   Int               @default(0)
+
+  @@unique([matchId, side])
+}
+
+model Scorer {
+  id       String @id @default(cuid())
+  match    Match  @relation(fields: [matchId], references: [id])
+  matchId  String
+  player   Player @relation(fields: [playerId], references: [id])
+  playerId String
+  side     String
+}
+
+model MatchTeamPlayer {
+  id          String    @id @default(cuid())
+  matchTeam   MatchTeam @relation(fields: [matchTeamId], references: [id])
+  matchTeamId String
+  player      Player    @relation(fields: [playerId], references: [id])
+  playerId    String
+  role        String // 'starter' | 'sub'
+
+  @@unique([matchTeamId, playerId, role])
+}
+
+model TrainingDrill {
+  id         String   @id @default(cuid())
+  training   Training @relation(fields: [trainingId], references: [id])
+  trainingId String
+  drillId    String // id d'un drill du catalogue en mémoire
+  order      Int      @default(0)
+  duration   Int? // override (minutes) pour cette séance
+  notes      String?
+
+  @@index([trainingId])
+}
