@@ -408,10 +408,21 @@ app.put('/api/players/:id', authMiddleware, async (req: any, res) => {
 app.delete('/api/players/:id', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {
-    await prisma.player.delete({ where: { id } })
+    // Ensure the player exists first
+    const exists = await prisma.player.findUnique({ where: { id } })
+    if (!exists) return res.status(404).json({ error: 'Player not found' })
+
+    await prisma.$transaction([
+      prisma.scorer.deleteMany({ where: { playerId: id } }),
+      prisma.matchTeamPlayer.deleteMany({ where: { playerId: id } }),
+      prisma.attendance.deleteMany({ where: { playerId: id } }),
+      prisma.player.delete({ where: { id } })
+    ])
     res.json({ ok: true })
-  } catch {
-    res.status(404).json({ error: 'Player not found' })
+  } catch (e: any) {
+    console.error('[DELETE /api/players/:id] failed', e)
+    // If it still fails due to referential integrity, surface 409
+    return res.status(409).json({ error: 'Cannot delete player due to related data' })
   }
 })
 
@@ -481,6 +492,7 @@ app.get('/api/plateaus', authMiddleware, async (_req: any, res) => {
   res.json(plateaus)
 })
 
+
 app.post('/api/plateaus', authMiddleware, async (req: any, res) => {
   const schema = z.object({ date: z.string().or(z.date()), lieu: z.string().min(1) })
   const parsed = schema.safeParse(req.body)
@@ -488,6 +500,35 @@ app.post('/api/plateaus', authMiddleware, async (req: any, res) => {
   const date = new Date(parsed.data.date as any)
   const pl = await prisma.plateau.create({ data: { date, lieu: parsed.data.lieu } })
   res.json(pl)
+})
+
+app.delete('/api/plateaus/:id', authMiddleware, async (req: any, res) => {
+  const id = req.params.id
+  try {
+    // Ensure plateau exists
+    const exists = await prisma.plateau.findUnique({ where: { id } })
+    if (!exists) return res.status(404).json({ error: 'Plateau not found' })
+
+    // Collect related matches and teams
+    const matches = await prisma.match.findMany({ where: { plateauId: id }, include: { teams: true } })
+    const matchIds = matches.map(m => m.id)
+    const teamIds = matches.flatMap(m => m.teams.map(t => t.id))
+
+    await prisma.$transaction([
+      prisma.scorer.deleteMany({ where: { matchId: { in: matchIds } } }),
+      prisma.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: teamIds } } }),
+      prisma.matchTeam.deleteMany({ where: { matchId: { in: matchIds } } }),
+      prisma.match.deleteMany({ where: { id: { in: matchIds } } }),
+      prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU', session_id: id } }),
+      prisma.plateau.delete({ where: { id } })
+    ])
+
+    res.json({ ok: true })
+  } catch (e: any) {
+    if (e?.code === 'P2025') return res.status(404).json({ error: 'Plateau not found' })
+    console.error('[DELETE /api/plateaus/:id] failed', e)
+    return res.status(500).json({ error: 'Failed to delete plateau' })
+  }
 })
 
 // ---- Attendance (TRAINING / PLATEAU) ----
@@ -554,13 +595,14 @@ app.post('/api/matches', authMiddleware, async (req: any, res) => {
       }).default({ starters: [], subs: [] })
     }),
     score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }).optional(),
-    buteurs: z.array(z.object({ playerId: z.string(), side: z.enum(['home', 'away']) })).optional()
+    buteurs: z.array(z.object({ playerId: z.string(), side: z.enum(['home', 'away']) })).optional(),
+    opponentName: z.string().min(1).max(100).optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const { type, plateauId, sides, score, buteurs } = parsed.data
+  const { type, plateauId, sides, score, buteurs, opponentName } = parsed.data
 
-  const match = await prisma.match.create({ data: { type, plateauId } })
+  const match = await prisma.match.create({ data: { type, plateauId, opponentName } })
   const home = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'home', score: score?.home ?? 0 } })
   const away = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'away', score: score?.away ?? 0 } })
 
@@ -582,6 +624,74 @@ app.post('/api/matches', authMiddleware, async (req: any, res) => {
     include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
   })
   res.json(full)
+})
+
+// Update a match: score, opponentName, and (optionally) scorers (replace all)
+app.put('/api/matches/:id', authMiddleware, async (req: any, res) => {
+  const matchId = req.params.id
+  const schema = z.object({
+    score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }).optional(),
+    opponentName: z.string().min(1).max(100).optional(),
+    buteurs: z.array(z.object({ playerId: z.string(), side: z.enum(['home', 'away']) })).optional()
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  try {
+    // ensure exists
+    const exists = await prisma.match.findUnique({ where: { id: matchId } })
+    if (!exists) return res.status(404).json({ error: 'Match not found' })
+
+    // update fields
+    if (parsed.data.opponentName !== undefined) {
+      await prisma.match.update({ where: { id: matchId }, data: { opponentName: parsed.data.opponentName } })
+    }
+    if (parsed.data.score) {
+      await prisma.$transaction([
+        prisma.matchTeam.updateMany({ where: { matchId, side: 'home' }, data: { score: parsed.data.score.home } }),
+        prisma.matchTeam.updateMany({ where: { matchId, side: 'away' }, data: { score: parsed.data.score.away } }),
+      ])
+    }
+    if (parsed.data.buteurs) {
+      await prisma.$transaction([
+        prisma.scorer.deleteMany({ where: { matchId } }),
+        prisma.scorer.createMany({ data: parsed.data.buteurs.map(b => ({ matchId, playerId: b.playerId, side: b.side })) })
+      ])
+    }
+
+    const full = await prisma.match.findUnique({
+      where: { id: matchId },
+      include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
+    })
+    res.json(full)
+  } catch (e) {
+    console.error('[PUT /api/matches/:id] failed', e)
+    return res.status(500).json({ error: 'Failed to update match' })
+  }
+})
+
+// Delete a match (cascade delete teams, players, scorers)
+app.delete('/api/matches/:id', authMiddleware, async (req: any, res) => {
+  const id = req.params.id
+  try {
+    const exists = await prisma.match.findUnique({ where: { id } })
+    if (!exists) return res.status(404).json({ error: 'Match not found' })
+
+    const teams = await prisma.matchTeam.findMany({ where: { matchId: id } })
+    const teamIds = teams.map(t => t.id)
+
+    await prisma.$transaction([
+      prisma.scorer.deleteMany({ where: { matchId: id } }),
+      prisma.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: teamIds } } }),
+      prisma.matchTeam.deleteMany({ where: { matchId: id } }),
+      prisma.match.delete({ where: { id } })
+    ])
+
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[DELETE /api/matches/:id] failed', e)
+    return res.status(500).json({ error: 'Failed to delete match' })
+  }
 })
 
 // ---- Schedule generator (pairings only) ----
@@ -744,6 +854,86 @@ app.delete('/api/trainings/:id/drills/:trainingDrillId', authMiddleware, async (
     res.json({ ok: true })
   } catch {
     res.status(404).json({ error: 'Not found' })
+  }
+})
+
+// ---- Diagrams (exercices) ----
+app.get('/api/drills/:id/diagrams', authMiddleware, async (req: any, res) => {
+  const drillId = req.params.id
+  const rows = await prisma.diagram.findMany({ where: { drillId }, orderBy: { updatedAt: 'desc' } })
+  res.json(rows)
+})
+
+app.get('/api/training-drills/:id/diagrams', authMiddleware, async (req: any, res) => {
+  const trainingDrillId = req.params.id
+  const rows = await prisma.diagram.findMany({ where: { trainingDrillId }, orderBy: { updatedAt: 'desc' } })
+  res.json(rows)
+})
+
+app.get('/api/diagrams/:id', authMiddleware, async (req: any, res) => {
+  const d = await prisma.diagram.findUnique({ where: { id: req.params.id } })
+  if (!d) return res.status(404).json({ error: 'Not found' })
+  res.json(d)
+})
+
+app.post('/api/drills/:id/diagrams', authMiddleware, async (req: any, res) => {
+  const drillId = req.params.id
+  const schema = z.object({
+    title: z.string().min(1).max(100),
+    data: z.any() // JSON
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  const created = await prisma.diagram.create({
+    data: { drillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
+  })
+  res.json({ ...created, data: parsed.data.data })
+})
+
+app.post('/api/training-drills/:id/diagrams', authMiddleware, async (req: any, res) => {
+  const trainingDrillId = req.params.id
+  const schema = z.object({
+    title: z.string().min(1).max(100),
+    data: z.any()
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  const created = await prisma.diagram.create({
+    data: { trainingDrillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
+  })
+  res.json({ ...created, data: parsed.data.data })
+})
+
+app.put('/api/diagrams/:id', authMiddleware, async (req: any, res) => {
+  const schema = z.object({
+    title: z.string().min(1).max(100).optional(),
+    data: z.any().optional()
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const patch: any = {}
+  if (parsed.data.title !== undefined) patch.title = parsed.data.title
+  if (parsed.data.data !== undefined) patch.data = JSON.stringify(parsed.data.data)
+
+  try {
+    const updated = await prisma.diagram.update({ where: { id: req.params.id }, data: patch })
+    res.json({ ...updated, data: parsed.data.data ?? JSON.parse(updated.data) })
+  } catch (e: any) {
+    if (e?.code === 'P2025') return res.status(404).json({ error: 'Not found' })
+    console.error('[PUT /api/diagrams/:id] failed', e)
+    return res.status(500).json({ error: 'Failed to update diagram' })
+  }
+})
+
+app.delete('/api/diagrams/:id', authMiddleware, async (req: any, res) => {
+  try {
+    await prisma.diagram.delete({ where: { id: req.params.id } })
+    res.json({ ok: true })
+  } catch (e: any) {
+    if (e?.code === 'P2025') return res.status(404).json({ error: 'Not found' })
+    console.error('[DELETE /api/diagrams/:id] failed', e)
+    return res.status(500).json({ error: 'Failed to delete diagram' })
   }
 })
 // === END FOOT DOMAIN API ===

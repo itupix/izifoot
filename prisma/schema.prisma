@@ -87,13 +87,15 @@ model Attendance {
 }
 
 model Match {
-  id        String      @id @default(cuid())
-  type      String
-  plateau   Plateau?    @relation(fields: [plateauId], references: [id])
-  plateauId String?
-  teams     MatchTeam[]
-  scorers   Scorer[]
-  createdAt DateTime    @default(now())
+  id           String      @id @default(cuid())
+  type         String
+  plateau      Plateau?    @relation(fields: [plateauId], references: [id])
+  plateauId    String?
+  teams        MatchTeam[]
+  scorers      Scorer[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  opponentName String?
 }
 
 model MatchTeam {
@@ -137,4 +139,17 @@ model TrainingDrill {
   notes      String?
 
   @@index([trainingId])
+}
+
+model Diagram {
+  id              String   @id @default(cuid())
+  title           String
+  data            String // JSON string décrivant le dessin
+  drillId         String? // id d'un DRILL du catalogue en mémoire
+  trainingDrillId String? // id d'un exercice rattaché à une séance
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([drillId])
+  @@index([trainingDrillId])
 }
