@@ -21,7 +21,25 @@ const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5173'
 const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`
 
 app.use(helmet())
-app.use(cors({ origin: APP_BASE_URL, credentials: true }))
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true)
+    try {
+      const allowed = new Set<string>([APP_BASE_URL])
+      const u = new URL(APP_BASE_URL)
+      // allow http<->https swap on localhost
+      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+        allowed.add(`http://localhost:${u.port || '5173'}`)
+        allowed.add(`http://127.0.0.1:${u.port || '5173'}`)
+        allowed.add(`https://localhost:${u.port || '5173'}`)
+        allowed.add(`https://127.0.0.1:${u.port || '5173'}`)
+      }
+      if (allowed.has(origin)) return callback(null, true)
+    } catch { }
+    return callback(new Error('Not allowed by CORS'))
+  },
+  credentials: true,
+}))
 app.use(express.json({ limit: '1mb' }))
 app.use(cookieParser())
 app.use(morgan('dev'))
@@ -36,6 +54,24 @@ app.use((req, res, next) => {
   res.setHeader('Vary', 'Authorization, Origin')
   next()
 })
+
+// --- Cookie helper for robust cross-site cookie options ---
+function cookieOptsFor(req: any) {
+  try {
+    const appUrl = new URL(APP_BASE_URL)
+    const sameSiteOK = (appUrl.hostname === req.hostname) && (appUrl.protocol.replace(':', '') === req.protocol)
+    const isProd = process.env.NODE_ENV === 'production'
+    // If same-site (dev localhost usually), Lax works and allows XHR with credentials
+    if (sameSiteOK) {
+      return { httpOnly: true, sameSite: 'lax' as const, secure: isProd, maxAge: 30 * 24 * 3600 * 1000 }
+    }
+    // Cross-site: must be SameSite=None; Secure
+    return { httpOnly: true, sameSite: 'none' as const, secure: true, maxAge: 30 * 24 * 3600 * 1000 }
+  } catch {
+    // Fallback to lax
+    return { httpOnly: true, sameSite: 'lax' as const, secure: process.env.NODE_ENV === 'production', maxAge: 30 * 24 * 3600 * 1000 }
+  }
+}
 
 // --- Auth helpers ---
 function signToken(userId: string) {
@@ -289,7 +325,19 @@ app.get('/api/plannings/:id/qr', authMiddleware, async (req: any, res) => {
 // ---- Drills (exercises) ----
 // Simple in-memory catalog to mirror the old app behaviour. Move to DB later if needed.
 // id, title, category, duration (min), players (min-max or text), description, tags
-const DRILLS = [
+// Runtime additions (in-memory). Reset on server restart.
+interface DrillMutable {
+  id: string
+  title: string
+  category: string
+  duration: number
+  players: string
+  description: string
+  tags: string[]
+}
+const EXTRA_DRILLS: DrillMutable[] = []
+
+const DRILLS: DrillMutable[] = [
   {
     id: 'd_warmup_circle',
     title: 'Échauffement en cercle',
@@ -335,16 +383,14 @@ const DRILLS = [
     description: 'Terrain 25x18m, buts mini. Jeux de 2–3 minutes, rotations rapides. Objectif: transitions rapides.',
     tags: ['intensité', 'transition', 'duels']
   }
-] as const
-
-type Drill = typeof DRILLS[number]
+]
 
 app.get('/api/drills', authMiddleware, async (req: any, res) => {
   const q = (req.query.q as string | undefined)?.toLowerCase().trim()
   const cat = (req.query.category as string | undefined)?.toLowerCase().trim()
   const tag = (req.query.tag as string | undefined)?.toLowerCase().trim()
 
-  let items: Drill[] = DRILLS.slice()
+  let items: DrillMutable[] = DRILLS.concat(EXTRA_DRILLS)
   if (q) {
     items = items.filter(d =>
       d.title.toLowerCase().includes(q) ||
@@ -363,9 +409,42 @@ app.get('/api/drills', authMiddleware, async (req: any, res) => {
 })
 
 app.get('/api/drills/:id', authMiddleware, async (req: any, res) => {
-  const d = DRILLS.find(x => x.id === req.params.id)
+  const d = DRILLS.find(x => x.id === req.params.id) || EXTRA_DRILLS.find(x => x.id === req.params.id)
   if (!d) return res.status(404).json({ error: 'Not found' })
   res.json(d)
+})
+
+app.post('/api/drills', authMiddleware, async (req: any, res) => {
+  const schema = z.object({
+    title: z.string().min(1).max(100),
+    category: z.string().min(1).max(50),
+    duration: z.number().int().min(1).max(180),
+    players: z.string().min(1).max(50),
+    description: z.string().min(1).max(2000),
+    tags: z.array(z.string().min(1).max(32)).max(20).optional()
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  // naive unique id; ensure no collision with seed ones
+  const base = parsed.data.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
+  let id = `d_${base || 'new'}`
+  let i = 1
+  while (DRILLS.some(d => d.id === id) || EXTRA_DRILLS.some(d => d.id === id)) {
+    id = `d_${base}_${i++}`
+  }
+
+  const drill: DrillMutable = {
+    id,
+    title: parsed.data.title,
+    category: parsed.data.category,
+    duration: parsed.data.duration,
+    players: parsed.data.players,
+    description: parsed.data.description,
+    tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
+  }
+  EXTRA_DRILLS.push(drill)
+  res.status(201).json(drill)
 })
 // Models used: Player, Training, Plateau, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
 // All endpoints are protected (same as plannings). Adjust if you want some public.
@@ -380,11 +459,28 @@ app.post('/api/players', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     name: z.string().min(1),
     primary_position: z.string().min(1),
-    secondary_position: z.string().optional()
+    secondary_position: z.string().optional(),
+    email: z.string().email().optional(),
+    phone: z.string().min(5).max(32).optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const p = await prisma.player.create({ data: parsed.data })
+  const baseData: any = {
+    name: parsed.data.name,
+    primary_position: parsed.data.primary_position,
+    secondary_position: parsed.data.secondary_position
+  }
+  if ('email' in parsed.data) baseData.email = parsed.data.email
+  if ('phone' in parsed.data) baseData.phone = parsed.data.phone
+  let p
+  try {
+    p = await prisma.player.create({ data: baseData })
+  } catch (e) {
+    // Fallback if schema lacks columns: remove and retry
+    const fallback: any = { name: baseData.name, primary_position: baseData.primary_position }
+    if (baseData.secondary_position !== undefined) fallback.secondary_position = baseData.secondary_position
+    p = await prisma.player.create({ data: fallback })
+  }
   res.json(p)
 })
 
@@ -392,17 +488,300 @@ app.put('/api/players/:id', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     name: z.string().min(1).optional(),
     primary_position: z.string().optional(),
-    secondary_position: z.string().nullable().optional()
+    secondary_position: z.string().nullable().optional(),
+    email: z.string().email().nullable().optional(),
+    phone: z.string().min(5).max(32).nullable().optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { id } = req.params
+  const patch: any = {}
+  if (parsed.data.name !== undefined) patch.name = parsed.data.name
+  if (parsed.data.primary_position !== undefined) patch.primary_position = parsed.data.primary_position
+  if (parsed.data.secondary_position !== undefined) patch.secondary_position = parsed.data.secondary_position
+  if ('email' in parsed.data) patch.email = parsed.data.email ?? null
+  if ('phone' in parsed.data) patch.phone = parsed.data.phone ?? null
+  let updated
   try {
-    const updated = await prisma.player.update({ where: { id }, data: parsed.data as any })
-    res.json(updated)
-  } catch {
-    res.status(404).json({ error: 'Player not found' })
+    updated = await prisma.player.update({ where: { id }, data: patch })
+  } catch (e) {
+    // Retry without email/phone if columns absent
+    const fallback: any = { ...patch }
+    delete fallback.email
+    delete fallback.phone
+    updated = await prisma.player.update({ where: { id }, data: fallback })
   }
+  res.json(updated)
+})
+// --- Player invite JWT and playerAuth ---
+function signPlayerInvite(playerId: string, plateauId?: string | null, email?: string | null) {
+  return jwt.sign({ aud: 'player_invite', pid: playerId, plid: plateauId || null, em: email || null }, JWT_SECRET, { expiresIn: '30d' })
+}
+
+function signRsvpToken(playerId: string, plateauId: string, status: 'present' | 'absent') {
+  return jwt.sign({ aud: 'player_rsvp', pid: playerId, plid: plateauId, st: status }, JWT_SECRET, { expiresIn: '60d' })
+}
+function playerAuth(req: any, res: any, next: any) {
+  const token = req.cookies?.player_token || (req.headers['x-player-token'] as string | undefined)
+  if (!token) return res.status(401).json({ error: 'Unauthorized' })
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as any
+    if (payload?.aud !== 'player_invite' || !payload?.pid) return res.status(401).json({ error: 'Invalid token' })
+    req.playerId = payload.pid
+    req.scopePlateauId = payload.plid || null
+    next()
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' })
+  }
+}
+
+// --- Player invite endpoint ---
+app.post('/api/players/:id/invite', authMiddleware, async (req: any, res) => {
+  const { id } = req.params
+  const schema = z.object({ plateauId: z.string().optional(), email: z.string().email().optional() })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  const player = await prisma.player.findUnique({ where: { id } })
+  if (!player) return res.status(404).json({ error: 'Player not found' })
+  const base = `${req.protocol}://${req.get('host')}`
+  const inviteEmail = parsed.data.email || (player as any).email || null
+  if (!parsed.data.plateauId) {
+    return res.status(400).json({ error: 'plateauId is required to generate RSVP links' })
+  }
+  const presentToken = signRsvpToken(id, parsed.data.plateauId, 'present')
+  const absentToken = signRsvpToken(id, parsed.data.plateauId, 'absent')
+  const presentUrl = `${base}/rsvp/p?token=${encodeURIComponent(presentToken)}`
+  const absentUrl = `${base}/rsvp/a?token=${encodeURIComponent(absentToken)}`
+
+  // Mark player as convoked for this plateau
+  try {
+    await prisma.attendance.upsert({
+      where: { session_type_session_id_playerId: { session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id } },
+      create: { session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id },
+      update: {},
+    })
+  } catch (e) {
+    console.warn('[invite] failed to upsert convocation marker', e)
+  }
+
+  // Try email if requested and SMTP is configured
+  if (inviteEmail && transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || 'no-reply@example.com',
+        to: inviteEmail,
+        subject: 'Confirmation de présence – Izifoot',
+        html: `<p>Bonjour${player.name ? ' ' + player.name : ''},</p>
+<p>Merci d'indiquer votre présence pour le plateau.</p>
+<p><a href="${presentUrl}">Je serai présent</a> &nbsp;|&nbsp; <a href="${absentUrl}">Je serai absent</a></p>
+<p>(Ces liens sont valables 60 jours)</p>`
+      })
+    } catch (e) {
+      console.warn('[invite] email failed:', e)
+    }
+  }
+  res.json({ ok: true, presentUrl, absentUrl })
+})
+
+// --- Public endpoint to accept invite and set player_token cookie ---
+app.get('/player/accept', async (req: any, res) => {
+  const token = req.query.token as string | undefined
+  if (!token) return res.status(400).json({ error: 'Missing token' })
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as any
+    if (payload?.aud !== 'player_invite' || !payload?.pid) return res.status(400).json({ error: 'Invalid token' })
+    res.cookie('player_token', token, cookieOptsFor(req))
+    const r = (req.query.r as string | undefined)
+    const redirectTo = (r && r.startsWith(APP_BASE_URL)) ? r : undefined
+    res.json({ ok: true, redirectTo })
+  } catch {
+    return res.status(400).json({ error: 'Invalid token' })
+  }
+})
+
+app.get('/player/login', async (req: any, res) => {
+  const token = req.query.token as string | undefined
+  const r = (req.query.r as string | undefined) || ''
+  let redirectTo = process.env.PLAYER_PORTAL_REDIRECT || APP_BASE_URL
+  // If a custom redirect is provided and starts with APP_BASE_URL, use it
+  if (r && r.startsWith(APP_BASE_URL)) redirectTo = r
+  if (!token) return res.redirect(302, redirectTo)
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as any
+    if (payload?.aud !== 'player_invite' || !payload?.pid) return res.redirect(302, redirectTo)
+    res.cookie('player_token', token, cookieOptsFor(req))
+    // If token is scoped to a plateau, send the user straight to that MatchDay
+    if (payload?.plid) {
+      const dest = `${APP_BASE_URL}/match-day/${payload.plid}`
+      return res.redirect(302, dest)
+    }
+    return res.redirect(302, redirectTo)
+  } catch {
+    return res.redirect(302, redirectTo)
+  }
+})
+
+// --- RSVP endpoints ---
+app.get('/rsvp/p', async (req: any, res) => {
+  const token = req.query.token as string | undefined
+  const redirectBase = APP_BASE_URL
+  if (!token) return res.redirect(302, redirectBase)
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as any
+    if (payload?.aud !== 'player_rsvp' || payload?.st !== 'present' || !payload?.pid || !payload?.plid) {
+      return res.redirect(302, redirectBase)
+    }
+    try {
+      await prisma.attendance.upsert({
+        where: { session_type_session_id_playerId: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
+        create: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid, present: true } as any,
+        update: { present: true } as any,
+      })
+    } catch (e) {
+      // Fallback for schemas without `present` column
+      try {
+        // Mark present by ensuring a PLATEAU row exists
+        await prisma.attendance.upsert({
+          where: { session_type_session_id_playerId: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
+          create: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid },
+          update: {},
+        })
+        // Remove any absence marker
+        await prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU_ABSENT', session_id: payload.plid, playerId: payload.pid } })
+      } catch (e2) {
+        // Ignore, always redirect anyway
+      }
+    }
+    return res.redirect(302, `${redirectBase}/match-day/${payload.plid}?rsvp=present`)
+  } catch {
+    return res.redirect(302, redirectBase)
+  }
+})
+
+app.get('/rsvp/a', async (req: any, res) => {
+  const token = req.query.token as string | undefined
+  const redirectBase = APP_BASE_URL
+  if (!token) return res.redirect(302, redirectBase)
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as any
+    if (payload?.aud !== 'player_rsvp' || payload?.st !== 'absent' || !payload?.pid || !payload?.plid) {
+      return res.redirect(302, redirectBase)
+    }
+    try {
+      await prisma.attendance.upsert({
+        where: {
+          session_type_session_id_playerId: {
+            session_type: 'PLATEAU',
+            session_id: payload.plid,
+            playerId: payload.pid,
+          },
+        },
+        create: {
+          session_type: 'PLATEAU',
+          session_id: payload.plid,
+          playerId: payload.pid,
+          present: false,
+        } as any,
+        update: {
+          present: false,
+        } as any,
+      })
+    } catch (e) {
+      // Fallback when `present` column doesn't exist: mark absence with a dedicated row
+      try {
+        // Remove any present marker for old schema
+        await prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } })
+        // Upsert an ABSENT marker
+        await prisma.attendance.upsert({
+          where: {
+            session_type_session_id_playerId: {
+              session_type: 'PLATEAU_ABSENT',
+              session_id: payload.plid,
+              playerId: payload.pid,
+            },
+          },
+          create: {
+            session_type: 'PLATEAU_ABSENT',
+            session_id: payload.plid,
+            playerId: payload.pid,
+          },
+          update: {},
+        })
+      } catch (err) {
+        console.warn('[RSVP absent] fallback failed', err)
+      }
+    }
+    return res.redirect(302, `${redirectBase}/match-day/${payload.plid}?rsvp=absent`)
+  } catch {
+    return res.redirect(302, redirectBase)
+  }
+})
+
+// --- Debug route for cookie visibility ---
+app.get('/player/debug', (req: any, res) => {
+  res.json({ hasCookie: Boolean(req.cookies?.player_token), cookies: Object.keys(req.cookies || {}) })
+})
+// --- Scoped player endpoints ---
+app.get('/api/player/me', playerAuth, async (req: any, res) => {
+  const p = await prisma.player.findUnique({ where: { id: req.playerId } })
+  if (!p) return res.status(404).json({ error: 'Player not found' })
+  res.json({ id: p.id, name: (p as any).name || '', email: (p as any).email || null, phone: (p as any).phone || null })
+})
+
+app.get('/api/player/plateaus', playerAuth, async (req: any, res) => {
+  const playerId = req.playerId as string
+  // Plateaus via attendance
+  const att = await prisma.attendance.findMany({ where: { session_type: 'PLATEAU', playerId }, select: { session_id: true } })
+  const plateauIdsFromAttendance = Array.from(new Set(att.map(a => a.session_id)))
+
+  // Plateaus via match participation
+  const mtps = await prisma.matchTeamPlayer.findMany({ where: { playerId }, select: { matchTeamId: true } })
+  const teamIds = mtps.map(m => m.matchTeamId)
+  let plateauIdsFromMatches: string[] = []
+  if (teamIds.length) {
+    const teams = await prisma.matchTeam.findMany({ where: { id: { in: teamIds } }, select: { matchId: true } })
+    const matchIds = teams.map(t => t.matchId)
+    if (matchIds.length) {
+      const matches = await prisma.match.findMany({ where: { id: { in: matchIds } }, select: { plateauId: true } })
+      plateauIdsFromMatches = matches.map(m => m.plateauId!).filter(Boolean) as string[]
+    }
+  }
+
+  const set = new Set<string>([...plateauIdsFromAttendance, ...plateauIdsFromMatches])
+  const ids = Array.from(set)
+  if (!ids.length) return res.json([])
+  const plateaus = await prisma.plateau.findMany({ where: { id: { in: ids } }, orderBy: { date: 'desc' } })
+  res.json(plateaus)
+})
+
+app.get('/api/player/plateaus/:id/summary', playerAuth, async (req: any, res) => {
+  const plateauId = req.params.id
+  // If token is scoped to a specific plateau, enforce it
+  if (req.scopePlateauId && req.scopePlateauId !== plateauId) return res.status(403).json({ error: 'Forbidden' })
+
+  // Reuse the same build as /api/plateaus/:id/summary
+  const ctxRes: any = {}
+  const fakeReq: any = { params: { id: plateauId } }
+  const fakeRes: any = {
+    statusCode: 200,
+    _json: null,
+    status(c: number) { this.statusCode = c; return this },
+    json(v: any) { this._json = v; return this }
+  }
+  await (app as any)._router.handle({ ...fakeReq, method: 'GET', url: `/api/plateaus/${plateauId}/summary` }, fakeRes, () => { })
+  const summary = fakeRes._json
+  if (!summary || fakeRes.statusCode !== 200) return res.status(fakeRes.statusCode || 500).json(summary || { error: 'Failed' })
+
+  // Check convocation: present in attendance OR in any team players
+  const isConvocated = Boolean(
+    (summary.convocations || []).some((c: any) => c.player?.id === req.playerId) ||
+    (summary.matches || []).some((m: any) => (m.teams || []).some((t: any) => (t.players || []).some((p: any) => p.playerId === req.playerId)))
+  )
+  if (!isConvocated) return res.status(403).json({ error: 'Not convocated for this plateau' })
+
+  // Optionally, we could filter convocations to only the player
+  const filtered = { ...summary, convocations: (summary.convocations || []).filter((c: any) => c.player?.id === req.playerId) }
+  res.json(filtered)
 })
 
 app.delete('/api/players/:id', authMiddleware, async (req: any, res) => {
@@ -531,6 +910,166 @@ app.delete('/api/plateaus/:id', authMiddleware, async (req: any, res) => {
   }
 })
 
+// Get a single plateau by id
+app.get('/api/plateaus/:id', authMiddleware, async (req: any, res) => {
+  const { id } = req.params
+  try {
+    const plateau = await prisma.plateau.findUnique({ where: { id } })
+    if (!plateau) return res.status(404).json({ error: 'Plateau not found' })
+    res.json(plateau)
+  } catch (e) {
+    console.error('[GET /api/plateaus/:id] failed', e)
+    return res.status(500).json({ error: 'Failed to fetch plateau' })
+  }
+})
+
+// Aggregated view for a match day (plateau)
+app.get('/api/plateaus/:id/summary', authMiddleware, async (req: any, res) => {
+  const { id } = req.params
+  try {
+    const plateau = await prisma.plateau.findUnique({ where: { id } })
+    if (!plateau) return res.status(404).json({ error: 'Plateau not found' })
+
+    // Attendance (present/absent records) for this plateau, include player info
+    const attendance = await prisma.attendance.findMany({
+      where: {
+        session_id: id,
+        session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] as any },
+      },
+      include: { player: true }
+    })
+    // Build attendancePlayers and playersById from attendance
+    const attendancePlayers = attendance.map(a => a.player).filter(Boolean) as any[]
+    const playersById: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null; email?: string | null; phone?: string | null }> = {}
+    for (const pl of attendancePlayers) {
+      playersById[pl.id] = {
+        id: pl.id,
+        name: pl.name,
+        primary_position: pl.primary_position ?? null,
+        secondary_position: pl.secondary_position ?? null,
+        email: (pl as any).email ?? null,
+        phone: (pl as any).phone ?? null
+      }
+    }
+
+    // Matches for this plateau (with teams and scorers first)
+    const matchesRaw = await prisma.match.findMany({
+      where: { plateauId: id },
+      include: {
+        teams: true,
+        scorers: true
+      },
+      orderBy: { createdAt: 'asc' }
+    })
+
+    // Fetch all team players in one query and attach player objects
+    const allTeamIds = matchesRaw.flatMap(m => m.teams.map(t => t.id))
+    const mtPlayers = allTeamIds.length ? await prisma.matchTeamPlayer.findMany({
+      where: { matchTeamId: { in: allTeamIds } },
+      include: { player: true }
+    }) : []
+    const byTeam: Record<string, typeof mtPlayers> = {}
+    for (const row of mtPlayers) {
+      if (!byTeam[row.matchTeamId]) byTeam[row.matchTeamId] = []
+      byTeam[row.matchTeamId].push(row)
+    }
+
+    // Build enriched matches with teams[].players including player info
+    const matches = matchesRaw.map(m => ({
+      ...m,
+      teams: m.teams.map(t => ({
+        ...t,
+        players: (byTeam[t.id] || []).map(p => ({
+          playerId: p.playerId,
+          role: p.role,
+          player: p.player
+        }))
+      }))
+    }))
+
+    // Hydrate playersById from match teams and build convocations
+    const convocatedMap: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null; email?: string | null; phone?: string | null }> = {}
+    for (const m of matches) {
+      for (const t of m.teams) {
+        for (const p of t.players) {
+          const pl = p.player as any
+          if (pl) {
+            playersById[pl.id] = playersById[pl.id] || {
+              id: pl.id,
+              name: pl.name,
+              primary_position: pl.primary_position ?? null,
+              secondary_position: pl.secondary_position ?? null,
+              email: (pl as any).email ?? null,
+              phone: (pl as any).phone ?? null
+            }
+            if (!convocatedMap[pl.id]) convocatedMap[pl.id] = playersById[pl.id]
+          }
+        }
+      }
+    }
+    for (const pl of attendancePlayers) {
+      if (!convocatedMap[pl.id]) convocatedMap[pl.id] = playersById[pl.id]
+    }
+    // Ensure we know all players (for listing). We do not auto-mark as convoked.
+    try {
+      const allPlayers = await prisma.player.findMany({ orderBy: { name: 'asc' } })
+      for (const pl of allPlayers) {
+        if (!playersById[pl.id]) {
+          playersById[pl.id] = {
+            id: pl.id,
+            name: (pl as any).name,
+            primary_position: (pl as any).primary_position ?? null,
+            secondary_position: (pl as any).secondary_position ?? null,
+            email: (pl as any).email ?? null,
+            phone: (pl as any).phone ?? null,
+          } as any
+        }
+      }
+    } catch (e) {
+      // If fetching all players fails for any reason, proceed with partial list
+      console.warn('[summary] failed to include full players list', (e as any)?.message || e)
+    }
+
+    // Mark presence/absence and convocation using attendance
+    const attendanceMap = new Map<string, boolean | null>()
+    const convokeSet = new Set<string>()
+    for (const a of attendance as any[]) {
+      if (a.session_type === 'PLATEAU_CONVOKE') { convokeSet.add(a.playerId); continue }
+      if (a.present === true) { attendanceMap.set(a.playerId, true); continue }
+      if (a.present === false) { attendanceMap.set(a.playerId, false); continue }
+      // No `present` field: use session_type marker if available
+      if (a.session_type === 'PLATEAU_ABSENT') { attendanceMap.set(a.playerId, false); continue }
+      // Old schema "present" implied by existence of PLATEAU row
+      if (a.session_type === 'PLATEAU') { attendanceMap.set(a.playerId, true); continue }
+    }
+
+    // Build convocations list for ALL players known in playersById
+    const convocations = Object.values(playersById).map(pl => {
+      const att = attendanceMap.get(pl.id)
+      let status: 'present' | 'absent' | 'convoque' | 'non_convoque'
+      if (att === true) status = 'present'
+      else if (att === false) status = 'absent'
+      else if (convokeSet.has(pl.id)) status = 'convoque'
+      else status = 'non_convoque'
+      return { player: pl, status, present: status === 'present' }
+    })
+
+    // Add scorersDetailed to each match, resolving playerName from playersById
+    const matchesEnriched = matches.map(m => ({
+      ...m,
+      scorersDetailed: m.scorers.map(s => ({
+        ...s,
+        playerName: playersById[s.playerId]?.name || null
+      }))
+    }))
+
+    res.json({ plateau, convocations, matches: matchesEnriched, playersById })
+  } catch (e) {
+    console.error('[GET /api/plateaus/:id/summary] failed', e)
+    return res.status(500).json({ error: 'Failed to fetch plateau summary' })
+  }
+})
+
 // ---- Attendance (TRAINING / PLATEAU) ----
 app.get('/api/attendance', authMiddleware, async (req: any, res) => {
   const schema = z.object({
@@ -556,14 +1095,23 @@ app.post('/api/attendance', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { session_type, session_id, playerId, present } = parsed.data
-  if (present) {
+  try {
     await prisma.attendance.upsert({
       where: { session_type_session_id_playerId: { session_type, session_id, playerId } },
-      create: { session_type, session_id, playerId },
-      update: {}
+      create: { session_type, session_id, playerId, present } as any,
+      update: { present } as any
     })
-  } else {
-    await prisma.attendance.deleteMany({ where: { session_type, session_id, playerId } })
+  } catch (e) {
+    // Fallback if `present` column doesn't exist
+    if (present) {
+      await prisma.attendance.upsert({
+        where: { session_type_session_id_playerId: { session_type, session_id, playerId } },
+        create: { session_type, session_id, playerId },
+        update: {}
+      })
+    } else {
+      await prisma.attendance.deleteMany({ where: { session_type, session_id, playerId } })
+    }
   }
   res.json({ ok: true })
 })
@@ -786,8 +1334,9 @@ app.get('/api/trainings/:id/drills', authMiddleware, async (req: any, res) => {
     where: { trainingId },
     orderBy: { order: 'asc' },
   })
+  const catalog = (DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)
   const items = rows.map(r => {
-    const meta = (DRILLS as readonly any[]).find(d => d.id === r.drillId) || null
+    const meta = catalog.find(d => d.id === r.drillId) || null
     return { ...r, meta }
   })
   res.json(items)
@@ -814,7 +1363,7 @@ app.post('/api/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   const row = await prisma.trainingDrill.create({
     data: { trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder }
   })
-  const meta = (DRILLS as readonly any[]).find(d => d.id === row.drillId) || null
+  const meta = ((DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)).find(d => d.id === row.drillId) || null
   res.json({ ...row, meta })
 })
 
@@ -839,7 +1388,7 @@ app.put('/api/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req
         ...(parsed.data.order !== undefined ? { order: parsed.data.order } : {})
       }
     })
-    const meta = (DRILLS as readonly any[]).find(d => d.id === updated.drillId) || null
+    const meta = ((DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)).find(d => d.id === updated.drillId) || null
     res.json({ ...updated, meta })
   } catch {
     res.status(404).json({ error: 'Not found' })

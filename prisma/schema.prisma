@@ -50,6 +50,8 @@ model Player {
   scorers            Scorer[]
   Attendance         Attendance[]
   MatchTeamPlayer    MatchTeamPlayer[]
+  email              String?           @unique
+  phone              String?
 }
 
 model Training {
