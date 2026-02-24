@@ -1225,8 +1225,9 @@ app.post('/matches', authMiddleware, async (req, res) => {
         ...toMTP(away.id, sides.away.starters, 'starter'),
         ...toMTP(away.id, sides.away.subs, 'sub'),
     ];
-    if (mtps.length)
-        await prisma.matchTeamPlayer.createMany({ data: mtps, skipDuplicates: true });
+    const uniqueMtps = Array.from(new Map(mtps.map((r) => [`${r.matchTeamId}:${r.playerId}:${r.role}`, r])).values());
+    if (uniqueMtps.length)
+        await prisma.matchTeamPlayer.createMany({ data: uniqueMtps });
     if (buteurs?.length) {
         await prisma.scorer.createMany({ data: buteurs.map(b => ({ matchId: match.id, playerId: b.playerId, side: b.side })) });
     }
@@ -1367,8 +1368,9 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
                 ...toMTP(home.id, pick(homeIds), 'starter'),
                 ...toMTP(away.id, pick(awayIds), 'starter'),
             ];
-            if (rows.length)
-                await db.matchTeamPlayer.createMany({ data: rows, skipDuplicates: true });
+            const uniqueRows = Array.from(new Map(rows.map((r) => [`${r.matchTeamId}:${r.playerId}:${r.role}`, r])).values());
+            if (uniqueRows.length)
+                await db.matchTeamPlayer.createMany({ data: uniqueRows });
             ids.push(match.id);
         }
         return ids;
