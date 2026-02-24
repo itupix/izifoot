@@ -78,6 +78,19 @@ function normalizeValue(value, udtName) {
     if (typeof value === 'number') return value !== 0
     if (typeof value === 'string') return value === '1' || value.toLowerCase() === 'true'
   }
+  if (udtName === 'timestamp' || udtName === 'timestamptz' || udtName === 'date') {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const ms = value > 1e12 ? value : value * 1000
+      return new Date(ms)
+    }
+    if (typeof value === 'string' && /^\d+$/.test(value)) {
+      const n = Number(value)
+      if (Number.isFinite(n)) {
+        const ms = n > 1e12 ? n : n * 1000
+        return new Date(ms)
+      }
+    }
+  }
   return value
 }
 

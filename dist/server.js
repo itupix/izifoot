@@ -26,20 +26,39 @@ const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`;
 const AUTH_COOKIE_NAME = 'token';
 // Railway/Reverse proxy support so secure cookies can be set correctly.
 app.set('trust proxy', 1);
+function toOrigin(raw) {
+    const s = raw.trim();
+    if (!s)
+        return null;
+    try {
+        return new URL(s).origin;
+    }
+    catch {
+        return null;
+    }
+}
+const configuredFrontOrigins = [
+    APP_BASE_URL,
+    ...(process.env.APP_BASE_URLS || '').split(','),
+]
+    .map(toOrigin)
+    .filter((v) => Boolean(v));
 app.use((0, helmet_1.default)());
 app.use((0, cors_1.default)({
     origin(origin, callback) {
         if (!origin)
             return callback(null, true);
         try {
-            const allowed = new Set([APP_BASE_URL]);
-            const u = new URL(APP_BASE_URL);
-            // allow http<->https swap on localhost
-            if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
-                allowed.add(`http://localhost:${u.port || '5173'}`);
-                allowed.add(`http://127.0.0.1:${u.port || '5173'}`);
-                allowed.add(`https://localhost:${u.port || '5173'}`);
-                allowed.add(`https://127.0.0.1:${u.port || '5173'}`);
+            const allowed = new Set(configuredFrontOrigins);
+            for (const frontOrigin of configuredFrontOrigins) {
+                const u = new URL(frontOrigin);
+                // allow http<->https swap on localhost
+                if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+                    allowed.add(`http://localhost:${u.port || '5173'}`);
+                    allowed.add(`http://127.0.0.1:${u.port || '5173'}`);
+                    allowed.add(`https://localhost:${u.port || '5173'}`);
+                    allowed.add(`https://127.0.0.1:${u.port || '5173'}`);
+                }
             }
             if (allowed.has(origin))
                 return callback(null, true);
