@@ -178,7 +178,7 @@ function safeParseJSON(s) {
         return null;
     }
 }
-app.post('/api/auth/register', async (req, res) => {
+app.post('/auth/register', async (req, res) => {
     const schema = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string().min(6) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -193,7 +193,7 @@ app.post('/api/auth/register', async (req, res) => {
     res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts());
     res.json({ id: user.id, email: user.email, isPremium: user.isPremium });
 });
-app.post('/api/auth/login', async (req, res) => {
+app.post('/auth/login', async (req, res) => {
     const schema = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string() });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -209,11 +209,11 @@ app.post('/api/auth/login', async (req, res) => {
     res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts());
     res.json({ id: user.id, email: user.email, isPremium: user.isPremium });
 });
-app.post('/api/auth/logout', (req, res) => {
+app.post('/auth/logout', (req, res) => {
     res.clearCookie(AUTH_COOKIE_NAME, authClearCookieOpts());
     res.json({ ok: true });
 });
-app.get('/api/me', authMiddleware, async (req, res) => {
+app.get('/me', authMiddleware, async (req, res) => {
     const user = await prisma.user.findUnique({ where: { id: req.userId }, include: { plannings: true } });
     if (!user)
         return res.status(404).json({ error: 'User not found' });
@@ -221,7 +221,7 @@ app.get('/api/me', authMiddleware, async (req, res) => {
     res.json({ id: user.id, email: user.email, isPremium: user.isPremium, planningCount });
 });
 // Collect waitlist emails
-app.post('/api/waitlist', async (req, res) => {
+app.post('/waitlist', async (req, res) => {
     try {
         const schema = zod_1.z.object({ email: zod_1.z.string().email(), source: zod_1.z.string().optional() });
         const parsed = schema.safeParse(req.body);
@@ -262,7 +262,7 @@ app.post('/api/waitlist', async (req, res) => {
     }
 });
 // FREE TIER RULE: non-premium users can create **one planning total** (for any chosen date). They can update it, but not create a second one.
-app.post('/api/plannings', authMiddleware, async (req, res) => {
+app.post('/plannings', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ date: zod_1.z.string(), data: zod_1.z.any() });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -281,18 +281,18 @@ app.post('/api/plannings', authMiddleware, async (req, res) => {
     const planning = await prisma.planning.create({ data: { userId: user.id, date: isoDate, data: JSON.stringify(data) } });
     res.json({ ...planning, data });
 });
-app.get('/api/plannings', authMiddleware, async (req, res) => {
+app.get('/plannings', authMiddleware, async (req, res) => {
     const plans = await prisma.planning.findMany({ where: { userId: req.userId }, orderBy: { date: 'asc' } });
     const mapped = plans.map((p) => ({ ...p, data: safeParseJSON(p.data) }));
     res.json(mapped);
 });
-app.get('/api/plannings/:id', authMiddleware, async (req, res) => {
+app.get('/plannings/:id', authMiddleware, async (req, res) => {
     const p = await prisma.planning.findFirst({ where: { id: req.params.id, userId: req.userId } });
     if (!p)
         return res.status(404).json({ error: 'Not found' });
     res.json({ ...p, data: safeParseJSON(p.data) });
 });
-app.put('/api/plannings/:id', authMiddleware, async (req, res) => {
+app.put('/plannings/:id', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ data: zod_1.z.any() });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -303,7 +303,7 @@ app.put('/api/plannings/:id', authMiddleware, async (req, res) => {
     const updated = await prisma.planning.update({ where: { id: p.id }, data: { data: JSON.stringify(parsed.data.data) } });
     res.json({ ...updated, data: parsed.data.data });
 });
-app.delete('/api/plannings/:id', authMiddleware, async (req, res) => {
+app.delete('/plannings/:id', authMiddleware, async (req, res) => {
     const p = await prisma.planning.findFirst({ where: { id: req.params.id, userId: req.userId } });
     if (!p)
         return res.status(404).json({ error: 'Not found' });
@@ -312,7 +312,7 @@ app.delete('/api/plannings/:id', authMiddleware, async (req, res) => {
     res.json({ ok: true });
 });
 // Sharing: create a share token (optional email)
-app.post('/api/plannings/:id/share', authMiddleware, async (req, res) => {
+app.post('/plannings/:id/share', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ expiresInDays: zod_1.z.number().int().min(1).max(365).optional(), email: zod_1.z.string().email().optional() });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -345,7 +345,7 @@ app.get('/s/:token', async (req, res) => {
     res.json({ planning: { ...s.planning, data: safeParseJSON(s.planning.data) } });
 });
 // QR code PNG for sharing URL
-app.get('/api/plannings/:id/qr', authMiddleware, async (req, res) => {
+app.get('/plannings/:id/qr', authMiddleware, async (req, res) => {
     const p = await prisma.planning.findFirst({ where: { id: req.params.id, userId: req.userId } });
     if (!p)
         return res.status(404).json({ error: 'Not found' });
@@ -407,7 +407,7 @@ const DRILLS = [
         tags: ['intensité', 'transition', 'duels']
     }
 ];
-app.get('/api/drills', authMiddleware, async (req, res) => {
+app.get('/drills', authMiddleware, async (req, res) => {
     const q = req.query.q?.toLowerCase().trim();
     const cat = req.query.category?.toLowerCase().trim();
     const tag = req.query.tag?.toLowerCase().trim();
@@ -427,13 +427,13 @@ app.get('/api/drills', authMiddleware, async (req, res) => {
         tags: Array.from(new Set(DRILLS.flatMap(d => d.tags))).sort()
     });
 });
-app.get('/api/drills/:id', authMiddleware, async (req, res) => {
+app.get('/drills/:id', authMiddleware, async (req, res) => {
     const d = DRILLS.find(x => x.id === req.params.id) || EXTRA_DRILLS.find(x => x.id === req.params.id);
     if (!d)
         return res.status(404).json({ error: 'Not found' });
     res.json(d);
 });
-app.post('/api/drills', authMiddleware, async (req, res) => {
+app.post('/drills', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         title: zod_1.z.string().min(1).max(100),
         category: zod_1.z.string().min(1).max(50),
@@ -467,11 +467,11 @@ app.post('/api/drills', authMiddleware, async (req, res) => {
 // Models used: Player, Training, Plateau, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 // ---- Players ----
-app.get('/api/players', authMiddleware, async (_req, res) => {
+app.get('/players', authMiddleware, async (_req, res) => {
     const players = await prisma.player.findMany({ orderBy: { name: 'asc' } });
     res.json(players);
 });
-app.post('/api/players', authMiddleware, async (req, res) => {
+app.post('/players', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         name: zod_1.z.string().min(1),
         primary_position: zod_1.z.string().min(1),
@@ -504,7 +504,7 @@ app.post('/api/players', authMiddleware, async (req, res) => {
     }
     res.json(p);
 });
-app.put('/api/players/:id', authMiddleware, async (req, res) => {
+app.put('/players/:id', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         name: zod_1.z.string().min(1).optional(),
         primary_position: zod_1.z.string().optional(),
@@ -564,7 +564,7 @@ function playerAuth(req, res, next) {
     }
 }
 // --- Player invite endpoint ---
-app.post('/api/players/:id/invite', authMiddleware, async (req, res) => {
+app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const schema = zod_1.z.object({ plateauId: zod_1.z.string().optional(), email: zod_1.z.string().email().optional() });
     const parsed = schema.safeParse(req.body);
@@ -762,13 +762,13 @@ app.get('/player/debug', (req, res) => {
     res.json({ hasCookie: Boolean(req.cookies?.player_token), cookies: Object.keys(req.cookies || {}) });
 });
 // --- Scoped player endpoints ---
-app.get('/api/player/me', playerAuth, async (req, res) => {
+app.get('/player/me', playerAuth, async (req, res) => {
     const p = await prisma.player.findUnique({ where: { id: req.playerId } });
     if (!p)
         return res.status(404).json({ error: 'Player not found' });
     res.json({ id: p.id, name: p.name || '', email: p.email || null, phone: p.phone || null });
 });
-app.get('/api/player/plateaus', playerAuth, async (req, res) => {
+app.get('/player/plateaus', playerAuth, async (req, res) => {
     const playerId = req.playerId;
     // Plateaus via attendance
     const att = await prisma.attendance.findMany({ where: { session_type: 'PLATEAU', playerId }, select: { session_id: true } });
@@ -792,12 +792,12 @@ app.get('/api/player/plateaus', playerAuth, async (req, res) => {
     const plateaus = await prisma.plateau.findMany({ where: { id: { in: ids } }, orderBy: { date: 'desc' } });
     res.json(plateaus);
 });
-app.get('/api/player/plateaus/:id/summary', playerAuth, async (req, res) => {
+app.get('/player/plateaus/:id/summary', playerAuth, async (req, res) => {
     const plateauId = req.params.id;
     // If token is scoped to a specific plateau, enforce it
     if (req.scopePlateauId && req.scopePlateauId !== plateauId)
         return res.status(403).json({ error: 'Forbidden' });
-    // Reuse the same build as /api/plateaus/:id/summary
+    // Reuse the same build as /plateaus/:id/summary
     const ctxRes = {};
     const fakeReq = { params: { id: plateauId } };
     const fakeRes = {
@@ -806,7 +806,7 @@ app.get('/api/player/plateaus/:id/summary', playerAuth, async (req, res) => {
         status(c) { this.statusCode = c; return this; },
         json(v) { this._json = v; return this; }
     };
-    await app._router.handle({ ...fakeReq, method: 'GET', url: `/api/plateaus/${plateauId}/summary` }, fakeRes, () => { });
+    await app._router.handle({ ...fakeReq, method: 'GET', url: `/plateaus/${plateauId}/summary` }, fakeRes, () => { });
     const summary = fakeRes._json;
     if (!summary || fakeRes.statusCode !== 200)
         return res.status(fakeRes.statusCode || 500).json(summary || { error: 'Failed' });
@@ -819,7 +819,7 @@ app.get('/api/player/plateaus/:id/summary', playerAuth, async (req, res) => {
     const filtered = { ...summary, convocations: (summary.convocations || []).filter((c) => c.player?.id === req.playerId) };
     res.json(filtered);
 });
-app.delete('/api/players/:id', authMiddleware, async (req, res) => {
+app.delete('/players/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
         // Ensure the player exists first
@@ -835,18 +835,18 @@ app.delete('/api/players/:id', authMiddleware, async (req, res) => {
         res.json({ ok: true });
     }
     catch (e) {
-        console.error('[DELETE /api/players/:id] failed', e);
+        console.error('[DELETE /players/:id] failed', e);
         // If it still fails due to referential integrity, surface 409
         return res.status(409).json({ error: 'Cannot delete player due to related data' });
     }
 });
 // ---- Trainings ----
-app.get('/api/trainings', authMiddleware, async (_req, res) => {
+app.get('/trainings', authMiddleware, async (_req, res) => {
     const trainings = await prisma.training.findMany({ orderBy: { date: 'desc' } });
     res.json(trainings);
 });
 // Get single training
-app.get('/api/trainings/:id', authMiddleware, async (req, res) => {
+app.get('/trainings/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
         const training = await prisma.training.findUnique({ where: { id } });
@@ -855,11 +855,11 @@ app.get('/api/trainings/:id', authMiddleware, async (req, res) => {
         res.json(training);
     }
     catch (e) {
-        console.error('[GET /api/trainings/:id] failed', e);
+        console.error('[GET /trainings/:id] failed', e);
         return res.status(500).json({ error: 'Failed to fetch training' });
     }
 });
-app.post('/api/trainings', authMiddleware, async (req, res) => {
+app.post('/trainings', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -869,7 +869,7 @@ app.post('/api/trainings', authMiddleware, async (req, res) => {
     res.json(t);
 });
 // Update a training (date/status)
-app.put('/api/trainings/:id', authMiddleware, async (req, res) => {
+app.put('/trainings/:id', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         date: zod_1.z.string().or(zod_1.z.date()).optional(),
         status: zod_1.z.enum(['PLANNED', 'CANCELLED']).optional()
@@ -890,12 +890,12 @@ app.put('/api/trainings/:id', authMiddleware, async (req, res) => {
         if (e?.code === 'P2025') {
             return res.status(404).json({ error: 'Training not found' });
         }
-        console.error('[PUT /api/trainings/:id] update failed', e);
+        console.error('[PUT /trainings/:id] update failed', e);
         return res.status(500).json({ error: 'Failed to update training' });
     }
 });
 // Delete a training (and clean related attendance + drills)
-app.delete('/api/trainings/:id', authMiddleware, async (req, res) => {
+app.delete('/trainings/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
         await prisma.$transaction([
@@ -909,16 +909,16 @@ app.delete('/api/trainings/:id', authMiddleware, async (req, res) => {
         if (e?.code === 'P2025') {
             return res.status(404).json({ error: 'Training not found' });
         }
-        console.error('[DELETE /api/trainings/:id] delete failed', e);
+        console.error('[DELETE /trainings/:id] delete failed', e);
         return res.status(500).json({ error: 'Failed to delete training' });
     }
 });
 // ---- Plateaus ----
-app.get('/api/plateaus', authMiddleware, async (_req, res) => {
+app.get('/plateaus', authMiddleware, async (_req, res) => {
     const plateaus = await prisma.plateau.findMany({ orderBy: { date: 'desc' } });
     res.json(plateaus);
 });
-app.post('/api/plateaus', authMiddleware, async (req, res) => {
+app.post('/plateaus', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()), lieu: zod_1.z.string().min(1) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -927,7 +927,7 @@ app.post('/api/plateaus', authMiddleware, async (req, res) => {
     const pl = await prisma.plateau.create({ data: { date, lieu: parsed.data.lieu } });
     res.json(pl);
 });
-app.delete('/api/plateaus/:id', authMiddleware, async (req, res) => {
+app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
         // Ensure plateau exists
@@ -951,12 +951,12 @@ app.delete('/api/plateaus/:id', authMiddleware, async (req, res) => {
     catch (e) {
         if (e?.code === 'P2025')
             return res.status(404).json({ error: 'Plateau not found' });
-        console.error('[DELETE /api/plateaus/:id] failed', e);
+        console.error('[DELETE /plateaus/:id] failed', e);
         return res.status(500).json({ error: 'Failed to delete plateau' });
     }
 });
 // Get a single plateau by id
-app.get('/api/plateaus/:id', authMiddleware, async (req, res) => {
+app.get('/plateaus/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
         const plateau = await prisma.plateau.findUnique({ where: { id } });
@@ -965,12 +965,12 @@ app.get('/api/plateaus/:id', authMiddleware, async (req, res) => {
         res.json(plateau);
     }
     catch (e) {
-        console.error('[GET /api/plateaus/:id] failed', e);
+        console.error('[GET /plateaus/:id] failed', e);
         return res.status(500).json({ error: 'Failed to fetch plateau' });
     }
 });
 // Aggregated view for a match day (plateau)
-app.get('/api/plateaus/:id/summary', authMiddleware, async (req, res) => {
+app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
         const plateau = await prisma.plateau.findUnique({ where: { id } });
@@ -1127,12 +1127,12 @@ app.get('/api/plateaus/:id/summary', authMiddleware, async (req, res) => {
         res.json({ plateau, convocations, matches: matchesEnriched, playersById });
     }
     catch (e) {
-        console.error('[GET /api/plateaus/:id/summary] failed', e);
+        console.error('[GET /plateaus/:id/summary] failed', e);
         return res.status(500).json({ error: 'Failed to fetch plateau summary' });
     }
 });
 // ---- Attendance (TRAINING / PLATEAU) ----
-app.get('/api/attendance', authMiddleware, async (req, res) => {
+app.get('/attendance', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         session_type: zod_1.z.enum(['TRAINING', 'PLATEAU']).optional(),
         session_id: zod_1.z.string().optional()
@@ -1149,7 +1149,7 @@ app.get('/api/attendance', authMiddleware, async (req, res) => {
     const rows = await prisma.attendance.findMany({ where });
     res.json(rows);
 });
-app.post('/api/attendance', authMiddleware, async (req, res) => {
+app.post('/attendance', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         session_type: zod_1.z.enum(['TRAINING', 'PLATEAU']),
         session_id: zod_1.z.string(),
@@ -1183,7 +1183,7 @@ app.post('/api/attendance', authMiddleware, async (req, res) => {
     res.json({ ok: true });
 });
 // ---- Matches ----
-app.get('/api/matches', authMiddleware, async (req, res) => {
+app.get('/matches', authMiddleware, async (req, res) => {
     const { plateauId } = req.query;
     const where = plateauId ? { plateauId: String(plateauId) } : {};
     const matches = await prisma.match.findMany({
@@ -1193,7 +1193,7 @@ app.get('/api/matches', authMiddleware, async (req, res) => {
     });
     res.json(matches);
 });
-app.post('/api/matches', authMiddleware, async (req, res) => {
+app.post('/matches', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']),
         plateauId: zod_1.z.string().optional(),
@@ -1237,7 +1237,7 @@ app.post('/api/matches', authMiddleware, async (req, res) => {
     res.json(full);
 });
 // Update a match: score, opponentName, and (optionally) scorers (replace all)
-app.put('/api/matches/:id', authMiddleware, async (req, res) => {
+app.put('/matches/:id', authMiddleware, async (req, res) => {
     const matchId = req.params.id;
     const schema = zod_1.z.object({
         score: zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) }).optional(),
@@ -1275,12 +1275,12 @@ app.put('/api/matches/:id', authMiddleware, async (req, res) => {
         res.json(full);
     }
     catch (e) {
-        console.error('[PUT /api/matches/:id] failed', e);
+        console.error('[PUT /matches/:id] failed', e);
         return res.status(500).json({ error: 'Failed to update match' });
     }
 });
 // Delete a match (cascade delete teams, players, scorers)
-app.delete('/api/matches/:id', authMiddleware, async (req, res) => {
+app.delete('/matches/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
         const exists = await prisma.match.findUnique({ where: { id } });
@@ -1297,7 +1297,7 @@ app.delete('/api/matches/:id', authMiddleware, async (req, res) => {
         res.json({ ok: true });
     }
     catch (e) {
-        console.error('[DELETE /api/matches/:id] failed', e);
+        console.error('[DELETE /matches/:id] failed', e);
         return res.status(500).json({ error: 'Failed to delete match' });
     }
 });
@@ -1310,7 +1310,7 @@ function shuffle(arr) {
     }
     return a;
 }
-app.post('/api/schedule/generate', authMiddleware, async (req, res) => {
+app.post('/schedule/generate', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         teams: zod_1.z.array(zod_1.z.array(zod_1.z.string().min(1))).min(2),
         options: zod_1.z.object({ m: zod_1.z.number().int().min(1), allowRematch: zod_1.z.boolean().optional() }).optional()
@@ -1341,7 +1341,7 @@ app.post('/api/schedule/generate', authMiddleware, async (req, res) => {
     }
     res.json({ matches: pairs, teamCount: n });
 });
-app.post('/api/schedule/commit', authMiddleware, async (req, res) => {
+app.post('/schedule/commit', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         plateauId: zod_1.z.string().optional(),
         teams: zod_1.z.array(zod_1.z.array(zod_1.z.string().min(1))).min(2),
@@ -1381,7 +1381,7 @@ app.post('/api/schedule/commit', authMiddleware, async (req, res) => {
 });
 // ---- Training drills (exercices attachés à une séance) ----
 // Lister les exercices d'une séance (avec enrichissement à partir du catalogue DRILLS)
-app.get('/api/trainings/:id/drills', authMiddleware, async (req, res) => {
+app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
     const rows = await prisma.trainingDrill.findMany({
         where: { trainingId },
@@ -1395,7 +1395,7 @@ app.get('/api/trainings/:id/drills', authMiddleware, async (req, res) => {
     res.json(items);
 });
 // Ajouter un exercice à une séance
-app.post('/api/trainings/:id/drills', authMiddleware, async (req, res) => {
+app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
     const schema = zod_1.z.object({
         drillId: zod_1.z.string().min(1),
@@ -1418,7 +1418,7 @@ app.post('/api/trainings/:id/drills', authMiddleware, async (req, res) => {
     res.json({ ...row, meta });
 });
 // Modifier (notes/duration/order)
-app.put('/api/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, res) => {
+app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
     const trainingDrillId = req.params.trainingDrillId;
     const schema = zod_1.z.object({
@@ -1446,7 +1446,7 @@ app.put('/api/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req
     }
 });
 // Supprimer un exercice d'une séance
-app.delete('/api/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, res) => {
+app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, res) => {
     const trainingDrillId = req.params.trainingDrillId;
     try {
         await prisma.trainingDrill.delete({ where: { id: trainingDrillId } });
@@ -1457,23 +1457,23 @@ app.delete('/api/trainings/:id/drills/:trainingDrillId', authMiddleware, async (
     }
 });
 // ---- Diagrams (exercices) ----
-app.get('/api/drills/:id/diagrams', authMiddleware, async (req, res) => {
+app.get('/drills/:id/diagrams', authMiddleware, async (req, res) => {
     const drillId = req.params.id;
     const rows = await prisma.diagram.findMany({ where: { drillId }, orderBy: { updatedAt: 'desc' } });
     res.json(rows);
 });
-app.get('/api/training-drills/:id/diagrams', authMiddleware, async (req, res) => {
+app.get('/training-drills/:id/diagrams', authMiddleware, async (req, res) => {
     const trainingDrillId = req.params.id;
     const rows = await prisma.diagram.findMany({ where: { trainingDrillId }, orderBy: { updatedAt: 'desc' } });
     res.json(rows);
 });
-app.get('/api/diagrams/:id', authMiddleware, async (req, res) => {
+app.get('/diagrams/:id', authMiddleware, async (req, res) => {
     const d = await prisma.diagram.findUnique({ where: { id: req.params.id } });
     if (!d)
         return res.status(404).json({ error: 'Not found' });
     res.json(d);
 });
-app.post('/api/drills/:id/diagrams', authMiddleware, async (req, res) => {
+app.post('/drills/:id/diagrams', authMiddleware, async (req, res) => {
     const drillId = req.params.id;
     const schema = zod_1.z.object({
         title: zod_1.z.string().min(1).max(100),
@@ -1487,7 +1487,7 @@ app.post('/api/drills/:id/diagrams', authMiddleware, async (req, res) => {
     });
     res.json({ ...created, data: parsed.data.data });
 });
-app.post('/api/training-drills/:id/diagrams', authMiddleware, async (req, res) => {
+app.post('/training-drills/:id/diagrams', authMiddleware, async (req, res) => {
     const trainingDrillId = req.params.id;
     const schema = zod_1.z.object({
         title: zod_1.z.string().min(1).max(100),
@@ -1501,7 +1501,7 @@ app.post('/api/training-drills/:id/diagrams', authMiddleware, async (req, res) =
     });
     res.json({ ...created, data: parsed.data.data });
 });
-app.put('/api/diagrams/:id', authMiddleware, async (req, res) => {
+app.put('/diagrams/:id', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         title: zod_1.z.string().min(1).max(100).optional(),
         data: zod_1.z.any().optional()
@@ -1521,11 +1521,11 @@ app.put('/api/diagrams/:id', authMiddleware, async (req, res) => {
     catch (e) {
         if (e?.code === 'P2025')
             return res.status(404).json({ error: 'Not found' });
-        console.error('[PUT /api/diagrams/:id] failed', e);
+        console.error('[PUT /diagrams/:id] failed', e);
         return res.status(500).json({ error: 'Failed to update diagram' });
     }
 });
-app.delete('/api/diagrams/:id', authMiddleware, async (req, res) => {
+app.delete('/diagrams/:id', authMiddleware, async (req, res) => {
     try {
         await prisma.diagram.delete({ where: { id: req.params.id } });
         res.json({ ok: true });
@@ -1533,7 +1533,7 @@ app.delete('/api/diagrams/:id', authMiddleware, async (req, res) => {
     catch (e) {
         if (e?.code === 'P2025')
             return res.status(404).json({ error: 'Not found' });
-        console.error('[DELETE /api/diagrams/:id] failed', e);
+        console.error('[DELETE /diagrams/:id] failed', e);
         return res.status(500).json({ error: 'Failed to delete diagram' });
     }
 });
