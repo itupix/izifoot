@@ -485,8 +485,8 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 
 // ---- Players ----
-app.get('/players', authMiddleware, async (_req: any, res) => {
-  const players = await prisma.player.findMany({ orderBy: { name: 'asc' } })
+app.get('/players', authMiddleware, async (req: any, res) => {
+  const players = await prisma.player.findMany({ where: { userId: req.userId }, orderBy: { name: 'asc' } })
   res.json(players)
 })
 
@@ -501,6 +501,7 @@ app.post('/players', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const baseData: any = {
+    userId: req.userId,
     name: parsed.data.name,
     primary_position: parsed.data.primary_position,
     secondary_position: parsed.data.secondary_position
@@ -530,6 +531,8 @@ app.put('/players/:id', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { id } = req.params
+  const existing = await prisma.player.findFirst({ where: { id, userId: req.userId } })
+  if (!existing) return res.status(404).json({ error: 'Player not found' })
   const patch: any = {}
   if (parsed.data.name !== undefined) patch.name = parsed.data.name
   if (parsed.data.primary_position !== undefined) patch.primary_position = parsed.data.primary_position
@@ -538,13 +541,13 @@ app.put('/players/:id', authMiddleware, async (req: any, res) => {
   if ('phone' in parsed.data) patch.phone = parsed.data.phone ?? null
   let updated
   try {
-    updated = await prisma.player.update({ where: { id }, data: patch })
+    updated = await prisma.player.update({ where: { id: existing.id }, data: patch })
   } catch (e) {
     // Retry without email/phone if columns absent
     const fallback: any = { ...patch }
     delete fallback.email
     delete fallback.phone
-    updated = await prisma.player.update({ where: { id }, data: fallback })
+    updated = await prisma.player.update({ where: { id: existing.id }, data: fallback })
   }
   res.json(updated)
 })
@@ -556,13 +559,16 @@ function signPlayerInvite(playerId: string, plateauId?: string | null, email?: s
 function signRsvpToken(playerId: string, plateauId: string, status: 'present' | 'absent') {
   return jwt.sign({ aud: 'player_rsvp', pid: playerId, plid: plateauId, st: status }, JWT_SECRET, { expiresIn: '60d' })
 }
-function playerAuth(req: any, res: any, next: any) {
+async function playerAuth(req: any, res: any, next: any) {
   const token = req.cookies?.player_token || (req.headers['x-player-token'] as string | undefined)
   if (!token) return res.status(401).json({ error: 'Unauthorized' })
   try {
     const payload = jwt.verify(token, JWT_SECRET) as any
     if (payload?.aud !== 'player_invite' || !payload?.pid) return res.status(401).json({ error: 'Invalid token' })
+    const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } })
+    if (!player) return res.status(401).json({ error: 'Invalid token' })
     req.playerId = payload.pid
+    req.playerUserId = player.userId
     req.scopePlateauId = payload.plid || null
     next()
   } catch {
@@ -576,7 +582,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   const schema = z.object({ plateauId: z.string().optional(), email: z.string().email().optional() })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const player = await prisma.player.findUnique({ where: { id } })
+  const player = await prisma.player.findFirst({ where: { id, userId: req.userId } })
   if (!player) return res.status(404).json({ error: 'Player not found' })
   const base = `${req.protocol}://${req.get('host')}`
   const inviteEmail = parsed.data.email || (player as any).email || null
@@ -591,8 +597,8 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   // Mark player as convoked for this plateau
   try {
     await prisma.attendance.upsert({
-      where: { session_type_session_id_playerId: { session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id } },
-      create: { session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id },
+      where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id } },
+      create: { userId: req.userId, session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id },
       update: {},
     })
   } catch (e) {
@@ -666,10 +672,12 @@ app.get('/rsvp/p', async (req: any, res) => {
     if (payload?.aud !== 'player_rsvp' || payload?.st !== 'present' || !payload?.pid || !payload?.plid) {
       return res.redirect(302, redirectBase)
     }
+    const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } })
+    if (!player?.userId) return res.redirect(302, redirectBase)
     try {
       await prisma.attendance.upsert({
-        where: { session_type_session_id_playerId: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
-        create: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid, present: true } as any,
+        where: { userId_session_type_session_id_playerId: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
+        create: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid, present: true } as any,
         update: { present: true } as any,
       })
     } catch (e) {
@@ -677,12 +685,12 @@ app.get('/rsvp/p', async (req: any, res) => {
       try {
         // Mark present by ensuring a PLATEAU row exists
         await prisma.attendance.upsert({
-          where: { session_type_session_id_playerId: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
-          create: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid },
+          where: { userId_session_type_session_id_playerId: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
+          create: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid },
           update: {},
         })
         // Remove any absence marker
-        await prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU_ABSENT', session_id: payload.plid, playerId: payload.pid } })
+        await prisma.attendance.deleteMany({ where: { userId: player.userId, session_type: 'PLATEAU_ABSENT', session_id: payload.plid, playerId: payload.pid } })
       } catch (e2) {
         // Ignore, always redirect anyway
       }
@@ -702,16 +710,20 @@ app.get('/rsvp/a', async (req: any, res) => {
     if (payload?.aud !== 'player_rsvp' || payload?.st !== 'absent' || !payload?.pid || !payload?.plid) {
       return res.redirect(302, redirectBase)
     }
+    const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } })
+    if (!player?.userId) return res.redirect(302, redirectBase)
     try {
       await prisma.attendance.upsert({
         where: {
-          session_type_session_id_playerId: {
+          userId_session_type_session_id_playerId: {
+            userId: player.userId,
             session_type: 'PLATEAU',
             session_id: payload.plid,
             playerId: payload.pid,
           },
         },
         create: {
+          userId: player.userId,
           session_type: 'PLATEAU',
           session_id: payload.plid,
           playerId: payload.pid,
@@ -725,17 +737,19 @@ app.get('/rsvp/a', async (req: any, res) => {
       // Fallback when `present` column doesn't exist: mark absence with a dedicated row
       try {
         // Remove any present marker for old schema
-        await prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } })
+        await prisma.attendance.deleteMany({ where: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } })
         // Upsert an ABSENT marker
         await prisma.attendance.upsert({
           where: {
-            session_type_session_id_playerId: {
+            userId_session_type_session_id_playerId: {
+              userId: player.userId,
               session_type: 'PLATEAU_ABSENT',
               session_id: payload.plid,
               playerId: payload.pid,
             },
           },
           create: {
+            userId: player.userId,
             session_type: 'PLATEAU_ABSENT',
             session_id: payload.plid,
             playerId: payload.pid,
@@ -758,7 +772,7 @@ app.get('/player/debug', (req: any, res) => {
 })
 // --- Scoped player endpoints ---
 app.get('/player/me', playerAuth, async (req: any, res) => {
-  const p = await prisma.player.findUnique({ where: { id: req.playerId } })
+  const p = await prisma.player.findFirst({ where: { id: req.playerId, userId: req.playerUserId } })
   if (!p) return res.status(404).json({ error: 'Player not found' })
   res.json({ id: p.id, name: (p as any).name || '', email: (p as any).email || null, phone: (p as any).phone || null })
 })
@@ -766,7 +780,7 @@ app.get('/player/me', playerAuth, async (req: any, res) => {
 app.get('/player/plateaus', playerAuth, async (req: any, res) => {
   const playerId = req.playerId as string
   // Plateaus via attendance
-  const att = await prisma.attendance.findMany({ where: { session_type: 'PLATEAU', playerId }, select: { session_id: true } })
+  const att = await prisma.attendance.findMany({ where: { userId: req.playerUserId, session_type: 'PLATEAU', playerId }, select: { session_id: true } })
   const plateauIdsFromAttendance = Array.from(new Set(att.map(a => a.session_id)))
 
   // Plateaus via match participation
@@ -777,7 +791,7 @@ app.get('/player/plateaus', playerAuth, async (req: any, res) => {
     const teams = await prisma.matchTeam.findMany({ where: { id: { in: teamIds } }, select: { matchId: true } })
     const matchIds = teams.map(t => t.matchId)
     if (matchIds.length) {
-      const matches = await prisma.match.findMany({ where: { id: { in: matchIds } }, select: { plateauId: true } })
+      const matches = await prisma.match.findMany({ where: { userId: req.playerUserId, id: { in: matchIds } }, select: { plateauId: true } })
       plateauIdsFromMatches = matches.map(m => m.plateauId!).filter(Boolean) as string[]
     }
   }
@@ -785,7 +799,7 @@ app.get('/player/plateaus', playerAuth, async (req: any, res) => {
   const set = new Set<string>([...plateauIdsFromAttendance, ...plateauIdsFromMatches])
   const ids = Array.from(set)
   if (!ids.length) return res.json([])
-  const plateaus = await prisma.plateau.findMany({ where: { id: { in: ids } }, orderBy: { date: 'desc' } })
+  const plateaus = await prisma.plateau.findMany({ where: { userId: req.playerUserId, id: { in: ids } }, orderBy: { date: 'desc' } })
   res.json(plateaus)
 })
 
@@ -796,7 +810,7 @@ app.get('/player/plateaus/:id/summary', playerAuth, async (req: any, res) => {
 
   // Reuse the same build as /plateaus/:id/summary
   const ctxRes: any = {}
-  const fakeReq: any = { params: { id: plateauId } }
+  const fakeReq: any = { params: { id: plateauId }, userId: req.playerUserId }
   const fakeRes: any = {
     statusCode: 200,
     _json: null,
@@ -823,14 +837,14 @@ app.delete('/players/:id', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {
     // Ensure the player exists first
-    const exists = await prisma.player.findUnique({ where: { id } })
+    const exists = await prisma.player.findFirst({ where: { id, userId: req.userId } })
     if (!exists) return res.status(404).json({ error: 'Player not found' })
 
     await prisma.$transaction([
       prisma.scorer.deleteMany({ where: { playerId: id } }),
       prisma.matchTeamPlayer.deleteMany({ where: { playerId: id } }),
-      prisma.attendance.deleteMany({ where: { playerId: id } }),
-      prisma.player.delete({ where: { id } })
+      prisma.attendance.deleteMany({ where: { userId: req.userId, playerId: id } }),
+      prisma.player.delete({ where: { id: exists.id } })
     ])
     res.json({ ok: true })
   } catch (e: any) {
@@ -841,8 +855,8 @@ app.delete('/players/:id', authMiddleware, async (req: any, res) => {
 })
 
 // ---- Trainings ----
-app.get('/trainings', authMiddleware, async (_req: any, res) => {
-  const trainings = await prisma.training.findMany({ orderBy: { date: 'desc' } })
+app.get('/trainings', authMiddleware, async (req: any, res) => {
+  const trainings = await prisma.training.findMany({ where: { userId: req.userId }, orderBy: { date: 'desc' } })
   res.json(trainings)
 })
 
@@ -850,7 +864,7 @@ app.get('/trainings', authMiddleware, async (_req: any, res) => {
 app.get('/trainings/:id', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {
-    const training = await prisma.training.findUnique({ where: { id } })
+    const training = await prisma.training.findFirst({ where: { id, userId: req.userId } })
     if (!training) return res.status(404).json({ error: 'Training not found' })
     res.json(training)
   } catch (e: any) {
@@ -865,7 +879,7 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const date = new Date(parsed.data.date as any)
-  const t = await prisma.training.create({ data: { date } })
+  const t = await prisma.training.create({ data: { userId: req.userId, date } })
   res.json(t)
 })
 
@@ -883,7 +897,9 @@ app.put('/trainings/:id', authMiddleware, async (req: any, res) => {
   if (parsed.data.status !== undefined) data.status = parsed.data.status
 
   try {
-    const updated = await prisma.training.update({ where: { id: req.params.id }, data })
+    const existing = await prisma.training.findFirst({ where: { id: req.params.id, userId: req.userId } })
+    if (!existing) return res.status(404).json({ error: 'Training not found' })
+    const updated = await prisma.training.update({ where: { id: existing.id }, data })
     res.json(updated)
   } catch (e: any) {
     if (e?.code === 'P2025') {
@@ -898,10 +914,12 @@ app.put('/trainings/:id', authMiddleware, async (req: any, res) => {
 app.delete('/trainings/:id', authMiddleware, async (req: any, res) => {
   const id = req.params.id
   try {
+    const existing = await prisma.training.findFirst({ where: { id, userId: req.userId } })
+    if (!existing) return res.status(404).json({ error: 'Training not found' })
     await prisma.$transaction([
-      prisma.attendance.deleteMany({ where: { session_type: 'TRAINING', session_id: id } }),
-      prisma.trainingDrill.deleteMany({ where: { trainingId: id } }),
-      prisma.training.delete({ where: { id } })
+      prisma.attendance.deleteMany({ where: { userId: req.userId, session_type: 'TRAINING', session_id: id } }),
+      prisma.trainingDrill.deleteMany({ where: { userId: req.userId, trainingId: id } }),
+      prisma.training.delete({ where: { id: existing.id } })
     ])
     res.json({ ok: true })
   } catch (e: any) {
@@ -914,8 +932,8 @@ app.delete('/trainings/:id', authMiddleware, async (req: any, res) => {
 })
 
 // ---- Plateaus ----
-app.get('/plateaus', authMiddleware, async (_req: any, res) => {
-  const plateaus = await prisma.plateau.findMany({ orderBy: { date: 'desc' } })
+app.get('/plateaus', authMiddleware, async (req: any, res) => {
+  const plateaus = await prisma.plateau.findMany({ where: { userId: req.userId }, orderBy: { date: 'desc' } })
   res.json(plateaus)
 })
 
@@ -925,7 +943,7 @@ app.post('/plateaus', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const date = new Date(parsed.data.date as any)
-  const pl = await prisma.plateau.create({ data: { date, lieu: parsed.data.lieu } })
+  const pl = await prisma.plateau.create({ data: { userId: req.userId, date, lieu: parsed.data.lieu } })
   res.json(pl)
 })
 
@@ -933,11 +951,11 @@ app.delete('/plateaus/:id', authMiddleware, async (req: any, res) => {
   const id = req.params.id
   try {
     // Ensure plateau exists
-    const exists = await prisma.plateau.findUnique({ where: { id } })
+    const exists = await prisma.plateau.findFirst({ where: { id, userId: req.userId } })
     if (!exists) return res.status(404).json({ error: 'Plateau not found' })
 
     // Collect related matches and teams
-    const matches = await prisma.match.findMany({ where: { plateauId: id }, include: { teams: true } })
+    const matches = await prisma.match.findMany({ where: { userId: req.userId, plateauId: id }, include: { teams: true } })
     const matchIds = matches.map(m => m.id)
     const teamIds = matches.flatMap(m => m.teams.map(t => t.id))
 
@@ -946,8 +964,8 @@ app.delete('/plateaus/:id', authMiddleware, async (req: any, res) => {
       prisma.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: teamIds } } }),
       prisma.matchTeam.deleteMany({ where: { matchId: { in: matchIds } } }),
       prisma.match.deleteMany({ where: { id: { in: matchIds } } }),
-      prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU', session_id: id } }),
-      prisma.plateau.delete({ where: { id } })
+      prisma.attendance.deleteMany({ where: { userId: req.userId, session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] as any }, session_id: id } }),
+      prisma.plateau.delete({ where: { id: exists.id } })
     ])
 
     res.json({ ok: true })
@@ -962,7 +980,7 @@ app.delete('/plateaus/:id', authMiddleware, async (req: any, res) => {
 app.get('/plateaus/:id', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {
-    const plateau = await prisma.plateau.findUnique({ where: { id } })
+    const plateau = await prisma.plateau.findFirst({ where: { id, userId: req.userId } })
     if (!plateau) return res.status(404).json({ error: 'Plateau not found' })
     res.json(plateau)
   } catch (e) {
@@ -975,12 +993,13 @@ app.get('/plateaus/:id', authMiddleware, async (req: any, res) => {
 app.get('/plateaus/:id/summary', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {
-    const plateau = await prisma.plateau.findUnique({ where: { id } })
+    const plateau = await prisma.plateau.findFirst({ where: { id, userId: req.userId } })
     if (!plateau) return res.status(404).json({ error: 'Plateau not found' })
 
     // Attendance (present/absent records) for this plateau, include player info
     const attendance = await prisma.attendance.findMany({
       where: {
+        userId: req.userId,
         session_id: id,
         session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] as any },
       },
@@ -1002,7 +1021,7 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req: any, res) => {
 
     // Matches for this plateau (with teams and scorers first)
     const matchesRaw = await prisma.match.findMany({
-      where: { plateauId: id },
+      where: { userId: req.userId, plateauId: id },
       include: {
         teams: true,
         scorers: true
@@ -1060,7 +1079,7 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req: any, res) => {
     }
     // Ensure we know all players (for listing). We do not auto-mark as convoked.
     try {
-      const allPlayers = await prisma.player.findMany({ orderBy: { name: 'asc' } })
+      const allPlayers = await prisma.player.findMany({ where: { userId: req.userId }, orderBy: { name: 'asc' } })
       for (const pl of allPlayers) {
         if (!playersById[pl.id]) {
           playersById[pl.id] = {
@@ -1127,7 +1146,7 @@ app.get('/attendance', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.query)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { session_type, session_id } = parsed.data
-  const where: any = {}
+  const where: any = { userId: req.userId }
   if (session_type) where.session_type = session_type
   if (session_id) where.session_id = session_id
   const rows = await prisma.attendance.findMany({ where })
@@ -1145,20 +1164,20 @@ app.post('/attendance', authMiddleware, async (req: any, res) => {
   const { session_type, session_id, playerId, present } = parsed.data
   try {
     await prisma.attendance.upsert({
-      where: { session_type_session_id_playerId: { session_type, session_id, playerId } },
-      create: { session_type, session_id, playerId, present } as any,
+      where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type, session_id, playerId } },
+      create: { userId: req.userId, session_type, session_id, playerId, present } as any,
       update: { present } as any
     })
   } catch (e) {
     // Fallback if `present` column doesn't exist
     if (present) {
       await prisma.attendance.upsert({
-        where: { session_type_session_id_playerId: { session_type, session_id, playerId } },
-        create: { session_type, session_id, playerId },
+        where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type, session_id, playerId } },
+        create: { userId: req.userId, session_type, session_id, playerId },
         update: {}
       })
     } else {
-      await prisma.attendance.deleteMany({ where: { session_type, session_id, playerId } })
+      await prisma.attendance.deleteMany({ where: { userId: req.userId, session_type, session_id, playerId } })
     }
   }
   res.json({ ok: true })
@@ -1167,7 +1186,7 @@ app.post('/attendance', authMiddleware, async (req: any, res) => {
 // ---- Matches ----
 app.get('/matches', authMiddleware, async (req: any, res) => {
   const { plateauId } = req.query as { plateauId?: string }
-  const where = plateauId ? { plateauId: String(plateauId) } : {}
+  const where = plateauId ? { userId: req.userId, plateauId: String(plateauId) } : { userId: req.userId }
   const matches = await prisma.match.findMany({
     where,
     include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
@@ -1198,7 +1217,12 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { type, plateauId, sides, score, buteurs, opponentName } = parsed.data
 
-  const match = await prisma.match.create({ data: { type, plateauId, opponentName } })
+  if (plateauId) {
+    const ownedPlateau = await prisma.plateau.findFirst({ where: { id: plateauId, userId: req.userId } })
+    if (!ownedPlateau) return res.status(404).json({ error: 'Plateau not found' })
+  }
+
+  const match = await prisma.match.create({ data: { userId: req.userId, type, plateauId, opponentName } })
   const home = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'home', score: score?.home ?? 0 } })
   const away = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'away', score: score?.away ?? 0 } })
 
@@ -1238,12 +1262,12 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
 
   try {
     // ensure exists
-    const exists = await prisma.match.findUnique({ where: { id: matchId } })
+    const exists = await prisma.match.findFirst({ where: { id: matchId, userId: req.userId } })
     if (!exists) return res.status(404).json({ error: 'Match not found' })
 
     // update fields
     if (parsed.data.opponentName !== undefined) {
-      await prisma.match.update({ where: { id: matchId }, data: { opponentName: parsed.data.opponentName } })
+      await prisma.match.update({ where: { id: exists.id }, data: { opponentName: parsed.data.opponentName } })
     }
     if (parsed.data.score) {
       await prisma.$transaction([
@@ -1258,8 +1282,8 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
       ])
     }
 
-    const full = await prisma.match.findUnique({
-      where: { id: matchId },
+    const full = await prisma.match.findFirst({
+      where: { id: matchId, userId: req.userId },
       include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
     })
     res.json(full)
@@ -1273,7 +1297,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
 app.delete('/matches/:id', authMiddleware, async (req: any, res) => {
   const id = req.params.id
   try {
-    const exists = await prisma.match.findUnique({ where: { id } })
+    const exists = await prisma.match.findFirst({ where: { id, userId: req.userId } })
     if (!exists) return res.status(404).json({ error: 'Match not found' })
 
     const teams = await prisma.matchTeam.findMany({ where: { matchId: id } })
@@ -1283,7 +1307,7 @@ app.delete('/matches/:id', authMiddleware, async (req: any, res) => {
       prisma.scorer.deleteMany({ where: { matchId: id } }),
       prisma.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: teamIds } } }),
       prisma.matchTeam.deleteMany({ where: { matchId: id } }),
-      prisma.match.delete({ where: { id } })
+      prisma.match.delete({ where: { id: exists.id } })
     ])
 
     res.json({ ok: true })
@@ -1345,11 +1369,15 @@ app.post('/schedule/commit', authMiddleware, async (req: any, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { plateauId, teams, schedule, defaults } = parsed.data
   const startersPerTeam = defaults?.startersPerTeam ?? 5
+  if (plateauId) {
+    const ownedPlateau = await prisma.plateau.findFirst({ where: { id: plateauId, userId: req.userId } })
+    if (!ownedPlateau) return res.status(404).json({ error: 'Plateau not found' })
+  }
 
   const createdIds = await prisma.$transaction(async (db) => {
     const ids: string[] = []
     for (const m of schedule.matches) {
-      const match = await db.match.create({ data: { type: plateauId ? 'PLATEAU' : 'ENTRAINEMENT', plateauId } })
+      const match = await db.match.create({ data: { userId: req.userId, type: plateauId ? 'PLATEAU' : 'ENTRAINEMENT', plateauId } })
       const home = await db.matchTeam.create({ data: { matchId: match.id, side: 'home', score: 0 } })
       const away = await db.matchTeam.create({ data: { matchId: match.id, side: 'away', score: 0 } })
 
@@ -1372,7 +1400,7 @@ app.post('/schedule/commit', authMiddleware, async (req: any, res) => {
   })
 
   const matches = await prisma.match.findMany({
-    where: { id: { in: createdIds } },
+    where: { userId: req.userId, id: { in: createdIds } },
     include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
   })
 
@@ -1384,8 +1412,10 @@ app.post('/schedule/commit', authMiddleware, async (req: any, res) => {
 // Lister les exercices d'une séance (avec enrichissement à partir du catalogue DRILLS)
 app.get('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   const trainingId = req.params.id
+  const training = await prisma.training.findFirst({ where: { id: trainingId, userId: req.userId } })
+  if (!training) return res.status(404).json({ error: 'Training not found' })
   const rows = await prisma.trainingDrill.findMany({
-    where: { trainingId },
+    where: { userId: req.userId, trainingId },
     orderBy: { order: 'asc' },
   })
   const catalog = (DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)
@@ -1399,6 +1429,8 @@ app.get('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
 // Ajouter un exercice à une séance
 app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   const trainingId = req.params.id
+  const training = await prisma.training.findFirst({ where: { id: trainingId, userId: req.userId } })
+  if (!training) return res.status(404).json({ error: 'Training not found' })
   const schema = z.object({
     drillId: z.string().min(1),
     duration: z.number().int().min(1).max(120).optional(),
@@ -1409,13 +1441,13 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
 
   // order auto-incrémental simple
   const max = await prisma.trainingDrill.aggregate({
-    where: { trainingId },
+    where: { userId: req.userId, trainingId },
     _max: { order: true }
   })
   const nextOrder = (max._max.order ?? -1) + 1
 
   const row = await prisma.trainingDrill.create({
-    data: { trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder }
+    data: { userId: req.userId, trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder }
   })
   const meta = ((DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)).find(d => d.id === row.drillId) || null
   res.json({ ...row, meta })
@@ -1425,6 +1457,8 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
 app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: any, res) => {
   const trainingId = req.params.id
   const trainingDrillId = req.params.trainingDrillId
+  const existing = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, trainingId, userId: req.userId } })
+  if (!existing) return res.status(404).json({ error: 'Not found' })
   const schema = z.object({
     duration: z.number().int().min(1).max(120).nullable().optional(),
     notes: z.string().max(1000).nullable().optional(),
@@ -1435,7 +1469,7 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: an
 
   try {
     const updated = await prisma.trainingDrill.update({
-      where: { id: trainingDrillId },
+      where: { id: existing.id },
       data: {
         ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration ?? null } : {}),
         ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes ?? null } : {}),
@@ -1451,9 +1485,12 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: an
 
 // Supprimer un exercice d'une séance
 app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: any, res) => {
+  const trainingId = req.params.id
   const trainingDrillId = req.params.trainingDrillId
   try {
-    await prisma.trainingDrill.delete({ where: { id: trainingDrillId } })
+    const existing = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, trainingId, userId: req.userId } })
+    if (!existing) return res.status(404).json({ error: 'Not found' })
+    await prisma.trainingDrill.delete({ where: { id: existing.id } })
     res.json({ ok: true })
   } catch {
     res.status(404).json({ error: 'Not found' })
@@ -1463,18 +1500,18 @@ app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req:
 // ---- Diagrams (exercices) ----
 app.get('/drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const drillId = req.params.id
-  const rows = await prisma.diagram.findMany({ where: { drillId }, orderBy: { updatedAt: 'desc' } })
+  const rows = await prisma.diagram.findMany({ where: { userId: req.userId, drillId }, orderBy: { updatedAt: 'desc' } })
   res.json(rows)
 })
 
 app.get('/training-drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const trainingDrillId = req.params.id
-  const rows = await prisma.diagram.findMany({ where: { trainingDrillId }, orderBy: { updatedAt: 'desc' } })
+  const rows = await prisma.diagram.findMany({ where: { userId: req.userId, trainingDrillId }, orderBy: { updatedAt: 'desc' } })
   res.json(rows)
 })
 
 app.get('/diagrams/:id', authMiddleware, async (req: any, res) => {
-  const d = await prisma.diagram.findUnique({ where: { id: req.params.id } })
+  const d = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } })
   if (!d) return res.status(404).json({ error: 'Not found' })
   res.json(d)
 })
@@ -1488,13 +1525,15 @@ app.post('/drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const created = await prisma.diagram.create({
-    data: { drillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
+    data: { userId: req.userId, drillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
   })
   res.json({ ...created, data: parsed.data.data })
 })
 
 app.post('/training-drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const trainingDrillId = req.params.id
+  const trainingDrill = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, userId: req.userId } })
+  if (!trainingDrill) return res.status(404).json({ error: 'Training drill not found' })
   const schema = z.object({
     title: z.string().min(1).max(100),
     data: z.any()
@@ -1502,7 +1541,7 @@ app.post('/training-drills/:id/diagrams', authMiddleware, async (req: any, res) 
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const created = await prisma.diagram.create({
-    data: { trainingDrillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
+    data: { userId: req.userId, trainingDrillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
   })
   res.json({ ...created, data: parsed.data.data })
 })
@@ -1520,7 +1559,9 @@ app.put('/diagrams/:id', authMiddleware, async (req: any, res) => {
   if (parsed.data.data !== undefined) patch.data = JSON.stringify(parsed.data.data)
 
   try {
-    const updated = await prisma.diagram.update({ where: { id: req.params.id }, data: patch })
+    const existing = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } })
+    if (!existing) return res.status(404).json({ error: 'Not found' })
+    const updated = await prisma.diagram.update({ where: { id: existing.id }, data: patch })
     res.json({ ...updated, data: parsed.data.data ?? JSON.parse(updated.data) })
   } catch (e: any) {
     if (e?.code === 'P2025') return res.status(404).json({ error: 'Not found' })
@@ -1531,7 +1572,9 @@ app.put('/diagrams/:id', authMiddleware, async (req: any, res) => {
 
 app.delete('/diagrams/:id', authMiddleware, async (req: any, res) => {
   try {
-    await prisma.diagram.delete({ where: { id: req.params.id } })
+    const existing = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } })
+    if (!existing) return res.status(404).json({ error: 'Not found' })
+    await prisma.diagram.delete({ where: { id: existing.id } })
     res.json({ ok: true })
   } catch (e: any) {
     if (e?.code === 'P2025') return res.status(404).json({ error: 'Not found' })
