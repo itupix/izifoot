@@ -14,6 +14,13 @@ model User {
   isPremium    Boolean    @default(false)
   createdAt    DateTime   @default(now())
   plannings    Planning[]
+  players      Player[]
+  trainings    Training[]
+  plateaus     Plateau[]
+  attendance   Attendance[]
+  matches      Match[]
+  trainingDrills TrainingDrill[]
+  diagrams     Diagram[]
 }
 
 model Planning {
@@ -42,6 +49,8 @@ model ShareToken {
 
 model Player {
   id                 String            @id @default(cuid())
+  userId             String?
+  user               User?             @relation(fields: [userId], references: [id])
   name               String
   primary_position   String
   secondary_position String?
@@ -50,12 +59,16 @@ model Player {
   scorers            Scorer[]
   Attendance         Attendance[]
   MatchTeamPlayer    MatchTeamPlayer[]
-  email              String?           @unique
+  email              String?
   phone              String?
+
+  @@unique([userId, email])
 }
 
 model Training {
   id            String          @id @default(cuid())
+  userId        String?
+  user          User?           @relation(fields: [userId], references: [id])
   date          DateTime
   status        String          @default("PLANNED") // <= DOIT être là
   attendance    Attendance[]
@@ -66,6 +79,8 @@ model Training {
 
 model Plateau {
   id         String       @id @default(cuid())
+  userId     String?
+  user       User?        @relation(fields: [userId], references: [id])
   date       DateTime
   lieu       String
   matches    Match[]
@@ -76,6 +91,8 @@ model Plateau {
 
 model Attendance {
   id           String    @id @default(cuid())
+  userId       String?
+  user         User?     @relation(fields: [userId], references: [id])
   session_type String
   session_id   String
   player       Player    @relation(fields: [playerId], references: [id])
@@ -85,11 +102,13 @@ model Attendance {
   Plateau      Plateau?  @relation(fields: [plateauId], references: [id])
   plateauId    String?
 
-  @@unique([session_type, session_id, playerId])
+  @@unique([userId, session_type, session_id, playerId])
 }
 
 model Match {
   id           String      @id @default(cuid())
+  userId       String?
+  user         User?       @relation(fields: [userId], references: [id])
   type         String
   plateau      Plateau?    @relation(fields: [plateauId], references: [id])
   plateauId    String?
@@ -133,6 +152,8 @@ model MatchTeamPlayer {
 
 model TrainingDrill {
   id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
   training   Training @relation(fields: [trainingId], references: [id])
   trainingId String
   drillId    String // id d'un drill du catalogue en mémoire
@@ -141,10 +162,13 @@ model TrainingDrill {
   notes      String?
 
   @@index([trainingId])
+  @@index([userId, trainingId])
 }
 
 model Diagram {
   id              String   @id @default(cuid())
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id])
   title           String
   data            String // JSON string décrivant le dessin
   drillId         String? // id d'un DRILL du catalogue en mémoire
@@ -154,4 +178,6 @@ model Diagram {
 
   @@index([drillId])
   @@index([trainingDrillId])
+  @@index([userId, drillId])
+  @@index([userId, trainingDrillId])
 }
