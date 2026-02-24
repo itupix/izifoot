@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "build": "tsc -p .",
-    "start": "node dist/server.js",
+    "build": "prisma generate && tsc -p .",
+    "start": "prisma db push && node dist/server.js",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio"
   },

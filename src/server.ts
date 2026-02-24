@@ -19,6 +19,10 @@ const PORT = process.env.PORT || 4000
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret'
 const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5173'
 const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`
+const AUTH_COOKIE_NAME = 'token'
+
+// Railway/Reverse proxy support so secure cookies can be set correctly.
+app.set('trust proxy', 1)
 
 app.use(helmet())
 app.use(cors({
@@ -56,20 +60,32 @@ app.use((req, res, next) => {
 })
 
 // --- Cookie helper for robust cross-site cookie options ---
-function cookieOptsFor(req: any) {
-  try {
-    const appUrl = new URL(APP_BASE_URL)
-    const sameSiteOK = (appUrl.hostname === req.hostname) && (appUrl.protocol.replace(':', '') === req.protocol)
-    const isProd = process.env.NODE_ENV === 'production'
-    // If same-site (dev localhost usually), Lax works and allows XHR with credentials
-    if (sameSiteOK) {
-      return { httpOnly: true, sameSite: 'lax' as const, secure: isProd, maxAge: 30 * 24 * 3600 * 1000 }
-    }
-    // Cross-site: must be SameSite=None; Secure
-    return { httpOnly: true, sameSite: 'none' as const, secure: true, maxAge: 30 * 24 * 3600 * 1000 }
-  } catch {
-    // Fallback to lax
-    return { httpOnly: true, sameSite: 'lax' as const, secure: process.env.NODE_ENV === 'production', maxAge: 30 * 24 * 3600 * 1000 }
+function authCookieOpts() {
+  const isProd = process.env.NODE_ENV === 'production'
+  const sameSite: 'lax' | 'none' = isProd ? 'none' : 'lax'
+  return {
+    httpOnly: true,
+    sameSite,
+    secure: isProd,
+    path: '/',
+    maxAge: 7 * 24 * 3600 * 1000
+  }
+}
+
+function authClearCookieOpts() {
+  const { maxAge, ...opts } = authCookieOpts()
+  return opts
+}
+
+function playerCookieOpts() {
+  const isProd = process.env.NODE_ENV === 'production'
+  const sameSite: 'lax' | 'none' = isProd ? 'none' : 'lax'
+  return {
+    httpOnly: true,
+    sameSite,
+    secure: isProd,
+    path: '/',
+    maxAge: 30 * 24 * 3600 * 1000
   }
 }
 
@@ -149,7 +165,7 @@ app.post('/api/auth/register', async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10)
   const user = await prisma.user.create({ data: { email, passwordHash } })
   const token = signToken(user.id)
-  res.cookie('token', token, { httpOnly: true, sameSite: 'lax', secure: false, maxAge: 7 * 24 * 3600 * 1000 })
+  res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts())
   res.json({ id: user.id, email: user.email, isPremium: user.isPremium })
 })
 
@@ -163,12 +179,12 @@ app.post('/api/auth/login', async (req, res) => {
   const ok = await bcrypt.compare(password, user.passwordHash)
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' })
   const token = signToken(user.id)
-  res.cookie('token', token, { httpOnly: true, sameSite: 'lax', secure: false, maxAge: 7 * 24 * 3600 * 1000 })
+  res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts())
   res.json({ id: user.id, email: user.email, isPremium: user.isPremium })
 })
 
 app.post('/api/auth/logout', (req, res) => {
-  res.clearCookie('token')
+  res.clearCookie(AUTH_COOKIE_NAME, authClearCookieOpts())
   res.json({ ok: true })
 })
 
@@ -590,7 +606,7 @@ app.get('/player/accept', async (req: any, res) => {
   try {
     const payload = jwt.verify(token, JWT_SECRET) as any
     if (payload?.aud !== 'player_invite' || !payload?.pid) return res.status(400).json({ error: 'Invalid token' })
-    res.cookie('player_token', token, cookieOptsFor(req))
+    res.cookie('player_token', token, playerCookieOpts())
     const r = (req.query.r as string | undefined)
     const redirectTo = (r && r.startsWith(APP_BASE_URL)) ? r : undefined
     res.json({ ok: true, redirectTo })
@@ -609,7 +625,7 @@ app.get('/player/login', async (req: any, res) => {
   try {
     const payload = jwt.verify(token, JWT_SECRET) as any
     if (payload?.aud !== 'player_invite' || !payload?.pid) return res.redirect(302, redirectTo)
-    res.cookie('player_token', token, cookieOptsFor(req))
+    res.cookie('player_token', token, playerCookieOpts())
     // If token is scoped to a plateau, send the user straight to that MatchDay
     if (payload?.plid) {
       const dest = `${APP_BASE_URL}/match-day/${payload.plid}`
@@ -809,6 +825,19 @@ app.delete('/api/players/:id', authMiddleware, async (req: any, res) => {
 app.get('/api/trainings', authMiddleware, async (_req: any, res) => {
   const trainings = await prisma.training.findMany({ orderBy: { date: 'desc' } })
   res.json(trainings)
+})
+
+// Get single training
+app.get('/api/trainings/:id', authMiddleware, async (req: any, res) => {
+  const { id } = req.params
+  try {
+    const training = await prisma.training.findUnique({ where: { id } })
+    if (!training) return res.status(404).json({ error: 'Training not found' })
+    res.json(training)
+  } catch (e: any) {
+    console.error('[GET /api/trainings/:id] failed', e)
+    return res.status(500).json({ error: 'Failed to fetch training' })
+  }
 })
 
 
