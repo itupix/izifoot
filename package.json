@@ -7,7 +7,8 @@
     "build": "prisma generate && tsc -p .",
     "start": "prisma db push && node dist/server.js",
     "prisma:push": "prisma db push",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "migrate:sqlite-to-postgres": "node scripts/migrate-sqlite-to-postgres.mjs"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
@@ -15,6 +16,7 @@
   "dependencies": {
     "@prisma/client": "^5.19.1",
     "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.7.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
     "date-fns": "^3.6.0",
@@ -25,6 +27,7 @@
     "morgan": "^1.10.0",
     "nanoid": "^5.0.7",
     "nodemailer": "^6.9.13",
+    "pg": "^8.13.3",
     "qrcode": "^1.5.3",
     "zod": "^3.23.8"
   },
