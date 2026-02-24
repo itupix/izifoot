@@ -8,7 +8,8 @@
     "start": "prisma db push && node dist/server.js",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",
-    "migrate:sqlite-to-postgres": "node scripts/migrate-sqlite-to-postgres.mjs"
+    "migrate:sqlite-to-postgres": "node scripts/migrate-sqlite-to-postgres.mjs",
+    "backfill:user-ownership": "node scripts/backfill-user-ownership.mjs"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
