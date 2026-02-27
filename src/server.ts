@@ -296,6 +296,15 @@ function withDefaultTrainingStatus<T extends Record<string, any>>(row: T): T & {
   return { ...row, status: row?.status ?? 'PLANNED' }
 }
 
+function legacyTrainingSelect() {
+  return {
+    id: true,
+    date: true,
+    createdAt: true,
+    updatedAt: true,
+  }
+}
+
 async function trainingFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
   try {
     const rows = await db.training.findMany({
@@ -304,8 +313,11 @@ async function trainingFindManyForUser(db: any, userId: string, args: any = {}):
     })
     return rows.map(withDefaultTrainingStatus)
   } catch (error) {
-    if (!isMissingModelColumn(error, 'Training', 'userId')) throw error
-    const rows = await db.training.findMany(args)
+    if (!isMissingModelColumn(error, 'Training', 'userId') && !isMissingModelColumn(error, 'Training', 'status')) throw error
+    const rows = await db.training.findMany({
+      ...args,
+      select: legacyTrainingSelect(),
+    })
     return rows.map(withDefaultTrainingStatus)
   }
 }
@@ -318,8 +330,11 @@ async function trainingFindFirstForUser(db: any, userId: string, args: any = {})
     })
     return row ? withDefaultTrainingStatus(row) : row
   } catch (error) {
-    if (!isMissingModelColumn(error, 'Training', 'userId')) throw error
-    const row = await db.training.findFirst(args)
+    if (!isMissingModelColumn(error, 'Training', 'userId') && !isMissingModelColumn(error, 'Training', 'status')) throw error
+    const row = await db.training.findFirst({
+      ...args,
+      select: legacyTrainingSelect(),
+    })
     return row ? withDefaultTrainingStatus(row) : row
   }
 }
@@ -361,7 +376,16 @@ async function plateauFindManyForUser(db: any, userId: string, args: any = {}): 
     })
   } catch (error) {
     if (!isMissingModelColumn(error, 'Plateau', 'userId')) throw error
-    return db.plateau.findMany(args)
+    return db.plateau.findMany({
+      ...args,
+      select: {
+        id: true,
+        date: true,
+        lieu: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    })
   }
 }
 
@@ -373,7 +397,16 @@ async function plateauFindFirstForUser(db: any, userId: string, args: any = {}):
     })
   } catch (error) {
     if (!isMissingModelColumn(error, 'Plateau', 'userId')) throw error
-    return db.plateau.findFirst(args)
+    return db.plateau.findFirst({
+      ...args,
+      select: {
+        id: true,
+        date: true,
+        lieu: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    })
   }
 }
 
@@ -394,7 +427,23 @@ async function matchFindManyForUser(db: any, userId: string, args: any = {}): Pr
     })
   } catch (error) {
     if (!isMissingModelColumn(error, 'Match', 'userId')) throw error
-    return db.match.findMany(args)
+    const rows = await db.match.findMany({
+      where: args.where,
+      orderBy: args.orderBy,
+      select: {
+        id: true,
+        type: true,
+        plateauId: true,
+        createdAt: true,
+        teams: args.include?.teams || false,
+        scorers: args.include?.scorers || false,
+      },
+    })
+    return rows.map((row: any) => ({
+      ...row,
+      updatedAt: row.updatedAt ?? row.createdAt,
+      opponentName: row.opponentName ?? null,
+    }))
   }
 }
 
