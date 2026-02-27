@@ -17,7 +17,9 @@ const app = express()
 const prisma = new PrismaClient()
 const PORT = process.env.PORT || 4000
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret'
-const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5173'
+const IS_PROD = process.env.NODE_ENV === 'production'
+const DEFAULT_DEV_APP_BASE_URL = 'http://localhost:5173'
+const APP_BASE_URL = process.env.APP_BASE_URL || DEFAULT_DEV_APP_BASE_URL
 const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`
 const AUTH_COOKIE_NAME = 'token'
 
@@ -34,31 +36,80 @@ function toOrigin(raw: string) {
   }
 }
 
+function toWildcardRule(raw: string) {
+  const s = raw.trim()
+  if (!s.includes('*')) return null
+  const m = s.match(/^(https?):\/\/\*\.(.+?)(?::(\d+))?$/i)
+  if (!m) return null
+  return {
+    protocol: m[1].toLowerCase(),
+    hostnameSuffix: m[2].toLowerCase(),
+    port: m[3] || '',
+  }
+}
+
+const exactFrontOrigins = new Set<string>()
+const wildcardFrontOrigins: Array<ReturnType<typeof toWildcardRule>> = []
 const configuredFrontOrigins = [
-  APP_BASE_URL,
+  ...(IS_PROD ? [] : [APP_BASE_URL]),
+  ...(!IS_PROD && !process.env.APP_BASE_URL ? [] : [process.env.APP_BASE_URL || '']),
   ...(process.env.APP_BASE_URLS || '').split(','),
 ]
-  .map(toOrigin)
-  .filter((v): v is string => Boolean(v))
+
+for (const rawOrigin of configuredFrontOrigins) {
+  const wildcardRule = toWildcardRule(rawOrigin)
+  if (wildcardRule) {
+    wildcardFrontOrigins.push(wildcardRule)
+    continue
+  }
+
+  const normalizedOrigin = toOrigin(rawOrigin)
+  if (!normalizedOrigin) continue
+  exactFrontOrigins.add(normalizedOrigin)
+
+  const u = new URL(normalizedOrigin)
+  if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+    const port = u.port || '5173'
+    exactFrontOrigins.add(`http://localhost:${port}`)
+    exactFrontOrigins.add(`http://127.0.0.1:${port}`)
+    exactFrontOrigins.add(`https://localhost:${port}`)
+    exactFrontOrigins.add(`https://127.0.0.1:${port}`)
+  }
+}
+
+function isAllowedOrigin(origin: string) {
+  if (exactFrontOrigins.has(origin)) return true
+
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    return false
+  }
+
+  const hostname = parsed.hostname.toLowerCase()
+  const protocol = parsed.protocol.replace(/:$/, '').toLowerCase()
+  const port = parsed.port || ''
+
+  return wildcardFrontOrigins.some((rule) => {
+    if (!rule) return false
+    if (rule.protocol !== protocol) return false
+    if (rule.port !== port) return false
+    if (hostname === rule.hostnameSuffix) return false
+    return hostname.endsWith(`.${rule.hostnameSuffix}`)
+  })
+}
+
+if (IS_PROD && exactFrontOrigins.size === 0 && wildcardFrontOrigins.length === 0) {
+  console.warn('[cors] No front-end origin configured. Set APP_BASE_URL or APP_BASE_URLS in production.')
+}
 
 app.use(helmet())
 app.use(cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true)
-    try {
-      const allowed = new Set<string>(configuredFrontOrigins)
-      for (const frontOrigin of configuredFrontOrigins) {
-        const u = new URL(frontOrigin)
-        // allow http<->https swap on localhost
-        if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
-          allowed.add(`http://localhost:${u.port || '5173'}`)
-          allowed.add(`http://127.0.0.1:${u.port || '5173'}`)
-          allowed.add(`https://localhost:${u.port || '5173'}`)
-          allowed.add(`https://127.0.0.1:${u.port || '5173'}`)
-        }
-      }
-      if (allowed.has(origin)) return callback(null, true)
-    } catch { }
+    if (isAllowedOrigin(origin)) return callback(null, true)
+    console.warn(`[cors] Blocked origin: ${origin}`)
     return callback(new Error('Not allowed by CORS'))
   },
   credentials: true,

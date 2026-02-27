@@ -21,7 +21,9 @@ const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
-const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5173';
+const IS_PROD = process.env.NODE_ENV === 'production';
+const DEFAULT_DEV_APP_BASE_URL = 'http://localhost:5173';
+const APP_BASE_URL = process.env.APP_BASE_URL || DEFAULT_DEV_APP_BASE_URL;
 const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`;
 const AUTH_COOKIE_NAME = 'token';
 // Railway/Reverse proxy support so secure cookies can be set correctly.
@@ -37,33 +39,81 @@ function toOrigin(raw) {
         return null;
     }
 }
+function toWildcardRule(raw) {
+    const s = raw.trim();
+    if (!s.includes('*'))
+        return null;
+    const m = s.match(/^(https?):\/\/\*\.(.+?)(?::(\d+))?$/i);
+    if (!m)
+        return null;
+    return {
+        protocol: m[1].toLowerCase(),
+        hostnameSuffix: m[2].toLowerCase(),
+        port: m[3] || '',
+    };
+}
+const exactFrontOrigins = new Set();
+const wildcardFrontOrigins = [];
 const configuredFrontOrigins = [
-    APP_BASE_URL,
+    ...(IS_PROD ? [] : [APP_BASE_URL]),
+    ...(!IS_PROD && !process.env.APP_BASE_URL ? [] : [process.env.APP_BASE_URL || '']),
     ...(process.env.APP_BASE_URLS || '').split(','),
-]
-    .map(toOrigin)
-    .filter((v) => Boolean(v));
+];
+for (const rawOrigin of configuredFrontOrigins) {
+    const wildcardRule = toWildcardRule(rawOrigin);
+    if (wildcardRule) {
+        wildcardFrontOrigins.push(wildcardRule);
+        continue;
+    }
+    const normalizedOrigin = toOrigin(rawOrigin);
+    if (!normalizedOrigin)
+        continue;
+    exactFrontOrigins.add(normalizedOrigin);
+    const u = new URL(normalizedOrigin);
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+        const port = u.port || '5173';
+        exactFrontOrigins.add(`http://localhost:${port}`);
+        exactFrontOrigins.add(`http://127.0.0.1:${port}`);
+        exactFrontOrigins.add(`https://localhost:${port}`);
+        exactFrontOrigins.add(`https://127.0.0.1:${port}`);
+    }
+}
+function isAllowedOrigin(origin) {
+    if (exactFrontOrigins.has(origin))
+        return true;
+    let parsed;
+    try {
+        parsed = new URL(origin);
+    }
+    catch {
+        return false;
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    const protocol = parsed.protocol.replace(/:$/, '').toLowerCase();
+    const port = parsed.port || '';
+    return wildcardFrontOrigins.some((rule) => {
+        if (!rule)
+            return false;
+        if (rule.protocol !== protocol)
+            return false;
+        if (rule.port !== port)
+            return false;
+        if (hostname === rule.hostnameSuffix)
+            return false;
+        return hostname.endsWith(`.${rule.hostnameSuffix}`);
+    });
+}
+if (IS_PROD && exactFrontOrigins.size === 0 && wildcardFrontOrigins.length === 0) {
+    console.warn('[cors] No front-end origin configured. Set APP_BASE_URL or APP_BASE_URLS in production.');
+}
 app.use((0, helmet_1.default)());
 app.use((0, cors_1.default)({
     origin(origin, callback) {
         if (!origin)
             return callback(null, true);
-        try {
-            const allowed = new Set(configuredFrontOrigins);
-            for (const frontOrigin of configuredFrontOrigins) {
-                const u = new URL(frontOrigin);
-                // allow http<->https swap on localhost
-                if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
-                    allowed.add(`http://localhost:${u.port || '5173'}`);
-                    allowed.add(`http://127.0.0.1:${u.port || '5173'}`);
-                    allowed.add(`https://localhost:${u.port || '5173'}`);
-                    allowed.add(`https://127.0.0.1:${u.port || '5173'}`);
-                }
-            }
-            if (allowed.has(origin))
-                return callback(null, true);
-        }
-        catch { }
+        if (isAllowedOrigin(origin))
+            return callback(null, true);
+        console.warn(`[cors] Blocked origin: ${origin}`);
         return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
@@ -467,8 +517,8 @@ app.post('/drills', authMiddleware, async (req, res) => {
 // Models used: Player, Training, Plateau, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 // ---- Players ----
-app.get('/players', authMiddleware, async (_req, res) => {
-    const players = await prisma.player.findMany({ orderBy: { name: 'asc' } });
+app.get('/players', authMiddleware, async (req, res) => {
+    const players = await prisma.player.findMany({ where: { userId: req.userId }, orderBy: { name: 'asc' } });
     res.json(players);
 });
 app.post('/players', authMiddleware, async (req, res) => {
@@ -483,6 +533,7 @@ app.post('/players', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const baseData = {
+        userId: req.userId,
         name: parsed.data.name,
         primary_position: parsed.data.primary_position,
         secondary_position: parsed.data.secondary_position
@@ -516,6 +567,9 @@ app.put('/players/:id', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const { id } = req.params;
+    const existing = await prisma.player.findFirst({ where: { id, userId: req.userId } });
+    if (!existing)
+        return res.status(404).json({ error: 'Player not found' });
     const patch = {};
     if (parsed.data.name !== undefined)
         patch.name = parsed.data.name;
@@ -529,14 +583,14 @@ app.put('/players/:id', authMiddleware, async (req, res) => {
         patch.phone = parsed.data.phone ?? null;
     let updated;
     try {
-        updated = await prisma.player.update({ where: { id }, data: patch });
+        updated = await prisma.player.update({ where: { id: existing.id }, data: patch });
     }
     catch (e) {
         // Retry without email/phone if columns absent
         const fallback = { ...patch };
         delete fallback.email;
         delete fallback.phone;
-        updated = await prisma.player.update({ where: { id }, data: fallback });
+        updated = await prisma.player.update({ where: { id: existing.id }, data: fallback });
     }
     res.json(updated);
 });
@@ -547,7 +601,7 @@ function signPlayerInvite(playerId, plateauId, email) {
 function signRsvpToken(playerId, plateauId, status) {
     return jsonwebtoken_1.default.sign({ aud: 'player_rsvp', pid: playerId, plid: plateauId, st: status }, JWT_SECRET, { expiresIn: '60d' });
 }
-function playerAuth(req, res, next) {
+async function playerAuth(req, res, next) {
     const token = req.cookies?.player_token || req.headers['x-player-token'];
     if (!token)
         return res.status(401).json({ error: 'Unauthorized' });
@@ -555,7 +609,11 @@ function playerAuth(req, res, next) {
         const payload = jsonwebtoken_1.default.verify(token, JWT_SECRET);
         if (payload?.aud !== 'player_invite' || !payload?.pid)
             return res.status(401).json({ error: 'Invalid token' });
+        const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } });
+        if (!player)
+            return res.status(401).json({ error: 'Invalid token' });
         req.playerId = payload.pid;
+        req.playerUserId = player.userId;
         req.scopePlateauId = payload.plid || null;
         next();
     }
@@ -570,7 +628,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const player = await prisma.player.findUnique({ where: { id } });
+    const player = await prisma.player.findFirst({ where: { id, userId: req.userId } });
     if (!player)
         return res.status(404).json({ error: 'Player not found' });
     const base = `${req.protocol}://${req.get('host')}`;
@@ -585,8 +643,8 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     // Mark player as convoked for this plateau
     try {
         await prisma.attendance.upsert({
-            where: { session_type_session_id_playerId: { session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id } },
-            create: { session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id },
+            where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id } },
+            create: { userId: req.userId, session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id },
             update: {},
         });
     }
@@ -666,10 +724,13 @@ app.get('/rsvp/p', async (req, res) => {
         if (payload?.aud !== 'player_rsvp' || payload?.st !== 'present' || !payload?.pid || !payload?.plid) {
             return res.redirect(302, redirectBase);
         }
+        const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } });
+        if (!player?.userId)
+            return res.redirect(302, redirectBase);
         try {
             await prisma.attendance.upsert({
-                where: { session_type_session_id_playerId: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
-                create: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid, present: true },
+                where: { userId_session_type_session_id_playerId: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
+                create: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid, present: true },
                 update: { present: true },
             });
         }
@@ -678,12 +739,12 @@ app.get('/rsvp/p', async (req, res) => {
             try {
                 // Mark present by ensuring a PLATEAU row exists
                 await prisma.attendance.upsert({
-                    where: { session_type_session_id_playerId: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
-                    create: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid },
+                    where: { userId_session_type_session_id_playerId: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
+                    create: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid },
                     update: {},
                 });
                 // Remove any absence marker
-                await prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU_ABSENT', session_id: payload.plid, playerId: payload.pid } });
+                await prisma.attendance.deleteMany({ where: { userId: player.userId, session_type: 'PLATEAU_ABSENT', session_id: payload.plid, playerId: payload.pid } });
             }
             catch (e2) {
                 // Ignore, always redirect anyway
@@ -705,16 +766,21 @@ app.get('/rsvp/a', async (req, res) => {
         if (payload?.aud !== 'player_rsvp' || payload?.st !== 'absent' || !payload?.pid || !payload?.plid) {
             return res.redirect(302, redirectBase);
         }
+        const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } });
+        if (!player?.userId)
+            return res.redirect(302, redirectBase);
         try {
             await prisma.attendance.upsert({
                 where: {
-                    session_type_session_id_playerId: {
+                    userId_session_type_session_id_playerId: {
+                        userId: player.userId,
                         session_type: 'PLATEAU',
                         session_id: payload.plid,
                         playerId: payload.pid,
                     },
                 },
                 create: {
+                    userId: player.userId,
                     session_type: 'PLATEAU',
                     session_id: payload.plid,
                     playerId: payload.pid,
@@ -729,17 +795,19 @@ app.get('/rsvp/a', async (req, res) => {
             // Fallback when `present` column doesn't exist: mark absence with a dedicated row
             try {
                 // Remove any present marker for old schema
-                await prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } });
+                await prisma.attendance.deleteMany({ where: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } });
                 // Upsert an ABSENT marker
                 await prisma.attendance.upsert({
                     where: {
-                        session_type_session_id_playerId: {
+                        userId_session_type_session_id_playerId: {
+                            userId: player.userId,
                             session_type: 'PLATEAU_ABSENT',
                             session_id: payload.plid,
                             playerId: payload.pid,
                         },
                     },
                     create: {
+                        userId: player.userId,
                         session_type: 'PLATEAU_ABSENT',
                         session_id: payload.plid,
                         playerId: payload.pid,
@@ -763,7 +831,7 @@ app.get('/player/debug', (req, res) => {
 });
 // --- Scoped player endpoints ---
 app.get('/player/me', playerAuth, async (req, res) => {
-    const p = await prisma.player.findUnique({ where: { id: req.playerId } });
+    const p = await prisma.player.findFirst({ where: { id: req.playerId, userId: req.playerUserId } });
     if (!p)
         return res.status(404).json({ error: 'Player not found' });
     res.json({ id: p.id, name: p.name || '', email: p.email || null, phone: p.phone || null });
@@ -771,7 +839,7 @@ app.get('/player/me', playerAuth, async (req, res) => {
 app.get('/player/plateaus', playerAuth, async (req, res) => {
     const playerId = req.playerId;
     // Plateaus via attendance
-    const att = await prisma.attendance.findMany({ where: { session_type: 'PLATEAU', playerId }, select: { session_id: true } });
+    const att = await prisma.attendance.findMany({ where: { userId: req.playerUserId, session_type: 'PLATEAU', playerId }, select: { session_id: true } });
     const plateauIdsFromAttendance = Array.from(new Set(att.map(a => a.session_id)));
     // Plateaus via match participation
     const mtps = await prisma.matchTeamPlayer.findMany({ where: { playerId }, select: { matchTeamId: true } });
@@ -781,7 +849,7 @@ app.get('/player/plateaus', playerAuth, async (req, res) => {
         const teams = await prisma.matchTeam.findMany({ where: { id: { in: teamIds } }, select: { matchId: true } });
         const matchIds = teams.map(t => t.matchId);
         if (matchIds.length) {
-            const matches = await prisma.match.findMany({ where: { id: { in: matchIds } }, select: { plateauId: true } });
+            const matches = await prisma.match.findMany({ where: { userId: req.playerUserId, id: { in: matchIds } }, select: { plateauId: true } });
             plateauIdsFromMatches = matches.map(m => m.plateauId).filter(Boolean);
         }
     }
@@ -789,7 +857,7 @@ app.get('/player/plateaus', playerAuth, async (req, res) => {
     const ids = Array.from(set);
     if (!ids.length)
         return res.json([]);
-    const plateaus = await prisma.plateau.findMany({ where: { id: { in: ids } }, orderBy: { date: 'desc' } });
+    const plateaus = await prisma.plateau.findMany({ where: { userId: req.playerUserId, id: { in: ids } }, orderBy: { date: 'desc' } });
     res.json(plateaus);
 });
 app.get('/player/plateaus/:id/summary', playerAuth, async (req, res) => {
@@ -799,7 +867,7 @@ app.get('/player/plateaus/:id/summary', playerAuth, async (req, res) => {
         return res.status(403).json({ error: 'Forbidden' });
     // Reuse the same build as /plateaus/:id/summary
     const ctxRes = {};
-    const fakeReq = { params: { id: plateauId } };
+    const fakeReq = { params: { id: plateauId }, userId: req.playerUserId };
     const fakeRes = {
         statusCode: 200,
         _json: null,
@@ -823,14 +891,14 @@ app.delete('/players/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
         // Ensure the player exists first
-        const exists = await prisma.player.findUnique({ where: { id } });
+        const exists = await prisma.player.findFirst({ where: { id, userId: req.userId } });
         if (!exists)
             return res.status(404).json({ error: 'Player not found' });
         await prisma.$transaction([
             prisma.scorer.deleteMany({ where: { playerId: id } }),
             prisma.matchTeamPlayer.deleteMany({ where: { playerId: id } }),
-            prisma.attendance.deleteMany({ where: { playerId: id } }),
-            prisma.player.delete({ where: { id } })
+            prisma.attendance.deleteMany({ where: { userId: req.userId, playerId: id } }),
+            prisma.player.delete({ where: { id: exists.id } })
         ]);
         res.json({ ok: true });
     }
@@ -841,15 +909,15 @@ app.delete('/players/:id', authMiddleware, async (req, res) => {
     }
 });
 // ---- Trainings ----
-app.get('/trainings', authMiddleware, async (_req, res) => {
-    const trainings = await prisma.training.findMany({ orderBy: { date: 'desc' } });
+app.get('/trainings', authMiddleware, async (req, res) => {
+    const trainings = await prisma.training.findMany({ where: { userId: req.userId }, orderBy: { date: 'desc' } });
     res.json(trainings);
 });
 // Get single training
 app.get('/trainings/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
-        const training = await prisma.training.findUnique({ where: { id } });
+        const training = await prisma.training.findFirst({ where: { id, userId: req.userId } });
         if (!training)
             return res.status(404).json({ error: 'Training not found' });
         res.json(training);
@@ -865,7 +933,7 @@ app.post('/trainings', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const date = new Date(parsed.data.date);
-    const t = await prisma.training.create({ data: { date } });
+    const t = await prisma.training.create({ data: { userId: req.userId, date } });
     res.json(t);
 });
 // Update a training (date/status)
@@ -883,7 +951,10 @@ app.put('/trainings/:id', authMiddleware, async (req, res) => {
     if (parsed.data.status !== undefined)
         data.status = parsed.data.status;
     try {
-        const updated = await prisma.training.update({ where: { id: req.params.id }, data });
+        const existing = await prisma.training.findFirst({ where: { id: req.params.id, userId: req.userId } });
+        if (!existing)
+            return res.status(404).json({ error: 'Training not found' });
+        const updated = await prisma.training.update({ where: { id: existing.id }, data });
         res.json(updated);
     }
     catch (e) {
@@ -898,10 +969,13 @@ app.put('/trainings/:id', authMiddleware, async (req, res) => {
 app.delete('/trainings/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
+        const existing = await prisma.training.findFirst({ where: { id, userId: req.userId } });
+        if (!existing)
+            return res.status(404).json({ error: 'Training not found' });
         await prisma.$transaction([
-            prisma.attendance.deleteMany({ where: { session_type: 'TRAINING', session_id: id } }),
-            prisma.trainingDrill.deleteMany({ where: { trainingId: id } }),
-            prisma.training.delete({ where: { id } })
+            prisma.attendance.deleteMany({ where: { userId: req.userId, session_type: 'TRAINING', session_id: id } }),
+            prisma.trainingDrill.deleteMany({ where: { userId: req.userId, trainingId: id } }),
+            prisma.training.delete({ where: { id: existing.id } })
         ]);
         res.json({ ok: true });
     }
@@ -914,8 +988,8 @@ app.delete('/trainings/:id', authMiddleware, async (req, res) => {
     }
 });
 // ---- Plateaus ----
-app.get('/plateaus', authMiddleware, async (_req, res) => {
-    const plateaus = await prisma.plateau.findMany({ orderBy: { date: 'desc' } });
+app.get('/plateaus', authMiddleware, async (req, res) => {
+    const plateaus = await prisma.plateau.findMany({ where: { userId: req.userId }, orderBy: { date: 'desc' } });
     res.json(plateaus);
 });
 app.post('/plateaus', authMiddleware, async (req, res) => {
@@ -924,18 +998,18 @@ app.post('/plateaus', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const date = new Date(parsed.data.date);
-    const pl = await prisma.plateau.create({ data: { date, lieu: parsed.data.lieu } });
+    const pl = await prisma.plateau.create({ data: { userId: req.userId, date, lieu: parsed.data.lieu } });
     res.json(pl);
 });
 app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
         // Ensure plateau exists
-        const exists = await prisma.plateau.findUnique({ where: { id } });
+        const exists = await prisma.plateau.findFirst({ where: { id, userId: req.userId } });
         if (!exists)
             return res.status(404).json({ error: 'Plateau not found' });
         // Collect related matches and teams
-        const matches = await prisma.match.findMany({ where: { plateauId: id }, include: { teams: true } });
+        const matches = await prisma.match.findMany({ where: { userId: req.userId, plateauId: id }, include: { teams: true } });
         const matchIds = matches.map(m => m.id);
         const teamIds = matches.flatMap(m => m.teams.map(t => t.id));
         await prisma.$transaction([
@@ -943,8 +1017,8 @@ app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
             prisma.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: teamIds } } }),
             prisma.matchTeam.deleteMany({ where: { matchId: { in: matchIds } } }),
             prisma.match.deleteMany({ where: { id: { in: matchIds } } }),
-            prisma.attendance.deleteMany({ where: { session_type: 'PLATEAU', session_id: id } }),
-            prisma.plateau.delete({ where: { id } })
+            prisma.attendance.deleteMany({ where: { userId: req.userId, session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] }, session_id: id } }),
+            prisma.plateau.delete({ where: { id: exists.id } })
         ]);
         res.json({ ok: true });
     }
@@ -959,7 +1033,7 @@ app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
 app.get('/plateaus/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
-        const plateau = await prisma.plateau.findUnique({ where: { id } });
+        const plateau = await prisma.plateau.findFirst({ where: { id, userId: req.userId } });
         if (!plateau)
             return res.status(404).json({ error: 'Plateau not found' });
         res.json(plateau);
@@ -973,12 +1047,13 @@ app.get('/plateaus/:id', authMiddleware, async (req, res) => {
 app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
-        const plateau = await prisma.plateau.findUnique({ where: { id } });
+        const plateau = await prisma.plateau.findFirst({ where: { id, userId: req.userId } });
         if (!plateau)
             return res.status(404).json({ error: 'Plateau not found' });
         // Attendance (present/absent records) for this plateau, include player info
         const attendance = await prisma.attendance.findMany({
             where: {
+                userId: req.userId,
                 session_id: id,
                 session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] },
             },
@@ -999,7 +1074,7 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
         }
         // Matches for this plateau (with teams and scorers first)
         const matchesRaw = await prisma.match.findMany({
-            where: { plateauId: id },
+            where: { userId: req.userId, plateauId: id },
             include: {
                 teams: true,
                 scorers: true
@@ -1057,7 +1132,7 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
         }
         // Ensure we know all players (for listing). We do not auto-mark as convoked.
         try {
-            const allPlayers = await prisma.player.findMany({ orderBy: { name: 'asc' } });
+            const allPlayers = await prisma.player.findMany({ where: { userId: req.userId }, orderBy: { name: 'asc' } });
             for (const pl of allPlayers) {
                 if (!playersById[pl.id]) {
                     playersById[pl.id] = {
@@ -1141,7 +1216,7 @@ app.get('/attendance', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const { session_type, session_id } = parsed.data;
-    const where = {};
+    const where = { userId: req.userId };
     if (session_type)
         where.session_type = session_type;
     if (session_id)
@@ -1162,8 +1237,8 @@ app.post('/attendance', authMiddleware, async (req, res) => {
     const { session_type, session_id, playerId, present } = parsed.data;
     try {
         await prisma.attendance.upsert({
-            where: { session_type_session_id_playerId: { session_type, session_id, playerId } },
-            create: { session_type, session_id, playerId, present },
+            where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type, session_id, playerId } },
+            create: { userId: req.userId, session_type, session_id, playerId, present },
             update: { present }
         });
     }
@@ -1171,13 +1246,13 @@ app.post('/attendance', authMiddleware, async (req, res) => {
         // Fallback if `present` column doesn't exist
         if (present) {
             await prisma.attendance.upsert({
-                where: { session_type_session_id_playerId: { session_type, session_id, playerId } },
-                create: { session_type, session_id, playerId },
+                where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type, session_id, playerId } },
+                create: { userId: req.userId, session_type, session_id, playerId },
                 update: {}
             });
         }
         else {
-            await prisma.attendance.deleteMany({ where: { session_type, session_id, playerId } });
+            await prisma.attendance.deleteMany({ where: { userId: req.userId, session_type, session_id, playerId } });
         }
     }
     res.json({ ok: true });
@@ -1185,7 +1260,7 @@ app.post('/attendance', authMiddleware, async (req, res) => {
 // ---- Matches ----
 app.get('/matches', authMiddleware, async (req, res) => {
     const { plateauId } = req.query;
-    const where = plateauId ? { plateauId: String(plateauId) } : {};
+    const where = plateauId ? { userId: req.userId, plateauId: String(plateauId) } : { userId: req.userId };
     const matches = await prisma.match.findMany({
         where,
         include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
@@ -1215,7 +1290,12 @@ app.post('/matches', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const { type, plateauId, sides, score, buteurs, opponentName } = parsed.data;
-    const match = await prisma.match.create({ data: { type, plateauId, opponentName } });
+    if (plateauId) {
+        const ownedPlateau = await prisma.plateau.findFirst({ where: { id: plateauId, userId: req.userId } });
+        if (!ownedPlateau)
+            return res.status(404).json({ error: 'Plateau not found' });
+    }
+    const match = await prisma.match.create({ data: { userId: req.userId, type, plateauId, opponentName } });
     const home = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'home', score: score?.home ?? 0 } });
     const away = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'away', score: score?.away ?? 0 } });
     const toMTP = (matchTeamId, ids, role) => ids.map(playerId => ({ matchTeamId, playerId, role }));
@@ -1250,12 +1330,12 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: parsed.error.flatten() });
     try {
         // ensure exists
-        const exists = await prisma.match.findUnique({ where: { id: matchId } });
+        const exists = await prisma.match.findFirst({ where: { id: matchId, userId: req.userId } });
         if (!exists)
             return res.status(404).json({ error: 'Match not found' });
         // update fields
         if (parsed.data.opponentName !== undefined) {
-            await prisma.match.update({ where: { id: matchId }, data: { opponentName: parsed.data.opponentName } });
+            await prisma.match.update({ where: { id: exists.id }, data: { opponentName: parsed.data.opponentName } });
         }
         if (parsed.data.score) {
             await prisma.$transaction([
@@ -1269,8 +1349,8 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                 prisma.scorer.createMany({ data: parsed.data.buteurs.map(b => ({ matchId, playerId: b.playerId, side: b.side })) })
             ]);
         }
-        const full = await prisma.match.findUnique({
-            where: { id: matchId },
+        const full = await prisma.match.findFirst({
+            where: { id: matchId, userId: req.userId },
             include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
         });
         res.json(full);
@@ -1284,7 +1364,7 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
 app.delete('/matches/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
-        const exists = await prisma.match.findUnique({ where: { id } });
+        const exists = await prisma.match.findFirst({ where: { id, userId: req.userId } });
         if (!exists)
             return res.status(404).json({ error: 'Match not found' });
         const teams = await prisma.matchTeam.findMany({ where: { matchId: id } });
@@ -1293,7 +1373,7 @@ app.delete('/matches/:id', authMiddleware, async (req, res) => {
             prisma.scorer.deleteMany({ where: { matchId: id } }),
             prisma.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: teamIds } } }),
             prisma.matchTeam.deleteMany({ where: { matchId: id } }),
-            prisma.match.delete({ where: { id } })
+            prisma.match.delete({ where: { id: exists.id } })
         ]);
         res.json({ ok: true });
     }
@@ -1354,10 +1434,15 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: parsed.error.flatten() });
     const { plateauId, teams, schedule, defaults } = parsed.data;
     const startersPerTeam = defaults?.startersPerTeam ?? 5;
+    if (plateauId) {
+        const ownedPlateau = await prisma.plateau.findFirst({ where: { id: plateauId, userId: req.userId } });
+        if (!ownedPlateau)
+            return res.status(404).json({ error: 'Plateau not found' });
+    }
     const createdIds = await prisma.$transaction(async (db) => {
         const ids = [];
         for (const m of schedule.matches) {
-            const match = await db.match.create({ data: { type: plateauId ? 'PLATEAU' : 'ENTRAINEMENT', plateauId } });
+            const match = await db.match.create({ data: { userId: req.userId, type: plateauId ? 'PLATEAU' : 'ENTRAINEMENT', plateauId } });
             const home = await db.matchTeam.create({ data: { matchId: match.id, side: 'home', score: 0 } });
             const away = await db.matchTeam.create({ data: { matchId: match.id, side: 'away', score: 0 } });
             const pick = (arr) => arr.slice(0, startersPerTeam);
@@ -1376,7 +1461,7 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
         return ids;
     });
     const matches = await prisma.match.findMany({
-        where: { id: { in: createdIds } },
+        where: { userId: req.userId, id: { in: createdIds } },
         include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
     });
     res.json({ ok: true, createdCount: createdIds.length, matches });
@@ -1385,8 +1470,11 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
 // Lister les exercices d'une séance (avec enrichissement à partir du catalogue DRILLS)
 app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
+    const training = await prisma.training.findFirst({ where: { id: trainingId, userId: req.userId } });
+    if (!training)
+        return res.status(404).json({ error: 'Training not found' });
     const rows = await prisma.trainingDrill.findMany({
-        where: { trainingId },
+        where: { userId: req.userId, trainingId },
         orderBy: { order: 'asc' },
     });
     const catalog = DRILLS.concat(EXTRA_DRILLS);
@@ -1399,6 +1487,9 @@ app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
 // Ajouter un exercice à une séance
 app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
+    const training = await prisma.training.findFirst({ where: { id: trainingId, userId: req.userId } });
+    if (!training)
+        return res.status(404).json({ error: 'Training not found' });
     const schema = zod_1.z.object({
         drillId: zod_1.z.string().min(1),
         duration: zod_1.z.number().int().min(1).max(120).optional(),
@@ -1409,12 +1500,12 @@ app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: parsed.error.flatten() });
     // order auto-incrémental simple
     const max = await prisma.trainingDrill.aggregate({
-        where: { trainingId },
+        where: { userId: req.userId, trainingId },
         _max: { order: true }
     });
     const nextOrder = (max._max.order ?? -1) + 1;
     const row = await prisma.trainingDrill.create({
-        data: { trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder }
+        data: { userId: req.userId, trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder }
     });
     const meta = (DRILLS.concat(EXTRA_DRILLS)).find(d => d.id === row.drillId) || null;
     res.json({ ...row, meta });
@@ -1423,6 +1514,9 @@ app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
 app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
     const trainingDrillId = req.params.trainingDrillId;
+    const existing = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, trainingId, userId: req.userId } });
+    if (!existing)
+        return res.status(404).json({ error: 'Not found' });
     const schema = zod_1.z.object({
         duration: zod_1.z.number().int().min(1).max(120).nullable().optional(),
         notes: zod_1.z.string().max(1000).nullable().optional(),
@@ -1433,7 +1527,7 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, re
         return res.status(400).json({ error: parsed.error.flatten() });
     try {
         const updated = await prisma.trainingDrill.update({
-            where: { id: trainingDrillId },
+            where: { id: existing.id },
             data: {
                 ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration ?? null } : {}),
                 ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes ?? null } : {}),
@@ -1449,9 +1543,13 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, re
 });
 // Supprimer un exercice d'une séance
 app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, res) => {
+    const trainingId = req.params.id;
     const trainingDrillId = req.params.trainingDrillId;
     try {
-        await prisma.trainingDrill.delete({ where: { id: trainingDrillId } });
+        const existing = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, trainingId, userId: req.userId } });
+        if (!existing)
+            return res.status(404).json({ error: 'Not found' });
+        await prisma.trainingDrill.delete({ where: { id: existing.id } });
         res.json({ ok: true });
     }
     catch {
@@ -1461,16 +1559,16 @@ app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req,
 // ---- Diagrams (exercices) ----
 app.get('/drills/:id/diagrams', authMiddleware, async (req, res) => {
     const drillId = req.params.id;
-    const rows = await prisma.diagram.findMany({ where: { drillId }, orderBy: { updatedAt: 'desc' } });
+    const rows = await prisma.diagram.findMany({ where: { userId: req.userId, drillId }, orderBy: { updatedAt: 'desc' } });
     res.json(rows);
 });
 app.get('/training-drills/:id/diagrams', authMiddleware, async (req, res) => {
     const trainingDrillId = req.params.id;
-    const rows = await prisma.diagram.findMany({ where: { trainingDrillId }, orderBy: { updatedAt: 'desc' } });
+    const rows = await prisma.diagram.findMany({ where: { userId: req.userId, trainingDrillId }, orderBy: { updatedAt: 'desc' } });
     res.json(rows);
 });
 app.get('/diagrams/:id', authMiddleware, async (req, res) => {
-    const d = await prisma.diagram.findUnique({ where: { id: req.params.id } });
+    const d = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } });
     if (!d)
         return res.status(404).json({ error: 'Not found' });
     res.json(d);
@@ -1485,12 +1583,15 @@ app.post('/drills/:id/diagrams', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const created = await prisma.diagram.create({
-        data: { drillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
+        data: { userId: req.userId, drillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
     });
     res.json({ ...created, data: parsed.data.data });
 });
 app.post('/training-drills/:id/diagrams', authMiddleware, async (req, res) => {
     const trainingDrillId = req.params.id;
+    const trainingDrill = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, userId: req.userId } });
+    if (!trainingDrill)
+        return res.status(404).json({ error: 'Training drill not found' });
     const schema = zod_1.z.object({
         title: zod_1.z.string().min(1).max(100),
         data: zod_1.z.any()
@@ -1499,7 +1600,7 @@ app.post('/training-drills/:id/diagrams', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const created = await prisma.diagram.create({
-        data: { trainingDrillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
+        data: { userId: req.userId, trainingDrillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
     });
     res.json({ ...created, data: parsed.data.data });
 });
@@ -1517,7 +1618,10 @@ app.put('/diagrams/:id', authMiddleware, async (req, res) => {
     if (parsed.data.data !== undefined)
         patch.data = JSON.stringify(parsed.data.data);
     try {
-        const updated = await prisma.diagram.update({ where: { id: req.params.id }, data: patch });
+        const existing = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } });
+        if (!existing)
+            return res.status(404).json({ error: 'Not found' });
+        const updated = await prisma.diagram.update({ where: { id: existing.id }, data: patch });
         res.json({ ...updated, data: parsed.data.data ?? JSON.parse(updated.data) });
     }
     catch (e) {
@@ -1529,7 +1633,10 @@ app.put('/diagrams/:id', authMiddleware, async (req, res) => {
 });
 app.delete('/diagrams/:id', authMiddleware, async (req, res) => {
     try {
-        await prisma.diagram.delete({ where: { id: req.params.id } });
+        const existing = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } });
+        if (!existing)
+            return res.status(404).json({ error: 'Not found' });
+        await prisma.diagram.delete({ where: { id: existing.id } });
         res.json({ ok: true });
     }
     catch (e) {
