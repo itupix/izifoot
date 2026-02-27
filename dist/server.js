@@ -175,6 +175,116 @@ function authMiddleware(req, res, next) {
         return res.status(401).json({ error: 'Invalid token' });
     }
 }
+function isMissingAttendanceColumn(error, column) {
+    return error?.code === 'P2022' && error?.meta?.column === `Attendance.${column}`;
+}
+function ownedAttendanceWhere(userId, where = {}) {
+    const next = { ...(where || {}) };
+    delete next.userId;
+    if (Object.keys(next).length === 0)
+        return { player: { userId } };
+    return { AND: [next, { player: { userId } }] };
+}
+async function attendanceFindManyForUser(db, userId, args = {}) {
+    try {
+        return await db.attendance.findMany({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (error) {
+        if (!isMissingAttendanceColumn(error, 'userId'))
+            throw error;
+        return db.attendance.findMany({
+            ...args,
+            where: ownedAttendanceWhere(userId, args.where),
+        });
+    }
+}
+async function attendanceFindFirstForUser(db, userId, args = {}) {
+    try {
+        return await db.attendance.findFirst({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (error) {
+        if (!isMissingAttendanceColumn(error, 'userId'))
+            throw error;
+        return db.attendance.findFirst({
+            ...args,
+            where: ownedAttendanceWhere(userId, args.where),
+        });
+    }
+}
+async function attendanceDeleteManyForUser(db, userId, where = {}) {
+    try {
+        return await db.attendance.deleteMany({ where: { ...where, userId } });
+    }
+    catch (error) {
+        if (!isMissingAttendanceColumn(error, 'userId'))
+            throw error;
+        return db.attendance.deleteMany({ where: ownedAttendanceWhere(userId, where) });
+    }
+}
+async function attendanceUpsertMarkerForUser(db, userId, params) {
+    const { session_type, session_id, playerId } = params;
+    try {
+        return await db.attendance.upsert({
+            where: { userId_session_type_session_id_playerId: { userId, session_type, session_id, playerId } },
+            create: { userId, session_type, session_id, playerId },
+            update: {},
+        });
+    }
+    catch (error) {
+        if (!isMissingAttendanceColumn(error, 'userId'))
+            throw error;
+    }
+    const existing = await attendanceFindFirstForUser(db, userId, { where: { session_type, session_id, playerId } });
+    if (existing)
+        return existing;
+    return db.attendance.create({
+        data: { session_type, session_id, playerId },
+    });
+}
+async function attendanceSetPresenceForUser(db, userId, params) {
+    const { session_type, session_id, playerId, present } = params;
+    try {
+        return await db.attendance.upsert({
+            where: { userId_session_type_session_id_playerId: { userId, session_type, session_id, playerId } },
+            create: { userId, session_type, session_id, playerId, present },
+            update: { present },
+        });
+    }
+    catch (error) {
+        if (!isMissingAttendanceColumn(error, 'userId') && !isMissingAttendanceColumn(error, 'present'))
+            throw error;
+    }
+    if (present) {
+        return attendanceUpsertMarkerForUser(db, userId, { session_type, session_id, playerId });
+    }
+    return attendanceDeleteManyForUser(db, userId, { session_type, session_id, playerId });
+}
+async function attendanceSetPlateauRsvpForUser(db, userId, plateauId, playerId, present) {
+    try {
+        return await db.attendance.upsert({
+            where: { userId_session_type_session_id_playerId: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId } },
+            create: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId, present },
+            update: { present },
+        });
+    }
+    catch (error) {
+        if (!isMissingAttendanceColumn(error, 'userId') && !isMissingAttendanceColumn(error, 'present'))
+            throw error;
+    }
+    if (present) {
+        await attendanceUpsertMarkerForUser(db, userId, { session_type: 'PLATEAU', session_id: plateauId, playerId });
+        await attendanceDeleteManyForUser(db, userId, { session_type: 'PLATEAU_ABSENT', session_id: plateauId, playerId });
+        return;
+    }
+    await attendanceDeleteManyForUser(db, userId, { session_type: 'PLATEAU', session_id: plateauId, playerId });
+    await attendanceUpsertMarkerForUser(db, userId, { session_type: 'PLATEAU_ABSENT', session_id: plateauId, playerId });
+}
 // --- Nodemailer (optional) ---
 let transporter = null;
 const SMTP_URL = process.env.SMTP_URL;
@@ -642,10 +752,10 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     const absentUrl = `${base}/rsvp/a?token=${encodeURIComponent(absentToken)}`;
     // Mark player as convoked for this plateau
     try {
-        await prisma.attendance.upsert({
-            where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id } },
-            create: { userId: req.userId, session_type: 'PLATEAU_CONVOKE', session_id: parsed.data.plateauId, playerId: id },
-            update: {},
+        await attendanceUpsertMarkerForUser(prisma, req.userId, {
+            session_type: 'PLATEAU_CONVOKE',
+            session_id: parsed.data.plateauId,
+            playerId: id,
         });
     }
     catch (e) {
@@ -728,27 +838,10 @@ app.get('/rsvp/p', async (req, res) => {
         if (!player?.userId)
             return res.redirect(302, redirectBase);
         try {
-            await prisma.attendance.upsert({
-                where: { userId_session_type_session_id_playerId: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
-                create: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid, present: true },
-                update: { present: true },
-            });
+            await attendanceSetPlateauRsvpForUser(prisma, player.userId, payload.plid, payload.pid, true);
         }
         catch (e) {
-            // Fallback for schemas without `present` column
-            try {
-                // Mark present by ensuring a PLATEAU row exists
-                await prisma.attendance.upsert({
-                    where: { userId_session_type_session_id_playerId: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } },
-                    create: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid },
-                    update: {},
-                });
-                // Remove any absence marker
-                await prisma.attendance.deleteMany({ where: { userId: player.userId, session_type: 'PLATEAU_ABSENT', session_id: payload.plid, playerId: payload.pid } });
-            }
-            catch (e2) {
-                // Ignore, always redirect anyway
-            }
+            // Ignore, always redirect anyway
         }
         return res.redirect(302, `${redirectBase}/match-day/${payload.plid}?rsvp=present`);
     }
@@ -770,54 +863,10 @@ app.get('/rsvp/a', async (req, res) => {
         if (!player?.userId)
             return res.redirect(302, redirectBase);
         try {
-            await prisma.attendance.upsert({
-                where: {
-                    userId_session_type_session_id_playerId: {
-                        userId: player.userId,
-                        session_type: 'PLATEAU',
-                        session_id: payload.plid,
-                        playerId: payload.pid,
-                    },
-                },
-                create: {
-                    userId: player.userId,
-                    session_type: 'PLATEAU',
-                    session_id: payload.plid,
-                    playerId: payload.pid,
-                    present: false,
-                },
-                update: {
-                    present: false,
-                },
-            });
+            await attendanceSetPlateauRsvpForUser(prisma, player.userId, payload.plid, payload.pid, false);
         }
         catch (e) {
-            // Fallback when `present` column doesn't exist: mark absence with a dedicated row
-            try {
-                // Remove any present marker for old schema
-                await prisma.attendance.deleteMany({ where: { userId: player.userId, session_type: 'PLATEAU', session_id: payload.plid, playerId: payload.pid } });
-                // Upsert an ABSENT marker
-                await prisma.attendance.upsert({
-                    where: {
-                        userId_session_type_session_id_playerId: {
-                            userId: player.userId,
-                            session_type: 'PLATEAU_ABSENT',
-                            session_id: payload.plid,
-                            playerId: payload.pid,
-                        },
-                    },
-                    create: {
-                        userId: player.userId,
-                        session_type: 'PLATEAU_ABSENT',
-                        session_id: payload.plid,
-                        playerId: payload.pid,
-                    },
-                    update: {},
-                });
-            }
-            catch (err) {
-                console.warn('[RSVP absent] fallback failed', err);
-            }
+            console.warn('[RSVP absent] failed', e);
         }
         return res.redirect(302, `${redirectBase}/match-day/${payload.plid}?rsvp=absent`);
     }
@@ -839,7 +888,10 @@ app.get('/player/me', playerAuth, async (req, res) => {
 app.get('/player/plateaus', playerAuth, async (req, res) => {
     const playerId = req.playerId;
     // Plateaus via attendance
-    const att = await prisma.attendance.findMany({ where: { userId: req.playerUserId, session_type: 'PLATEAU', playerId }, select: { session_id: true } });
+    const att = await attendanceFindManyForUser(prisma, req.playerUserId, {
+        where: { session_type: 'PLATEAU', playerId },
+        select: { session_id: true }
+    });
     const plateauIdsFromAttendance = Array.from(new Set(att.map(a => a.session_id)));
     // Plateaus via match participation
     const mtps = await prisma.matchTeamPlayer.findMany({ where: { playerId }, select: { matchTeamId: true } });
@@ -894,12 +946,12 @@ app.delete('/players/:id', authMiddleware, async (req, res) => {
         const exists = await prisma.player.findFirst({ where: { id, userId: req.userId } });
         if (!exists)
             return res.status(404).json({ error: 'Player not found' });
-        await prisma.$transaction([
-            prisma.scorer.deleteMany({ where: { playerId: id } }),
-            prisma.matchTeamPlayer.deleteMany({ where: { playerId: id } }),
-            prisma.attendance.deleteMany({ where: { userId: req.userId, playerId: id } }),
-            prisma.player.delete({ where: { id: exists.id } })
-        ]);
+        await prisma.$transaction(async (tx) => {
+            await tx.scorer.deleteMany({ where: { playerId: id } });
+            await tx.matchTeamPlayer.deleteMany({ where: { playerId: id } });
+            await attendanceDeleteManyForUser(tx, req.userId, { playerId: id });
+            await tx.player.delete({ where: { id: exists.id } });
+        });
         res.json({ ok: true });
     }
     catch (e) {
@@ -972,11 +1024,11 @@ app.delete('/trainings/:id', authMiddleware, async (req, res) => {
         const existing = await prisma.training.findFirst({ where: { id, userId: req.userId } });
         if (!existing)
             return res.status(404).json({ error: 'Training not found' });
-        await prisma.$transaction([
-            prisma.attendance.deleteMany({ where: { userId: req.userId, session_type: 'TRAINING', session_id: id } }),
-            prisma.trainingDrill.deleteMany({ where: { userId: req.userId, trainingId: id } }),
-            prisma.training.delete({ where: { id: existing.id } })
-        ]);
+        await prisma.$transaction(async (tx) => {
+            await attendanceDeleteManyForUser(tx, req.userId, { session_type: 'TRAINING', session_id: id });
+            await tx.trainingDrill.deleteMany({ where: { userId: req.userId, trainingId: id } });
+            await tx.training.delete({ where: { id: existing.id } });
+        });
         res.json({ ok: true });
     }
     catch (e) {
@@ -1012,14 +1064,17 @@ app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
         const matches = await prisma.match.findMany({ where: { userId: req.userId, plateauId: id }, include: { teams: true } });
         const matchIds = matches.map(m => m.id);
         const teamIds = matches.flatMap(m => m.teams.map(t => t.id));
-        await prisma.$transaction([
-            prisma.scorer.deleteMany({ where: { matchId: { in: matchIds } } }),
-            prisma.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: teamIds } } }),
-            prisma.matchTeam.deleteMany({ where: { matchId: { in: matchIds } } }),
-            prisma.match.deleteMany({ where: { id: { in: matchIds } } }),
-            prisma.attendance.deleteMany({ where: { userId: req.userId, session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] }, session_id: id } }),
-            prisma.plateau.delete({ where: { id: exists.id } })
-        ]);
+        await prisma.$transaction(async (tx) => {
+            await tx.scorer.deleteMany({ where: { matchId: { in: matchIds } } });
+            await tx.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: teamIds } } });
+            await tx.matchTeam.deleteMany({ where: { matchId: { in: matchIds } } });
+            await tx.match.deleteMany({ where: { id: { in: matchIds } } });
+            await attendanceDeleteManyForUser(tx, req.userId, {
+                session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] },
+                session_id: id
+            });
+            await tx.plateau.delete({ where: { id: exists.id } });
+        });
         res.json({ ok: true });
     }
     catch (e) {
@@ -1051,9 +1106,8 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
         if (!plateau)
             return res.status(404).json({ error: 'Plateau not found' });
         // Attendance (present/absent records) for this plateau, include player info
-        const attendance = await prisma.attendance.findMany({
+        const attendance = await attendanceFindManyForUser(prisma, req.userId, {
             where: {
-                userId: req.userId,
                 session_id: id,
                 session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] },
             },
@@ -1216,12 +1270,12 @@ app.get('/attendance', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const { session_type, session_id } = parsed.data;
-    const where = { userId: req.userId };
+    const where = {};
     if (session_type)
         where.session_type = session_type;
     if (session_id)
         where.session_id = session_id;
-    const rows = await prisma.attendance.findMany({ where });
+    const rows = await attendanceFindManyForUser(prisma, req.userId, { where });
     res.json(rows);
 });
 app.post('/attendance', authMiddleware, async (req, res) => {
@@ -1235,26 +1289,7 @@ app.post('/attendance', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const { session_type, session_id, playerId, present } = parsed.data;
-    try {
-        await prisma.attendance.upsert({
-            where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type, session_id, playerId } },
-            create: { userId: req.userId, session_type, session_id, playerId, present },
-            update: { present }
-        });
-    }
-    catch (e) {
-        // Fallback if `present` column doesn't exist
-        if (present) {
-            await prisma.attendance.upsert({
-                where: { userId_session_type_session_id_playerId: { userId: req.userId, session_type, session_id, playerId } },
-                create: { userId: req.userId, session_type, session_id, playerId },
-                update: {}
-            });
-        }
-        else {
-            await prisma.attendance.deleteMany({ where: { userId: req.userId, session_type, session_id, playerId } });
-        }
-    }
+    await attendanceSetPresenceForUser(prisma, req.userId, { session_type, session_id, playerId, present });
     res.json({ ok: true });
 });
 // ---- Matches ----
