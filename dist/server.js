@@ -175,8 +175,11 @@ function authMiddleware(req, res, next) {
         return res.status(401).json({ error: 'Invalid token' });
     }
 }
+function isMissingModelColumn(error, model, column) {
+    return error?.code === 'P2022' && error?.meta?.column === `${model}.${column}`;
+}
 function isMissingAttendanceColumn(error, column) {
-    return error?.code === 'P2022' && error?.meta?.column === `Attendance.${column}`;
+    return isMissingModelColumn(error, 'Attendance', column);
 }
 function ownedAttendanceWhere(userId, where = {}) {
     const next = { ...(where || {}) };
@@ -284,6 +287,121 @@ async function attendanceSetPlateauRsvpForUser(db, userId, plateauId, playerId, 
     }
     await attendanceDeleteManyForUser(db, userId, { session_type: 'PLATEAU', session_id: plateauId, playerId });
     await attendanceUpsertMarkerForUser(db, userId, { session_type: 'PLATEAU_ABSENT', session_id: plateauId, playerId });
+}
+function withDefaultTrainingStatus(row) {
+    return { ...row, status: row?.status ?? 'PLANNED' };
+}
+async function trainingFindManyForUser(db, userId, args = {}) {
+    try {
+        const rows = await db.training.findMany({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+        return rows.map(withDefaultTrainingStatus);
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Training', 'userId'))
+            throw error;
+        const rows = await db.training.findMany(args);
+        return rows.map(withDefaultTrainingStatus);
+    }
+}
+async function trainingFindFirstForUser(db, userId, args = {}) {
+    try {
+        const row = await db.training.findFirst({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+        return row ? withDefaultTrainingStatus(row) : row;
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Training', 'userId'))
+            throw error;
+        const row = await db.training.findFirst(args);
+        return row ? withDefaultTrainingStatus(row) : row;
+    }
+}
+async function trainingCreateForUser(db, userId, data) {
+    try {
+        return withDefaultTrainingStatus(await db.training.create({ data: { ...data, userId } }));
+    }
+    catch (error) {
+        if (isMissingModelColumn(error, 'Training', 'userId')) {
+            try {
+                return withDefaultTrainingStatus(await db.training.create({ data }));
+            }
+            catch (innerError) {
+                if (!isMissingModelColumn(innerError, 'Training', 'status'))
+                    throw innerError;
+                const { status, ...withoutStatus } = data;
+                return withDefaultTrainingStatus(await db.training.create({ data: withoutStatus }));
+            }
+        }
+        if (!isMissingModelColumn(error, 'Training', 'status'))
+            throw error;
+        const { status, ...withoutStatus } = data;
+        return withDefaultTrainingStatus(await db.training.create({ data: { ...withoutStatus, userId } }));
+    }
+}
+async function trainingUpdateCompat(db, id, data) {
+    try {
+        return withDefaultTrainingStatus(await db.training.update({ where: { id }, data }));
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Training', 'status'))
+            throw error;
+        const { status, ...withoutStatus } = data;
+        return withDefaultTrainingStatus(await db.training.update({ where: { id }, data: withoutStatus }));
+    }
+}
+async function plateauFindManyForUser(db, userId, args = {}) {
+    try {
+        return db.plateau.findMany({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Plateau', 'userId'))
+            throw error;
+        return db.plateau.findMany(args);
+    }
+}
+async function plateauFindFirstForUser(db, userId, args = {}) {
+    try {
+        return db.plateau.findFirst({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Plateau', 'userId'))
+            throw error;
+        return db.plateau.findFirst(args);
+    }
+}
+async function plateauCreateForUser(db, userId, data) {
+    try {
+        return db.plateau.create({ data: { ...data, userId } });
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Plateau', 'userId'))
+            throw error;
+        return db.plateau.create({ data });
+    }
+}
+async function matchFindManyForUser(db, userId, args = {}) {
+    try {
+        return db.match.findMany({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Match', 'userId'))
+            throw error;
+        return db.match.findMany(args);
+    }
 }
 // --- Nodemailer (optional) ---
 let transporter = null;
@@ -901,7 +1019,7 @@ app.get('/player/plateaus', playerAuth, async (req, res) => {
         const teams = await prisma.matchTeam.findMany({ where: { id: { in: teamIds } }, select: { matchId: true } });
         const matchIds = teams.map(t => t.matchId);
         if (matchIds.length) {
-            const matches = await prisma.match.findMany({ where: { userId: req.playerUserId, id: { in: matchIds } }, select: { plateauId: true } });
+            const matches = await matchFindManyForUser(prisma, req.playerUserId, { where: { id: { in: matchIds } }, select: { plateauId: true } });
             plateauIdsFromMatches = matches.map(m => m.plateauId).filter(Boolean);
         }
     }
@@ -909,7 +1027,7 @@ app.get('/player/plateaus', playerAuth, async (req, res) => {
     const ids = Array.from(set);
     if (!ids.length)
         return res.json([]);
-    const plateaus = await prisma.plateau.findMany({ where: { userId: req.playerUserId, id: { in: ids } }, orderBy: { date: 'desc' } });
+    const plateaus = await plateauFindManyForUser(prisma, req.playerUserId, { where: { id: { in: ids } }, orderBy: { date: 'desc' } });
     res.json(plateaus);
 });
 app.get('/player/plateaus/:id/summary', playerAuth, async (req, res) => {
@@ -962,14 +1080,14 @@ app.delete('/players/:id', authMiddleware, async (req, res) => {
 });
 // ---- Trainings ----
 app.get('/trainings', authMiddleware, async (req, res) => {
-    const trainings = await prisma.training.findMany({ where: { userId: req.userId }, orderBy: { date: 'desc' } });
+    const trainings = await trainingFindManyForUser(prisma, req.userId, { orderBy: { date: 'desc' } });
     res.json(trainings);
 });
 // Get single training
 app.get('/trainings/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
-        const training = await prisma.training.findFirst({ where: { id, userId: req.userId } });
+        const training = await trainingFindFirstForUser(prisma, req.userId, { where: { id } });
         if (!training)
             return res.status(404).json({ error: 'Training not found' });
         res.json(training);
@@ -985,7 +1103,7 @@ app.post('/trainings', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const date = new Date(parsed.data.date);
-    const t = await prisma.training.create({ data: { userId: req.userId, date } });
+    const t = await trainingCreateForUser(prisma, req.userId, { date, status: 'PLANNED' });
     res.json(t);
 });
 // Update a training (date/status)
@@ -1003,10 +1121,10 @@ app.put('/trainings/:id', authMiddleware, async (req, res) => {
     if (parsed.data.status !== undefined)
         data.status = parsed.data.status;
     try {
-        const existing = await prisma.training.findFirst({ where: { id: req.params.id, userId: req.userId } });
+        const existing = await trainingFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } });
         if (!existing)
             return res.status(404).json({ error: 'Training not found' });
-        const updated = await prisma.training.update({ where: { id: existing.id }, data });
+        const updated = await trainingUpdateCompat(prisma, existing.id, data);
         res.json(updated);
     }
     catch (e) {
@@ -1021,7 +1139,7 @@ app.put('/trainings/:id', authMiddleware, async (req, res) => {
 app.delete('/trainings/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
-        const existing = await prisma.training.findFirst({ where: { id, userId: req.userId } });
+        const existing = await trainingFindFirstForUser(prisma, req.userId, { where: { id } });
         if (!existing)
             return res.status(404).json({ error: 'Training not found' });
         await prisma.$transaction(async (tx) => {
@@ -1041,7 +1159,7 @@ app.delete('/trainings/:id', authMiddleware, async (req, res) => {
 });
 // ---- Plateaus ----
 app.get('/plateaus', authMiddleware, async (req, res) => {
-    const plateaus = await prisma.plateau.findMany({ where: { userId: req.userId }, orderBy: { date: 'desc' } });
+    const plateaus = await plateauFindManyForUser(prisma, req.userId, { orderBy: { date: 'desc' } });
     res.json(plateaus);
 });
 app.post('/plateaus', authMiddleware, async (req, res) => {
@@ -1050,14 +1168,14 @@ app.post('/plateaus', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const date = new Date(parsed.data.date);
-    const pl = await prisma.plateau.create({ data: { userId: req.userId, date, lieu: parsed.data.lieu } });
+    const pl = await plateauCreateForUser(prisma, req.userId, { date, lieu: parsed.data.lieu });
     res.json(pl);
 });
 app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
         // Ensure plateau exists
-        const exists = await prisma.plateau.findFirst({ where: { id, userId: req.userId } });
+        const exists = await plateauFindFirstForUser(prisma, req.userId, { where: { id } });
         if (!exists)
             return res.status(404).json({ error: 'Plateau not found' });
         // Collect related matches and teams
@@ -1088,7 +1206,7 @@ app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
 app.get('/plateaus/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
-        const plateau = await prisma.plateau.findFirst({ where: { id, userId: req.userId } });
+        const plateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id } });
         if (!plateau)
             return res.status(404).json({ error: 'Plateau not found' });
         res.json(plateau);
@@ -1102,7 +1220,7 @@ app.get('/plateaus/:id', authMiddleware, async (req, res) => {
 app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
-        const plateau = await prisma.plateau.findFirst({ where: { id, userId: req.userId } });
+        const plateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id } });
         if (!plateau)
             return res.status(404).json({ error: 'Plateau not found' });
         // Attendance (present/absent records) for this plateau, include player info
@@ -1127,8 +1245,8 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
             };
         }
         // Matches for this plateau (with teams and scorers first)
-        const matchesRaw = await prisma.match.findMany({
-            where: { userId: req.userId, plateauId: id },
+        const matchesRaw = await matchFindManyForUser(prisma, req.userId, {
+            where: { plateauId: id },
             include: {
                 teams: true,
                 scorers: true
@@ -1136,7 +1254,7 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
             orderBy: { createdAt: 'asc' }
         });
         // Fetch all team players in one query and attach player objects
-        const allTeamIds = matchesRaw.flatMap(m => m.teams.map(t => t.id));
+        const allTeamIds = matchesRaw.flatMap((m) => m.teams.map((t) => t.id));
         const mtPlayers = allTeamIds.length ? await prisma.matchTeamPlayer.findMany({
             where: { matchTeamId: { in: allTeamIds } },
             include: { player: true }
@@ -1148,9 +1266,9 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
             byTeam[row.matchTeamId].push(row);
         }
         // Build enriched matches with teams[].players including player info
-        const matches = matchesRaw.map(m => ({
+        const matches = matchesRaw.map((m) => ({
             ...m,
-            teams: m.teams.map(t => ({
+            teams: m.teams.map((t) => ({
                 ...t,
                 players: (byTeam[t.id] || []).map(p => ({
                     playerId: p.playerId,
@@ -1248,7 +1366,7 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
         // Add scorersDetailed to each match, resolving playerName from playersById
         const matchesEnriched = matches.map(m => ({
             ...m,
-            scorersDetailed: m.scorers.map(s => ({
+            scorersDetailed: m.scorers.map((s) => ({
                 ...s,
                 playerName: playersById[s.playerId]?.name || null
             }))
@@ -1295,8 +1413,8 @@ app.post('/attendance', authMiddleware, async (req, res) => {
 // ---- Matches ----
 app.get('/matches', authMiddleware, async (req, res) => {
     const { plateauId } = req.query;
-    const where = plateauId ? { userId: req.userId, plateauId: String(plateauId) } : { userId: req.userId };
-    const matches = await prisma.match.findMany({
+    const where = plateauId ? { plateauId: String(plateauId) } : {};
+    const matches = await matchFindManyForUser(prisma, req.userId, {
         where,
         include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
         orderBy: { createdAt: 'desc' }
@@ -1326,7 +1444,7 @@ app.post('/matches', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: parsed.error.flatten() });
     const { type, plateauId, sides, score, buteurs, opponentName } = parsed.data;
     if (plateauId) {
-        const ownedPlateau = await prisma.plateau.findFirst({ where: { id: plateauId, userId: req.userId } });
+        const ownedPlateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id: plateauId } });
         if (!ownedPlateau)
             return res.status(404).json({ error: 'Plateau not found' });
     }
@@ -1470,7 +1588,7 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
     const { plateauId, teams, schedule, defaults } = parsed.data;
     const startersPerTeam = defaults?.startersPerTeam ?? 5;
     if (plateauId) {
-        const ownedPlateau = await prisma.plateau.findFirst({ where: { id: plateauId, userId: req.userId } });
+        const ownedPlateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id: plateauId } });
         if (!ownedPlateau)
             return res.status(404).json({ error: 'Plateau not found' });
     }
@@ -1505,7 +1623,7 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
 // Lister les exercices d'une séance (avec enrichissement à partir du catalogue DRILLS)
 app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
-    const training = await prisma.training.findFirst({ where: { id: trainingId, userId: req.userId } });
+    const training = await trainingFindFirstForUser(prisma, req.userId, { where: { id: trainingId } });
     if (!training)
         return res.status(404).json({ error: 'Training not found' });
     const rows = await prisma.trainingDrill.findMany({
@@ -1522,7 +1640,7 @@ app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
 // Ajouter un exercice à une séance
 app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
-    const training = await prisma.training.findFirst({ where: { id: trainingId, userId: req.userId } });
+    const training = await trainingFindFirstForUser(prisma, req.userId, { where: { id: trainingId } });
     if (!training)
         return res.status(404).json({ error: 'Training not found' });
     const schema = zod_1.z.object({
