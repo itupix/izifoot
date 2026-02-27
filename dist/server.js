@@ -370,7 +370,7 @@ async function trainingUpdateCompat(db, id, data) {
 }
 async function plateauFindManyForUser(db, userId, args = {}) {
     try {
-        return db.plateau.findMany({
+        return await db.plateau.findMany({
             ...args,
             where: { ...(args.where || {}), userId },
         });
@@ -378,7 +378,7 @@ async function plateauFindManyForUser(db, userId, args = {}) {
     catch (error) {
         if (!isMissingModelColumn(error, 'Plateau', 'userId'))
             throw error;
-        return db.plateau.findMany({
+        return await db.plateau.findMany({
             ...args,
             select: {
                 id: true,
@@ -392,7 +392,7 @@ async function plateauFindManyForUser(db, userId, args = {}) {
 }
 async function plateauFindFirstForUser(db, userId, args = {}) {
     try {
-        return db.plateau.findFirst({
+        return await db.plateau.findFirst({
             ...args,
             where: { ...(args.where || {}), userId },
         });
@@ -400,7 +400,7 @@ async function plateauFindFirstForUser(db, userId, args = {}) {
     catch (error) {
         if (!isMissingModelColumn(error, 'Plateau', 'userId'))
             throw error;
-        return db.plateau.findFirst({
+        return await db.plateau.findFirst({
             ...args,
             select: {
                 id: true,
@@ -414,17 +414,17 @@ async function plateauFindFirstForUser(db, userId, args = {}) {
 }
 async function plateauCreateForUser(db, userId, data) {
     try {
-        return db.plateau.create({ data: { ...data, userId } });
+        return await db.plateau.create({ data: { ...data, userId } });
     }
     catch (error) {
         if (!isMissingModelColumn(error, 'Plateau', 'userId'))
             throw error;
-        return db.plateau.create({ data });
+        return await db.plateau.create({ data });
     }
 }
 async function matchFindManyForUser(db, userId, args = {}) {
     try {
-        return db.match.findMany({
+        return await db.match.findMany({
             ...args,
             where: { ...(args.where || {}), userId },
         });

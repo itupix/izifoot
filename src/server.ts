@@ -370,13 +370,13 @@ async function trainingUpdateCompat(db: any, id: string, data: any) {
 
 async function plateauFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
   try {
-    return db.plateau.findMany({
+    return await db.plateau.findMany({
       ...args,
       where: { ...(args.where || {}), userId },
     })
   } catch (error) {
     if (!isMissingModelColumn(error, 'Plateau', 'userId')) throw error
-    return db.plateau.findMany({
+    return await db.plateau.findMany({
       ...args,
       select: {
         id: true,
@@ -391,13 +391,13 @@ async function plateauFindManyForUser(db: any, userId: string, args: any = {}): 
 
 async function plateauFindFirstForUser(db: any, userId: string, args: any = {}): Promise<any> {
   try {
-    return db.plateau.findFirst({
+    return await db.plateau.findFirst({
       ...args,
       where: { ...(args.where || {}), userId },
     })
   } catch (error) {
     if (!isMissingModelColumn(error, 'Plateau', 'userId')) throw error
-    return db.plateau.findFirst({
+    return await db.plateau.findFirst({
       ...args,
       select: {
         id: true,
@@ -412,16 +412,16 @@ async function plateauFindFirstForUser(db: any, userId: string, args: any = {}):
 
 async function plateauCreateForUser(db: any, userId: string, data: any) {
   try {
-    return db.plateau.create({ data: { ...data, userId } })
+    return await db.plateau.create({ data: { ...data, userId } })
   } catch (error) {
     if (!isMissingModelColumn(error, 'Plateau', 'userId')) throw error
-    return db.plateau.create({ data })
+    return await db.plateau.create({ data })
   }
 }
 
 async function matchFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
   try {
-    return db.match.findMany({
+    return await db.match.findMany({
       ...args,
       where: { ...(args.where || {}), userId },
     })
