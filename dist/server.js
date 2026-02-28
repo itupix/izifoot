@@ -249,6 +249,16 @@ function legacyAttendanceArgs(args = {}, where) {
         },
     };
 }
+function legacyAttendanceSelect() {
+    return {
+        id: true,
+        session_type: true,
+        session_id: true,
+        playerId: true,
+        trainingId: true,
+        plateauId: true,
+    };
+}
 async function attendanceFindManyForUser(db, userId, args = {}) {
     try {
         return await db.attendance.findMany({
@@ -322,8 +332,9 @@ async function attendanceUpsertMarkerForUser(db, userId, params) {
     const existing = await attendanceFindFirstForUser(db, userId, { where: { session_type, session_id, playerId } });
     if (existing)
         return existing;
-    return db.attendance.create({
+    return await db.attendance.create({
         data: { session_type, session_id, playerId },
+        select: legacyAttendanceSelect(),
     });
 }
 async function attendanceSetPresenceForUser(db, userId, params) {

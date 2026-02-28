@@ -258,6 +258,17 @@ function legacyAttendanceArgs(args: any = {}, where: any) {
   }
 }
 
+function legacyAttendanceSelect() {
+  return {
+    id: true,
+    session_type: true,
+    session_id: true,
+    playerId: true,
+    trainingId: true,
+    plateauId: true,
+  }
+}
+
 async function attendanceFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
   try {
     return await db.attendance.findMany({
@@ -322,8 +333,9 @@ async function attendanceUpsertMarkerForUser(db: any, userId: string, params: { 
   const existing = await attendanceFindFirstForUser(db, userId, { where: { session_type, session_id, playerId } })
   if (existing) return existing
 
-  return db.attendance.create({
+  return await db.attendance.create({
     data: { session_type, session_id, playerId },
+    select: legacyAttendanceSelect(),
   })
 }
 
