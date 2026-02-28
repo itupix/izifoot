@@ -359,6 +359,7 @@ async function playerFindManyForUser(db, userId, args = {}) {
             throw error;
         const rows = await db.player.findMany({
             ...args,
+            where: args.where,
             select: legacyPlayerSelect(),
         });
         return rows.map((row) => withLegacyPlayerDefaults(row));
@@ -377,6 +378,7 @@ async function playerFindFirstForUser(db, userId, args = {}) {
             throw error;
         const row = await db.player.findFirst({
             ...args,
+            where: args.where,
             select: legacyPlayerSelect(),
         });
         return withLegacyPlayerDefaults(row);
@@ -415,6 +417,7 @@ async function trainingFindManyForUser(db, userId, args = {}) {
             throw error;
         const rows = await db.training.findMany({
             ...args,
+            where: args.where,
             select: legacyTrainingSelect(),
         });
         return rows.map(withDefaultTrainingStatus);
@@ -433,6 +436,7 @@ async function trainingFindFirstForUser(db, userId, args = {}) {
             throw error;
         const row = await db.training.findFirst({
             ...args,
+            where: args.where,
             select: legacyTrainingSelect(),
         });
         return row ? withDefaultTrainingStatus(row) : row;
@@ -483,6 +487,7 @@ async function plateauFindManyForUser(db, userId, args = {}) {
             throw error;
         return await db.plateau.findMany({
             ...args,
+            where: args.where,
             select: {
                 id: true,
                 date: true,
@@ -505,6 +510,7 @@ async function plateauFindFirstForUser(db, userId, args = {}) {
             throw error;
         return await db.plateau.findFirst({
             ...args,
+            where: args.where,
             select: {
                 id: true,
                 date: true,
@@ -897,8 +903,28 @@ app.post('/drills', authMiddleware, async (req, res) => {
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 // ---- Players ----
 app.get('/players', authMiddleware, async (req, res) => {
-    const players = await playerFindManyForUser(prisma, req.userId, { orderBy: { name: 'asc' } });
-    res.json(players);
+    try {
+        const players = await playerFindManyForUser(prisma, req.userId, { orderBy: { name: 'asc' } });
+        return res.json(players);
+    }
+    catch (e) {
+        console.warn('[GET /players] Prisma fallback failed, using raw query', e?.message || e);
+        const players = await prisma.$queryRawUnsafe(`
+      SELECT
+        "id",
+        "name",
+        "primary_position",
+        "secondary_position",
+        "createdAt",
+        "updatedAt",
+        NULL::text AS "userId",
+        NULL::text AS "email",
+        NULL::text AS "phone"
+      FROM "Player"
+      ORDER BY "name" ASC
+    `);
+        return res.json(players);
+    }
 });
 app.post('/players', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
@@ -1310,8 +1336,24 @@ app.delete('/trainings/:id', authMiddleware, async (req, res) => {
 });
 // ---- Plateaus ----
 app.get('/plateaus', authMiddleware, async (req, res) => {
-    const plateaus = await plateauFindManyForUser(prisma, req.userId, { orderBy: { date: 'desc' } });
-    res.json(plateaus);
+    try {
+        const plateaus = await plateauFindManyForUser(prisma, req.userId, { orderBy: { date: 'desc' } });
+        return res.json(plateaus);
+    }
+    catch (e) {
+        console.warn('[GET /plateaus] Prisma fallback failed, using raw query', e?.message || e);
+        const plateaus = await prisma.$queryRawUnsafe(`
+      SELECT
+        "id",
+        "date",
+        "lieu",
+        "createdAt",
+        "updatedAt"
+      FROM "Plateau"
+      ORDER BY "date" DESC
+    `);
+        return res.json(plateaus);
+    }
 });
 app.post('/plateaus', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()), lieu: zod_1.z.string().min(1) });
@@ -1544,8 +1586,36 @@ app.get('/attendance', authMiddleware, async (req, res) => {
         where.session_type = session_type;
     if (session_id)
         where.session_id = session_id;
-    const rows = await attendanceFindManyForUser(prisma, req.userId, { where });
-    res.json(rows);
+    try {
+        const rows = await attendanceFindManyForUser(prisma, req.userId, { where });
+        return res.json(rows);
+    }
+    catch (e) {
+        console.warn('[GET /attendance] Prisma fallback failed, using raw query', e?.message || e);
+        const conditions = [];
+        const params = [];
+        if (session_type) {
+            params.push(session_type);
+            conditions.push(`"session_type" = $${params.length}`);
+        }
+        if (session_id) {
+            params.push(session_id);
+            conditions.push(`"session_id" = $${params.length}`);
+        }
+        const sql = `
+      SELECT
+        "id",
+        "session_type",
+        "session_id",
+        "playerId",
+        "trainingId",
+        "plateauId"
+      FROM "Attendance"
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+    `;
+        const rows = await prisma.$queryRawUnsafe(sql, ...params);
+        return res.json(rows);
+    }
 });
 app.post('/attendance', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
