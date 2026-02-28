@@ -187,7 +187,13 @@ function authMiddleware(req, res, next) {
     }
 }
 function isMissingModelColumn(error, model, column) {
-    return error?.code === 'P2022' && error?.meta?.column === `${model}.${column}`;
+    if (error?.code !== 'P2022')
+        return false;
+    const errorModel = error?.meta?.modelName;
+    const errorColumn = error?.meta?.column;
+    if (errorModel && errorModel !== model)
+        return false;
+    return errorColumn === column || errorColumn === `${model}.${column}`;
 }
 function isMissingAttendanceColumn(error, column) {
     return isMissingModelColumn(error, 'Attendance', column);

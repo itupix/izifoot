@@ -192,7 +192,11 @@ function authMiddleware(req: any, res: any, next: any) {
 }
 
 function isMissingModelColumn(error: any, model: string, column: string) {
-  return error?.code === 'P2022' && error?.meta?.column === `${model}.${column}`
+  if (error?.code !== 'P2022') return false
+  const errorModel = error?.meta?.modelName
+  const errorColumn = error?.meta?.column
+  if (errorModel && errorModel !== model) return false
+  return errorColumn === column || errorColumn === `${model}.${column}`
 }
 
 function isMissingAttendanceColumn(error: any, column: string) {
