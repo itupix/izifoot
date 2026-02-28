@@ -181,6 +181,9 @@ function isMissingModelColumn(error, model, column) {
 function isMissingAttendanceColumn(error, column) {
     return isMissingModelColumn(error, 'Attendance', column);
 }
+function isMissingPlayerColumn(error, column) {
+    return isMissingModelColumn(error, 'Player', column);
+}
 function ownedAttendanceWhere(userId, where = {}) {
     const next = { ...(where || {}) };
     delete next.userId;
@@ -235,7 +238,14 @@ async function attendanceFindManyForUser(db, userId, args = {}) {
     catch (error) {
         if (!isMissingAttendanceColumn(error, 'userId'))
             throw error;
-        return await db.attendance.findMany(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
+        try {
+            return await db.attendance.findMany(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
+        }
+        catch (innerError) {
+            if (!isMissingPlayerColumn(innerError, 'userId'))
+                throw innerError;
+            return await db.attendance.findMany(legacyAttendanceArgs(args, args.where || {}));
+        }
     }
 }
 async function attendanceFindFirstForUser(db, userId, args = {}) {
@@ -248,7 +258,14 @@ async function attendanceFindFirstForUser(db, userId, args = {}) {
     catch (error) {
         if (!isMissingAttendanceColumn(error, 'userId'))
             throw error;
-        return await db.attendance.findFirst(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
+        try {
+            return await db.attendance.findFirst(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
+        }
+        catch (innerError) {
+            if (!isMissingPlayerColumn(innerError, 'userId'))
+                throw innerError;
+            return await db.attendance.findFirst(legacyAttendanceArgs(args, args.where || {}));
+        }
     }
 }
 async function attendanceDeleteManyForUser(db, userId, where = {}) {
@@ -258,7 +275,14 @@ async function attendanceDeleteManyForUser(db, userId, where = {}) {
     catch (error) {
         if (!isMissingAttendanceColumn(error, 'userId'))
             throw error;
-        return db.attendance.deleteMany({ where: ownedAttendanceWhere(userId, where) });
+        try {
+            return await db.attendance.deleteMany({ where: ownedAttendanceWhere(userId, where) });
+        }
+        catch (innerError) {
+            if (!isMissingPlayerColumn(innerError, 'userId'))
+                throw innerError;
+            return await db.attendance.deleteMany({ where });
+        }
     }
 }
 async function attendanceUpsertMarkerForUser(db, userId, params) {
