@@ -212,6 +212,10 @@ function isMissingPlayerColumn(error: any, column: string) {
   return isMissingModelColumn(error, 'Player', column)
 }
 
+function isUnknownArgument(error: any, argName: string) {
+  return typeof error?.message === 'string' && error.message.includes(`Unknown argument \`${argName}\``)
+}
+
 function ownedAttendanceWhere(userId: string, where: any = {}) {
   const next = { ...(where || {}) }
   delete next.userId
@@ -349,7 +353,11 @@ async function attendanceSetPresenceForUser(db: any, userId: string, params: { s
       update: { present } as any,
     })
   } catch (error) {
-    if (!isMissingAttendanceColumn(error, 'userId') && !isMissingAttendanceColumn(error, 'present')) throw error
+    if (
+      !isMissingAttendanceColumn(error, 'userId') &&
+      !isMissingAttendanceColumn(error, 'present') &&
+      !isUnknownArgument(error, 'present')
+    ) throw error
   }
 
   if (present) {
@@ -367,7 +375,11 @@ async function attendanceSetPlateauRsvpForUser(db: any, userId: string, plateauI
       update: { present } as any,
     })
   } catch (error) {
-    if (!isMissingAttendanceColumn(error, 'userId') && !isMissingAttendanceColumn(error, 'present')) throw error
+    if (
+      !isMissingAttendanceColumn(error, 'userId') &&
+      !isMissingAttendanceColumn(error, 'present') &&
+      !isUnknownArgument(error, 'present')
+    ) throw error
   }
 
   if (present) {

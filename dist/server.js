@@ -205,6 +205,9 @@ function isMissingAttendanceColumn(error, column) {
 function isMissingPlayerColumn(error, column) {
     return isMissingModelColumn(error, 'Player', column);
 }
+function isUnknownArgument(error, argName) {
+    return typeof error?.message === 'string' && error.message.includes(`Unknown argument \`${argName}\``);
+}
 function ownedAttendanceWhere(userId, where = {}) {
     const next = { ...(where || {}) };
     delete next.userId;
@@ -347,7 +350,9 @@ async function attendanceSetPresenceForUser(db, userId, params) {
         });
     }
     catch (error) {
-        if (!isMissingAttendanceColumn(error, 'userId') && !isMissingAttendanceColumn(error, 'present'))
+        if (!isMissingAttendanceColumn(error, 'userId') &&
+            !isMissingAttendanceColumn(error, 'present') &&
+            !isUnknownArgument(error, 'present'))
             throw error;
     }
     if (present) {
@@ -364,7 +369,9 @@ async function attendanceSetPlateauRsvpForUser(db, userId, plateauId, playerId, 
         });
     }
     catch (error) {
-        if (!isMissingAttendanceColumn(error, 'userId') && !isMissingAttendanceColumn(error, 'present'))
+        if (!isMissingAttendanceColumn(error, 'userId') &&
+            !isMissingAttendanceColumn(error, 'present') &&
+            !isUnknownArgument(error, 'present'))
             throw error;
     }
     if (present) {
