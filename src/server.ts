@@ -26,6 +26,21 @@ const AUTH_COOKIE_NAME = 'token'
 // Railway/Reverse proxy support so secure cookies can be set correctly.
 app.set('trust proxy', 1)
 
+type ExpressHandler = (...args: any[]) => any
+
+function wrapExpressHandler(handler: ExpressHandler): ExpressHandler {
+  return function wrappedHandler(req: any, res: any, next: any) {
+    return Promise.resolve(handler(req, res, next)).catch(next)
+  }
+}
+
+for (const method of ['get', 'post', 'put', 'delete', 'patch'] as const) {
+  const original = (app as any)[method].bind(app)
+  ;(app as any)[method] = (path: string, ...handlers: ExpressHandler[]) => {
+    return original(path, ...handlers.map((handler) => wrapExpressHandler(handler)))
+  }
+}
+
 function toOrigin(raw: string) {
   const s = raw.trim()
   if (!s) return null
@@ -2013,6 +2028,15 @@ app.delete('/diagrams/:id', authMiddleware, async (req: any, res) => {
 // === END FOOT DOMAIN API ===
 
 app.get('/health', (_req, res) => res.json({ ok: true }))
+
+app.use((err: any, _req: any, res: any, _next: any) => {
+  console.error('[unhandled]', err)
+  if (res.headersSent) return
+  const status = err?.statusCode || err?.status || 500
+  res.status(status).json({
+    error: status >= 500 ? 'Internal error' : (err?.message || 'Request failed')
+  })
+})
 
 app.listen(PORT, () => {
   console.log(`API listening on ${PORT}`)

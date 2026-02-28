@@ -28,6 +28,17 @@ const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`;
 const AUTH_COOKIE_NAME = 'token';
 // Railway/Reverse proxy support so secure cookies can be set correctly.
 app.set('trust proxy', 1);
+function wrapExpressHandler(handler) {
+    return function wrappedHandler(req, res, next) {
+        return Promise.resolve(handler(req, res, next)).catch(next);
+    };
+}
+for (const method of ['get', 'post', 'put', 'delete', 'patch']) {
+    const original = app[method].bind(app);
+    app[method] = (path, ...handlers) => {
+        return original(path, ...handlers.map((handler) => wrapExpressHandler(handler)));
+    };
+}
 function toOrigin(raw) {
     const s = raw.trim();
     if (!s)
@@ -2035,6 +2046,15 @@ app.delete('/diagrams/:id', authMiddleware, async (req, res) => {
 });
 // === END FOOT DOMAIN API ===
 app.get('/health', (_req, res) => res.json({ ok: true }));
+app.use((err, _req, res, _next) => {
+    console.error('[unhandled]', err);
+    if (res.headersSent)
+        return;
+    const status = err?.statusCode || err?.status || 500;
+    res.status(status).json({
+        error: status >= 500 ? 'Internal error' : (err?.message || 'Request failed')
+    });
+});
 app.listen(PORT, () => {
     console.log(`API listening on ${PORT}`);
 });
