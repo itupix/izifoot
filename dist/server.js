@@ -188,6 +188,43 @@ function ownedAttendanceWhere(userId, where = {}) {
         return { player: { userId } };
     return { AND: [next, { player: { userId } }] };
 }
+function legacyPlayerSelect() {
+    return {
+        id: true,
+        name: true,
+        primary_position: true,
+        secondary_position: true,
+        createdAt: true,
+        updatedAt: true,
+    };
+}
+function withLegacyPlayerDefaults(row) {
+    if (!row)
+        return row;
+    return {
+        ...row,
+        userId: row.userId ?? null,
+        email: row.email ?? null,
+        phone: row.phone ?? null,
+    };
+}
+function legacyAttendanceArgs(args = {}, where) {
+    const includePlayer = Boolean(args.include?.player);
+    return {
+        ...args,
+        where,
+        include: undefined,
+        select: {
+            id: true,
+            session_type: true,
+            session_id: true,
+            playerId: true,
+            trainingId: true,
+            plateauId: true,
+            ...(includePlayer ? { player: { select: legacyPlayerSelect() } } : {}),
+        },
+    };
+}
 async function attendanceFindManyForUser(db, userId, args = {}) {
     try {
         return await db.attendance.findMany({
@@ -198,10 +235,7 @@ async function attendanceFindManyForUser(db, userId, args = {}) {
     catch (error) {
         if (!isMissingAttendanceColumn(error, 'userId'))
             throw error;
-        return db.attendance.findMany({
-            ...args,
-            where: ownedAttendanceWhere(userId, args.where),
-        });
+        return await db.attendance.findMany(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
     }
 }
 async function attendanceFindFirstForUser(db, userId, args = {}) {
@@ -214,10 +248,7 @@ async function attendanceFindFirstForUser(db, userId, args = {}) {
     catch (error) {
         if (!isMissingAttendanceColumn(error, 'userId'))
             throw error;
-        return db.attendance.findFirst({
-            ...args,
-            where: ownedAttendanceWhere(userId, args.where),
-        });
+        return await db.attendance.findFirst(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
     }
 }
 async function attendanceDeleteManyForUser(db, userId, where = {}) {
@@ -290,6 +321,54 @@ async function attendanceSetPlateauRsvpForUser(db, userId, plateauId, playerId, 
 }
 function withDefaultTrainingStatus(row) {
     return { ...row, status: row?.status ?? 'PLANNED' };
+}
+async function playerFindManyForUser(db, userId, args = {}) {
+    try {
+        const rows = await db.player.findMany({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+        return rows.map((row) => withLegacyPlayerDefaults(row));
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Player', 'userId') && !isMissingModelColumn(error, 'Player', 'email') && !isMissingModelColumn(error, 'Player', 'phone'))
+            throw error;
+        const rows = await db.player.findMany({
+            ...args,
+            select: legacyPlayerSelect(),
+        });
+        return rows.map((row) => withLegacyPlayerDefaults(row));
+    }
+}
+async function playerFindFirstForUser(db, userId, args = {}) {
+    try {
+        const row = await db.player.findFirst({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+        return withLegacyPlayerDefaults(row);
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Player', 'userId') && !isMissingModelColumn(error, 'Player', 'email') && !isMissingModelColumn(error, 'Player', 'phone'))
+            throw error;
+        const row = await db.player.findFirst({
+            ...args,
+            select: legacyPlayerSelect(),
+        });
+        return withLegacyPlayerDefaults(row);
+    }
+}
+async function playerFindByIdCompat(db, id) {
+    try {
+        const row = await db.player.findUnique({ where: { id }, select: { id: true, userId: true, email: true, phone: true } });
+        return withLegacyPlayerDefaults(row);
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'Player', 'userId') && !isMissingModelColumn(error, 'Player', 'email') && !isMissingModelColumn(error, 'Player', 'phone'))
+            throw error;
+        const row = await db.player.findUnique({ where: { id }, select: legacyPlayerSelect() });
+        return withLegacyPlayerDefaults(row);
+    }
 }
 function legacyTrainingSelect() {
     return {
@@ -794,7 +873,7 @@ app.post('/drills', authMiddleware, async (req, res) => {
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 // ---- Players ----
 app.get('/players', authMiddleware, async (req, res) => {
-    const players = await prisma.player.findMany({ where: { userId: req.userId }, orderBy: { name: 'asc' } });
+    const players = await playerFindManyForUser(prisma, req.userId, { orderBy: { name: 'asc' } });
     res.json(players);
 });
 app.post('/players', authMiddleware, async (req, res) => {
@@ -843,7 +922,7 @@ app.put('/players/:id', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const { id } = req.params;
-    const existing = await prisma.player.findFirst({ where: { id, userId: req.userId } });
+    const existing = await playerFindFirstForUser(prisma, req.userId, { where: { id } });
     if (!existing)
         return res.status(404).json({ error: 'Player not found' });
     const patch = {};
@@ -885,7 +964,7 @@ async function playerAuth(req, res, next) {
         const payload = jsonwebtoken_1.default.verify(token, JWT_SECRET);
         if (payload?.aud !== 'player_invite' || !payload?.pid)
             return res.status(401).json({ error: 'Invalid token' });
-        const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } });
+        const player = await playerFindByIdCompat(prisma, payload.pid);
         if (!player)
             return res.status(401).json({ error: 'Invalid token' });
         req.playerId = payload.pid;
@@ -904,7 +983,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const player = await prisma.player.findFirst({ where: { id, userId: req.userId } });
+    const player = await playerFindFirstForUser(prisma, req.userId, { where: { id } });
     if (!player)
         return res.status(404).json({ error: 'Player not found' });
     const base = `${req.protocol}://${req.get('host')}`;
@@ -1000,7 +1079,7 @@ app.get('/rsvp/p', async (req, res) => {
         if (payload?.aud !== 'player_rsvp' || payload?.st !== 'present' || !payload?.pid || !payload?.plid) {
             return res.redirect(302, redirectBase);
         }
-        const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } });
+        const player = await playerFindByIdCompat(prisma, payload.pid);
         if (!player?.userId)
             return res.redirect(302, redirectBase);
         try {
@@ -1025,7 +1104,7 @@ app.get('/rsvp/a', async (req, res) => {
         if (payload?.aud !== 'player_rsvp' || payload?.st !== 'absent' || !payload?.pid || !payload?.plid) {
             return res.redirect(302, redirectBase);
         }
-        const player = await prisma.player.findUnique({ where: { id: payload.pid }, select: { userId: true } });
+        const player = await playerFindByIdCompat(prisma, payload.pid);
         if (!player?.userId)
             return res.redirect(302, redirectBase);
         try {
@@ -1046,7 +1125,7 @@ app.get('/player/debug', (req, res) => {
 });
 // --- Scoped player endpoints ---
 app.get('/player/me', playerAuth, async (req, res) => {
-    const p = await prisma.player.findFirst({ where: { id: req.playerId, userId: req.playerUserId } });
+    const p = await playerFindFirstForUser(prisma, req.playerUserId, { where: { id: req.playerId } });
     if (!p)
         return res.status(404).json({ error: 'Player not found' });
     res.json({ id: p.id, name: p.name || '', email: p.email || null, phone: p.phone || null });
@@ -1109,7 +1188,7 @@ app.delete('/players/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
         // Ensure the player exists first
-        const exists = await prisma.player.findFirst({ where: { id, userId: req.userId } });
+        const exists = await playerFindFirstForUser(prisma, req.userId, { where: { id } });
         if (!exists)
             return res.status(404).json({ error: 'Player not found' });
         await prisma.$transaction(async (tx) => {
@@ -1352,7 +1431,7 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
         }
         // Ensure we know all players (for listing). We do not auto-mark as convoked.
         try {
-            const allPlayers = await prisma.player.findMany({ where: { userId: req.userId }, orderBy: { name: 'asc' } });
+            const allPlayers = await playerFindManyForUser(prisma, req.userId, { orderBy: { name: 'asc' } });
             for (const pl of allPlayers) {
                 if (!playersById[pl.id]) {
                     playersById[pl.id] = {
