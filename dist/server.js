@@ -421,6 +421,16 @@ function legacyTrainingSelect() {
         updatedAt: true,
     };
 }
+function legacyTrainingDrillSelect() {
+    return {
+        id: true,
+        trainingId: true,
+        drillId: true,
+        order: true,
+        duration: true,
+        notes: true,
+    };
+}
 async function trainingFindManyForUser(db, userId, args = {}) {
     try {
         const rows = await db.training.findMany({
@@ -588,6 +598,55 @@ async function matchFindManyForUser(db, userId, args = {}) {
             updatedAt: row.updatedAt ?? row.createdAt,
             opponentName: row.opponentName ?? null,
         }));
+    }
+}
+async function trainingDrillFindManyForUser(db, userId, args = {}) {
+    try {
+        return await db.trainingDrill.findMany({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'TrainingDrill', 'userId'))
+            throw error;
+        return await db.trainingDrill.findMany({
+            ...args,
+            where: args.where,
+            select: legacyTrainingDrillSelect(),
+        });
+    }
+}
+async function trainingDrillFindFirstForUser(db, userId, args = {}) {
+    try {
+        return await db.trainingDrill.findFirst({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'TrainingDrill', 'userId'))
+            throw error;
+        return await db.trainingDrill.findFirst({
+            ...args,
+            where: args.where,
+            select: legacyTrainingDrillSelect(),
+        });
+    }
+}
+async function trainingDrillCreateForUser(db, userId, data) {
+    try {
+        return await db.trainingDrill.create({
+            data: { ...data, userId }
+        });
+    }
+    catch (error) {
+        if (!isMissingModelColumn(error, 'TrainingDrill', 'userId'))
+            throw error;
+        return await db.trainingDrill.create({
+            data,
+            select: legacyTrainingDrillSelect(),
+        });
     }
 }
 // --- Nodemailer (optional) ---
@@ -1877,8 +1936,8 @@ app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const training = await trainingFindFirstForUser(prisma, req.userId, { where: { id: trainingId } });
     if (!training)
         return res.status(404).json({ error: 'Training not found' });
-    const rows = await prisma.trainingDrill.findMany({
-        where: { userId: req.userId, trainingId },
+    const rows = await trainingDrillFindManyForUser(prisma, req.userId, {
+        where: { trainingId },
         orderBy: { order: 'asc' },
     });
     const catalog = DRILLS.concat(EXTRA_DRILLS);
@@ -1903,13 +1962,13 @@ app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     // order auto-incrémental simple
-    const max = await prisma.trainingDrill.aggregate({
-        where: { userId: req.userId, trainingId },
-        _max: { order: true }
+    const existingRows = await trainingDrillFindManyForUser(prisma, req.userId, {
+        where: { trainingId },
+        select: { order: true }
     });
-    const nextOrder = (max._max.order ?? -1) + 1;
-    const row = await prisma.trainingDrill.create({
-        data: { userId: req.userId, trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder }
+    const nextOrder = existingRows.reduce((max, row) => Math.max(max, row.order ?? -1), -1) + 1;
+    const row = await trainingDrillCreateForUser(prisma, req.userId, {
+        trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder
     });
     const meta = (DRILLS.concat(EXTRA_DRILLS)).find(d => d.id === row.drillId) || null;
     res.json({ ...row, meta });
@@ -1918,7 +1977,7 @@ app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
 app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
     const trainingDrillId = req.params.trainingDrillId;
-    const existing = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, trainingId, userId: req.userId } });
+    const existing = await trainingDrillFindFirstForUser(prisma, req.userId, { where: { id: trainingDrillId, trainingId } });
     if (!existing)
         return res.status(404).json({ error: 'Not found' });
     const schema = zod_1.z.object({
@@ -1950,7 +2009,7 @@ app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req,
     const trainingId = req.params.id;
     const trainingDrillId = req.params.trainingDrillId;
     try {
-        const existing = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, trainingId, userId: req.userId } });
+        const existing = await trainingDrillFindFirstForUser(prisma, req.userId, { where: { id: trainingDrillId, trainingId } });
         if (!existing)
             return res.status(404).json({ error: 'Not found' });
         await prisma.trainingDrill.delete({ where: { id: existing.id } });
