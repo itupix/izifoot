@@ -2027,10 +2027,12 @@ app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req:
   try {
     const existing = await trainingDrillFindFirstForUser(prisma, req.userId, { where: { id: trainingDrillId, trainingId } })
     if (!existing) return res.status(404).json({ error: 'Not found' })
-    await prisma.trainingDrill.delete({ where: { id: existing.id } })
+    const deleted = await prisma.trainingDrill.deleteMany({ where: { id: existing.id } })
+    if (!deleted.count) return res.status(404).json({ error: 'Not found' })
     res.json({ ok: true })
-  } catch {
-    res.status(404).json({ error: 'Not found' })
+  } catch (e) {
+    console.error('[DELETE /trainings/:id/drills/:trainingDrillId] failed', e)
+    res.status(500).json({ error: 'Failed to delete training drill' })
   }
 })
 
