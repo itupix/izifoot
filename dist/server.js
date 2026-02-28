@@ -208,6 +208,9 @@ function isMissingPlayerColumn(error, column) {
 function isUnknownArgument(error, argName) {
     return typeof error?.message === 'string' && error.message.includes(`Unknown argument \`${argName}\``);
 }
+function isMissingJoinedUserIdColumn(error) {
+    return error?.code === 'P2022' && typeof error?.meta?.column === 'string' && error.meta.column.endsWith('.userId');
+}
 function ownedAttendanceWhere(userId, where = {}) {
     const next = { ...(where || {}) };
     delete next.userId;
@@ -276,7 +279,7 @@ async function attendanceFindManyForUser(db, userId, args = {}) {
             return await db.attendance.findMany(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
         }
         catch (innerError) {
-            if (!isMissingPlayerColumn(innerError, 'userId'))
+            if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError))
                 throw innerError;
             return await db.attendance.findMany(legacyAttendanceArgs(args, args.where || {}));
         }
@@ -296,7 +299,7 @@ async function attendanceFindFirstForUser(db, userId, args = {}) {
             return await db.attendance.findFirst(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
         }
         catch (innerError) {
-            if (!isMissingPlayerColumn(innerError, 'userId'))
+            if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError))
                 throw innerError;
             return await db.attendance.findFirst(legacyAttendanceArgs(args, args.where || {}));
         }
@@ -313,7 +316,7 @@ async function attendanceDeleteManyForUser(db, userId, where = {}) {
             return await db.attendance.deleteMany({ where: ownedAttendanceWhere(userId, where) });
         }
         catch (innerError) {
-            if (!isMissingPlayerColumn(innerError, 'userId'))
+            if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError))
                 throw innerError;
             return await db.attendance.deleteMany({ where });
         }

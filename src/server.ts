@@ -216,6 +216,10 @@ function isUnknownArgument(error: any, argName: string) {
   return typeof error?.message === 'string' && error.message.includes(`Unknown argument \`${argName}\``)
 }
 
+function isMissingJoinedUserIdColumn(error: any) {
+  return error?.code === 'P2022' && typeof error?.meta?.column === 'string' && error.meta.column.endsWith('.userId')
+}
+
 function ownedAttendanceWhere(userId: string, where: any = {}) {
   const next = { ...(where || {}) }
   delete next.userId
@@ -284,7 +288,7 @@ async function attendanceFindManyForUser(db: any, userId: string, args: any = {}
     try {
       return await db.attendance.findMany(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)))
     } catch (innerError) {
-      if (!isMissingPlayerColumn(innerError, 'userId')) throw innerError
+      if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError)) throw innerError
       return await db.attendance.findMany(legacyAttendanceArgs(args, args.where || {}))
     }
   }
@@ -301,7 +305,7 @@ async function attendanceFindFirstForUser(db: any, userId: string, args: any = {
     try {
       return await db.attendance.findFirst(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)))
     } catch (innerError) {
-      if (!isMissingPlayerColumn(innerError, 'userId')) throw innerError
+      if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError)) throw innerError
       return await db.attendance.findFirst(legacyAttendanceArgs(args, args.where || {}))
     }
   }
@@ -315,7 +319,7 @@ async function attendanceDeleteManyForUser(db: any, userId: string, where: any =
     try {
       return await db.attendance.deleteMany({ where: ownedAttendanceWhere(userId, where) })
     } catch (innerError) {
-      if (!isMissingPlayerColumn(innerError, 'userId')) throw innerError
+      if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError)) throw innerError
       return await db.attendance.deleteMany({ where })
     }
   }
