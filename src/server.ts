@@ -446,16 +446,25 @@ async function trainingCreateForUser(db: any, userId: string, data: any) {
   } catch (error) {
     if (isMissingModelColumn(error, 'Training', 'userId')) {
       try {
-        return withDefaultTrainingStatus(await db.training.create({ data }))
+        return withDefaultTrainingStatus(await db.training.create({
+          data,
+          select: legacyTrainingSelect(),
+        }))
       } catch (innerError) {
         if (!isMissingModelColumn(innerError, 'Training', 'status')) throw innerError
         const { status, ...withoutStatus } = data
-        return withDefaultTrainingStatus(await db.training.create({ data: withoutStatus }))
+        return withDefaultTrainingStatus(await db.training.create({
+          data: withoutStatus,
+          select: legacyTrainingSelect(),
+        }))
       }
     }
     if (!isMissingModelColumn(error, 'Training', 'status')) throw error
     const { status, ...withoutStatus } = data
-    return withDefaultTrainingStatus(await db.training.create({ data: { ...withoutStatus, userId } }))
+    return withDefaultTrainingStatus(await db.training.create({
+      data: { ...withoutStatus, userId },
+      select: legacyTrainingSelect(),
+    }))
   }
 }
 
@@ -465,7 +474,11 @@ async function trainingUpdateCompat(db: any, id: string, data: any) {
   } catch (error) {
     if (!isMissingModelColumn(error, 'Training', 'status')) throw error
     const { status, ...withoutStatus } = data
-    return withDefaultTrainingStatus(await db.training.update({ where: { id }, data: withoutStatus }))
+    return withDefaultTrainingStatus(await db.training.update({
+      where: { id },
+      data: withoutStatus,
+      select: legacyTrainingSelect(),
+    }))
   }
 }
 
