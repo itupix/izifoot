@@ -196,7 +196,12 @@ function isMissingModelColumn(error: any, model: string, column: string) {
   const errorModel = error?.meta?.modelName
   const errorColumn = error?.meta?.column
   if (errorModel && errorModel !== model) return false
-  return errorColumn === column || errorColumn === `${model}.${column}`
+  if (typeof errorColumn !== 'string') return false
+  return (
+    errorColumn === column ||
+    errorColumn === `${model}.${column}` ||
+    errorColumn.endsWith(`.${column}`)
+  )
 }
 
 function isMissingAttendanceColumn(error: any, column: string) {
@@ -967,7 +972,7 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     title: z.string().min(1).max(100),
     category: z.string().min(1).max(50),
-    duration: z.number().int().min(1).max(180),
+    duration: z.coerce.number().int().min(1).max(180),
     players: z.string().min(1).max(50),
     description: z.string().min(1).max(2000),
     tags: z.array(z.string().min(1).max(32)).max(20).optional()
