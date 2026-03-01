@@ -186,629 +186,146 @@ function authMiddleware(req, res, next) {
         return res.status(401).json({ error: 'Invalid token' });
     }
 }
-function isMissingModelColumn(error, model, column) {
-    if (error?.code !== 'P2022')
-        return false;
-    const errorModel = error?.meta?.modelName;
-    const errorColumn = error?.meta?.column;
-    if (errorModel && errorModel !== model)
-        return false;
-    if (typeof errorColumn !== 'string')
-        return false;
-    return (errorColumn === column ||
-        errorColumn === `${model}.${column}` ||
-        errorColumn.endsWith(`.${column}`));
-}
-function isMissingAttendanceColumn(error, column) {
-    return isMissingModelColumn(error, 'Attendance', column);
-}
-function isMissingPlayerColumn(error, column) {
-    return isMissingModelColumn(error, 'Player', column);
-}
-function isUnknownArgument(error, argName) {
-    return typeof error?.message === 'string' && error.message.includes(`Unknown argument \`${argName}\``);
-}
-function isMissingJoinedUserIdColumn(error) {
-    return error?.code === 'P2022' && typeof error?.meta?.column === 'string' && error.meta.column.endsWith('.userId');
-}
-function ownedAttendanceWhere(userId, where = {}) {
-    const next = { ...(where || {}) };
-    delete next.userId;
-    if (Object.keys(next).length === 0)
-        return { player: { userId } };
-    return { AND: [next, { player: { userId } }] };
-}
-function legacyPlayerSelect() {
-    return {
-        id: true,
-        name: true,
-        primary_position: true,
-        secondary_position: true,
-        createdAt: true,
-        updatedAt: true,
-    };
-}
-function withLegacyPlayerDefaults(row) {
-    if (!row)
-        return row;
-    return {
-        ...row,
-        userId: row.userId ?? null,
-        email: row.email ?? null,
-        phone: row.phone ?? null,
-    };
-}
 async function playerCreateForUser(db, userId, data) {
-    try {
-        return withLegacyPlayerDefaults(await db.player.create({ data: { ...data, userId } }));
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Player', 'userId') &&
-            !isMissingModelColumn(error, 'Player', 'email') &&
-            !isMissingModelColumn(error, 'Player', 'phone'))
-            throw error;
-        const { userId: _ignored, email: _ignoredEmail, phone: _ignoredPhone, ...legacyData } = { ...data, userId };
-        return withLegacyPlayerDefaults(await db.player.create({
-            data: legacyData,
-            select: legacyPlayerSelect(),
-        }));
-    }
-}
-function legacyAttendanceArgs(args = {}, where) {
-    const includePlayer = Boolean(args.include?.player);
-    return {
-        ...args,
-        where,
-        include: undefined,
-        select: {
-            id: true,
-            session_type: true,
-            session_id: true,
-            playerId: true,
-            trainingId: true,
-            plateauId: true,
-            ...(includePlayer ? { player: { select: legacyPlayerSelect() } } : {}),
-        },
-    };
-}
-function legacyAttendanceSelect() {
-    return {
-        id: true,
-        session_type: true,
-        session_id: true,
-        playerId: true,
-        trainingId: true,
-        plateauId: true,
-    };
+    return db.player.create({ data: { ...data, userId } });
 }
 async function attendanceFindManyForUser(db, userId, args = {}) {
-    try {
-        return await db.attendance.findMany({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingAttendanceColumn(error, 'userId'))
-            throw error;
-        try {
-            return await db.attendance.findMany(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
-        }
-        catch (innerError) {
-            if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError))
-                throw innerError;
-            return await db.attendance.findMany(legacyAttendanceArgs(args, args.where || {}));
-        }
-    }
+    return db.attendance.findMany({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function attendanceFindFirstForUser(db, userId, args = {}) {
-    try {
-        return await db.attendance.findFirst({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingAttendanceColumn(error, 'userId'))
-            throw error;
-        try {
-            return await db.attendance.findFirst(legacyAttendanceArgs(args, ownedAttendanceWhere(userId, args.where)));
-        }
-        catch (innerError) {
-            if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError))
-                throw innerError;
-            return await db.attendance.findFirst(legacyAttendanceArgs(args, args.where || {}));
-        }
-    }
+    return db.attendance.findFirst({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function attendanceDeleteManyForUser(db, userId, where = {}) {
-    try {
-        return await db.attendance.deleteMany({ where: { ...where, userId } });
-    }
-    catch (error) {
-        if (!isMissingAttendanceColumn(error, 'userId'))
-            throw error;
-        try {
-            return await db.attendance.deleteMany({ where: ownedAttendanceWhere(userId, where) });
-        }
-        catch (innerError) {
-            if (!isMissingPlayerColumn(innerError, 'userId') && !isMissingJoinedUserIdColumn(innerError))
-                throw innerError;
-            return await db.attendance.deleteMany({ where });
-        }
-    }
+    return db.attendance.deleteMany({ where: { ...where, userId } });
 }
 async function attendanceUpsertMarkerForUser(db, userId, params) {
     const { session_type, session_id, playerId } = params;
-    try {
-        return await db.attendance.upsert({
-            where: { userId_session_type_session_id_playerId: { userId, session_type, session_id, playerId } },
-            create: { userId, session_type, session_id, playerId },
-            update: {},
-        });
-    }
-    catch (error) {
-        if (!isMissingAttendanceColumn(error, 'userId'))
-            throw error;
-    }
-    const existing = await attendanceFindFirstForUser(db, userId, { where: { session_type, session_id, playerId } });
-    if (existing)
-        return existing;
-    return await db.attendance.create({
-        data: { session_type, session_id, playerId },
-        select: legacyAttendanceSelect(),
+    return db.attendance.upsert({
+        where: { userId_session_type_session_id_playerId: { userId, session_type, session_id, playerId } },
+        create: { userId, session_type, session_id, playerId },
+        update: {},
     });
 }
 async function attendanceSetPresenceForUser(db, userId, params) {
     const { session_type, session_id, playerId, present } = params;
-    try {
-        return await db.attendance.upsert({
-            where: { userId_session_type_session_id_playerId: { userId, session_type, session_id, playerId } },
-            create: { userId, session_type, session_id, playerId, present },
-            update: { present },
-        });
-    }
-    catch (error) {
-        if (!isMissingAttendanceColumn(error, 'userId') &&
-            !isMissingAttendanceColumn(error, 'present') &&
-            !isUnknownArgument(error, 'present'))
-            throw error;
-    }
-    if (present) {
-        return attendanceUpsertMarkerForUser(db, userId, { session_type, session_id, playerId });
-    }
-    return attendanceDeleteManyForUser(db, userId, { session_type, session_id, playerId });
+    return db.attendance.upsert({
+        where: { userId_session_type_session_id_playerId: { userId, session_type, session_id, playerId } },
+        create: { userId, session_type, session_id, playerId, present },
+        update: { present },
+    });
 }
 async function attendanceSetPlateauRsvpForUser(db, userId, plateauId, playerId, present) {
-    try {
-        return await db.attendance.upsert({
-            where: { userId_session_type_session_id_playerId: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId } },
-            create: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId, present },
-            update: { present },
-        });
-    }
-    catch (error) {
-        if (!isMissingAttendanceColumn(error, 'userId') &&
-            !isMissingAttendanceColumn(error, 'present') &&
-            !isUnknownArgument(error, 'present'))
-            throw error;
-    }
-    if (present) {
-        await attendanceUpsertMarkerForUser(db, userId, { session_type: 'PLATEAU', session_id: plateauId, playerId });
-        await attendanceDeleteManyForUser(db, userId, { session_type: 'PLATEAU_ABSENT', session_id: plateauId, playerId });
-        return;
-    }
-    await attendanceDeleteManyForUser(db, userId, { session_type: 'PLATEAU', session_id: plateauId, playerId });
-    await attendanceUpsertMarkerForUser(db, userId, { session_type: 'PLATEAU_ABSENT', session_id: plateauId, playerId });
-}
-function withDefaultTrainingStatus(row) {
-    return { ...row, status: row?.status ?? 'PLANNED' };
+    return db.attendance.upsert({
+        where: { userId_session_type_session_id_playerId: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId } },
+        create: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId, present },
+        update: { present },
+    });
 }
 async function playerFindManyForUser(db, userId, args = {}) {
-    try {
-        const rows = await db.player.findMany({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-        return rows.map((row) => withLegacyPlayerDefaults(row));
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Player', 'userId') && !isMissingModelColumn(error, 'Player', 'email') && !isMissingModelColumn(error, 'Player', 'phone'))
-            throw error;
-        const rows = await db.player.findMany({
-            ...args,
-            where: args.where,
-            select: legacyPlayerSelect(),
-        });
-        return rows.map((row) => withLegacyPlayerDefaults(row));
-    }
+    return db.player.findMany({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function playerFindFirstForUser(db, userId, args = {}) {
-    try {
-        const row = await db.player.findFirst({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-        return withLegacyPlayerDefaults(row);
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Player', 'userId') && !isMissingModelColumn(error, 'Player', 'email') && !isMissingModelColumn(error, 'Player', 'phone'))
-            throw error;
-        const row = await db.player.findFirst({
-            ...args,
-            where: args.where,
-            select: legacyPlayerSelect(),
-        });
-        return withLegacyPlayerDefaults(row);
-    }
+    return db.player.findFirst({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function playerFindByIdCompat(db, id) {
-    try {
-        const row = await db.player.findUnique({ where: { id }, select: { id: true, userId: true, email: true, phone: true } });
-        return withLegacyPlayerDefaults(row);
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Player', 'userId') && !isMissingModelColumn(error, 'Player', 'email') && !isMissingModelColumn(error, 'Player', 'phone'))
-            throw error;
-        const row = await db.player.findUnique({ where: { id }, select: legacyPlayerSelect() });
-        return withLegacyPlayerDefaults(row);
-    }
-}
-function legacyTrainingSelect() {
-    return {
-        id: true,
-        date: true,
-        createdAt: true,
-        updatedAt: true,
-    };
-}
-function legacyTrainingDrillSelect() {
-    return {
-        id: true,
-        trainingId: true,
-        drillId: true,
-        order: true,
-        duration: true,
-        notes: true,
-    };
-}
-function isMissingMatchLegacyColumn(error) {
-    return (isMissingModelColumn(error, 'Match', 'userId') ||
-        isMissingModelColumn(error, 'Match', 'updatedAt') ||
-        isMissingModelColumn(error, 'Match', 'opponentName'));
-}
-function legacyMatchSelect(include) {
-    return {
-        id: true,
-        type: true,
-        plateauId: true,
-        createdAt: true,
-        ...(include?.teams ? { teams: include.teams } : {}),
-        ...(include?.scorers ? { scorers: include.scorers } : {}),
-    };
-}
-function withLegacyMatchDefaults(row) {
-    if (!row)
-        return row;
-    return {
-        ...row,
-        userId: row.userId ?? null,
-        updatedAt: row.updatedAt ?? row.createdAt,
-        opponentName: row.opponentName ?? null,
-    };
-}
-function legacyDiagramSelect() {
-    return {
-        id: true,
-        title: true,
-        data: true,
-        drillId: true,
-        trainingDrillId: true,
-        createdAt: true,
-        updatedAt: true,
-    };
+    return db.player.findUnique({ where: { id } });
 }
 async function trainingFindManyForUser(db, userId, args = {}) {
-    try {
-        const rows = await db.training.findMany({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-        return rows.map(withDefaultTrainingStatus);
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Training', 'userId') && !isMissingModelColumn(error, 'Training', 'status'))
-            throw error;
-        const rows = await db.training.findMany({
-            ...args,
-            where: args.where,
-            select: legacyTrainingSelect(),
-        });
-        return rows.map(withDefaultTrainingStatus);
-    }
+    return db.training.findMany({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function trainingFindFirstForUser(db, userId, args = {}) {
-    try {
-        const row = await db.training.findFirst({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-        return row ? withDefaultTrainingStatus(row) : row;
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Training', 'userId') && !isMissingModelColumn(error, 'Training', 'status'))
-            throw error;
-        const row = await db.training.findFirst({
-            ...args,
-            where: args.where,
-            select: legacyTrainingSelect(),
-        });
-        return row ? withDefaultTrainingStatus(row) : row;
-    }
+    return db.training.findFirst({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function trainingCreateForUser(db, userId, data) {
-    try {
-        return withDefaultTrainingStatus(await db.training.create({ data: { ...data, userId } }));
-    }
-    catch (error) {
-        if (isMissingModelColumn(error, 'Training', 'userId')) {
-            try {
-                return withDefaultTrainingStatus(await db.training.create({
-                    data,
-                    select: legacyTrainingSelect(),
-                }));
-            }
-            catch (innerError) {
-                if (!isMissingModelColumn(innerError, 'Training', 'status'))
-                    throw innerError;
-                const { status, ...withoutStatus } = data;
-                return withDefaultTrainingStatus(await db.training.create({
-                    data: withoutStatus,
-                    select: legacyTrainingSelect(),
-                }));
-            }
-        }
-        if (!isMissingModelColumn(error, 'Training', 'status'))
-            throw error;
-        const { status, ...withoutStatus } = data;
-        return withDefaultTrainingStatus(await db.training.create({
-            data: { ...withoutStatus, userId },
-            select: legacyTrainingSelect(),
-        }));
-    }
+    return db.training.create({ data: { ...data, userId } });
 }
 async function trainingUpdateCompat(db, id, data) {
-    try {
-        return withDefaultTrainingStatus(await db.training.update({ where: { id }, data }));
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Training', 'status'))
-            throw error;
-        const { status, ...withoutStatus } = data;
-        return withDefaultTrainingStatus(await db.training.update({
-            where: { id },
-            data: withoutStatus,
-            select: legacyTrainingSelect(),
-        }));
-    }
+    return db.training.update({ where: { id }, data });
 }
 async function plateauFindManyForUser(db, userId, args = {}) {
-    try {
-        return await db.plateau.findMany({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Plateau', 'userId'))
-            throw error;
-        return await db.plateau.findMany({
-            ...args,
-            where: args.where,
-            select: {
-                id: true,
-                date: true,
-                lieu: true,
-                createdAt: true,
-                updatedAt: true,
-            },
-        });
-    }
+    return db.plateau.findMany({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function plateauFindFirstForUser(db, userId, args = {}) {
-    try {
-        return await db.plateau.findFirst({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Plateau', 'userId'))
-            throw error;
-        return await db.plateau.findFirst({
-            ...args,
-            where: args.where,
-            select: {
-                id: true,
-                date: true,
-                lieu: true,
-                createdAt: true,
-                updatedAt: true,
-            },
-        });
-    }
+    return db.plateau.findFirst({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function plateauCreateForUser(db, userId, data) {
-    try {
-        return await db.plateau.create({ data: { ...data, userId } });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Plateau', 'userId'))
-            throw error;
-        return await db.plateau.create({ data });
-    }
+    return db.plateau.create({ data: { ...data, userId } });
 }
 async function matchFindManyForUser(db, userId, args = {}) {
-    try {
-        return await db.match.findMany({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingMatchLegacyColumn(error))
-            throw error;
-        const rows = await db.match.findMany({
-            where: args.where,
-            orderBy: args.orderBy,
-            select: legacyMatchSelect(args.include),
-        });
-        return rows.map((row) => withLegacyMatchDefaults(row));
-    }
+    return db.match.findMany({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function matchFindFirstForUser(db, userId, args = {}) {
-    try {
-        return await db.match.findFirst({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingMatchLegacyColumn(error))
-            throw error;
-        const row = await db.match.findFirst({
-            where: args.where,
-            orderBy: args.orderBy,
-            select: legacyMatchSelect(args.include),
-        });
-        return withLegacyMatchDefaults(row);
-    }
+    return db.match.findFirst({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function matchFindUniqueCompat(db, args) {
-    try {
-        return await db.match.findUnique(args);
-    }
-    catch (error) {
-        if (!isMissingMatchLegacyColumn(error))
-            throw error;
-        const row = await db.match.findFirst({
-            where: args.where,
-            select: legacyMatchSelect(args.include),
-        });
-        return withLegacyMatchDefaults(row);
-    }
+    return db.match.findUnique(args);
 }
 async function matchCreateForUser(db, userId, data) {
-    try {
-        return withLegacyMatchDefaults(await db.match.create({ data: { ...data, userId } }));
-    }
-    catch (error) {
-        if (!isMissingMatchLegacyColumn(error))
-            throw error;
-        const { userId: _ignored, opponentName: _ignoredOpponent, ...legacyData } = { ...data, userId };
-        return withLegacyMatchDefaults(await db.match.create({
-            data: legacyData,
-            select: legacyMatchSelect(),
-        }));
-    }
-}
-async function diagramFindManyForUser(db, userId, args = {}) {
-    try {
-        return await db.diagram.findMany({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Diagram', 'userId'))
-            throw error;
-        return await db.diagram.findMany({
-            ...args,
-            where: args.where,
-            select: legacyDiagramSelect(),
-        });
-    }
-}
-async function diagramFindFirstForUser(db, userId, args = {}) {
-    try {
-        return await db.diagram.findFirst({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Diagram', 'userId'))
-            throw error;
-        return await db.diagram.findFirst({
-            ...args,
-            where: args.where,
-            select: legacyDiagramSelect(),
-        });
-    }
-}
-async function diagramCreateForUser(db, userId, data) {
-    try {
-        return await db.diagram.create({
-            data: { ...data, userId }
-        });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'Diagram', 'userId'))
-            throw error;
-        return await db.diagram.create({
-            data,
-            select: legacyDiagramSelect(),
-        });
-    }
+    return db.match.create({ data: { ...data, userId } });
 }
 async function trainingDrillFindManyForUser(db, userId, args = {}) {
-    try {
-        return await db.trainingDrill.findMany({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'TrainingDrill', 'userId'))
-            throw error;
-        return await db.trainingDrill.findMany({
-            ...args,
-            where: args.where,
-            select: legacyTrainingDrillSelect(),
-        });
-    }
+    return db.trainingDrill.findMany({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function trainingDrillFindFirstForUser(db, userId, args = {}) {
-    try {
-        return await db.trainingDrill.findFirst({
-            ...args,
-            where: { ...(args.where || {}), userId },
-        });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'TrainingDrill', 'userId'))
-            throw error;
-        return await db.trainingDrill.findFirst({
-            ...args,
-            where: args.where,
-            select: legacyTrainingDrillSelect(),
-        });
-    }
+    return db.trainingDrill.findFirst({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
 }
 async function trainingDrillCreateForUser(db, userId, data) {
-    try {
-        return await db.trainingDrill.create({
-            data: { ...data, userId }
-        });
-    }
-    catch (error) {
-        if (!isMissingModelColumn(error, 'TrainingDrill', 'userId'))
-            throw error;
-        return await db.trainingDrill.create({
-            data,
-            select: legacyTrainingDrillSelect(),
-        });
-    }
+    return db.trainingDrill.create({
+        data: { ...data, userId }
+    });
+}
+async function diagramFindManyForUser(db, userId, args = {}) {
+    return db.diagram.findMany({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
+}
+async function diagramFindFirstForUser(db, userId, args = {}) {
+    return db.diagram.findFirst({
+        ...args,
+        where: { ...(args.where || {}), userId },
+    });
+}
+async function diagramCreateForUser(db, userId, data) {
+    return db.diagram.create({
+        data: { ...data, userId }
+    });
 }
 // --- Nodemailer (optional) ---
 let transporter = null;
@@ -1153,28 +670,8 @@ app.post('/drills', authMiddleware, async (req, res) => {
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 // ---- Players ----
 app.get('/players', authMiddleware, async (req, res) => {
-    try {
-        const players = await playerFindManyForUser(prisma, req.userId, { orderBy: { name: 'asc' } });
-        return res.json(players);
-    }
-    catch (e) {
-        console.warn('[GET /players] Prisma fallback failed, using raw query', e?.message || e);
-        const players = await prisma.$queryRawUnsafe(`
-      SELECT
-        "id",
-        "name",
-        "primary_position",
-        "secondary_position",
-        "createdAt",
-        "updatedAt",
-        NULL::text AS "userId",
-        NULL::text AS "email",
-        NULL::text AS "phone"
-      FROM "Player"
-      ORDER BY "name" ASC
-    `);
-        return res.json(players);
-    }
+    const players = await playerFindManyForUser(prisma, req.userId, { orderBy: { name: 'asc' } });
+    res.json(players);
 });
 app.post('/players', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
@@ -1226,17 +723,7 @@ app.put('/players/:id', authMiddleware, async (req, res) => {
         patch.email = parsed.data.email ?? null;
     if ('phone' in parsed.data)
         patch.phone = parsed.data.phone ?? null;
-    let updated;
-    try {
-        updated = await prisma.player.update({ where: { id: existing.id }, data: patch });
-    }
-    catch (e) {
-        // Retry without email/phone if columns absent
-        const fallback = { ...patch };
-        delete fallback.email;
-        delete fallback.phone;
-        updated = await prisma.player.update({ where: { id: existing.id }, data: fallback });
-    }
+    const updated = await prisma.player.update({ where: { id: existing.id }, data: patch });
     res.json(updated);
 });
 // --- Player invite JWT and playerAuth ---
@@ -1576,24 +1063,8 @@ app.delete('/trainings/:id', authMiddleware, async (req, res) => {
 });
 // ---- Plateaus ----
 app.get('/plateaus', authMiddleware, async (req, res) => {
-    try {
-        const plateaus = await plateauFindManyForUser(prisma, req.userId, { orderBy: { date: 'desc' } });
-        return res.json(plateaus);
-    }
-    catch (e) {
-        console.warn('[GET /plateaus] Prisma fallback failed, using raw query', e?.message || e);
-        const plateaus = await prisma.$queryRawUnsafe(`
-      SELECT
-        "id",
-        "date",
-        "lieu",
-        "createdAt",
-        "updatedAt"
-      FROM "Plateau"
-      ORDER BY "date" DESC
-    `);
-        return res.json(plateaus);
-    }
+    const plateaus = await plateauFindManyForUser(prisma, req.userId, { orderBy: { date: 'desc' } });
+    res.json(plateaus);
 });
 app.post('/plateaus', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()), lieu: zod_1.z.string().min(1) });
@@ -1826,36 +1297,8 @@ app.get('/attendance', authMiddleware, async (req, res) => {
         where.session_type = session_type;
     if (session_id)
         where.session_id = session_id;
-    try {
-        const rows = await attendanceFindManyForUser(prisma, req.userId, { where });
-        return res.json(rows);
-    }
-    catch (e) {
-        console.warn('[GET /attendance] Prisma fallback failed, using raw query', e?.message || e);
-        const conditions = [];
-        const params = [];
-        if (session_type) {
-            params.push(session_type);
-            conditions.push(`"session_type" = $${params.length}`);
-        }
-        if (session_id) {
-            params.push(session_id);
-            conditions.push(`"session_id" = $${params.length}`);
-        }
-        const sql = `
-      SELECT
-        "id",
-        "session_type",
-        "session_id",
-        "playerId",
-        "trainingId",
-        "plateauId"
-      FROM "Attendance"
-      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
-    `;
-        const rows = await prisma.$queryRawUnsafe(sql, ...params);
-        return res.json(rows);
-    }
+    const rows = await attendanceFindManyForUser(prisma, req.userId, { where });
+    res.json(rows);
 });
 app.post('/attendance', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
