@@ -248,6 +248,23 @@ function withLegacyPlayerDefaults<T extends Record<string, any>>(row: T | null) 
   }
 }
 
+async function playerCreateForUser(db: any, userId: string, data: any) {
+  try {
+    return withLegacyPlayerDefaults(await db.player.create({ data: { ...data, userId } }))
+  } catch (error) {
+    if (
+      !isMissingModelColumn(error, 'Player', 'userId') &&
+      !isMissingModelColumn(error, 'Player', 'email') &&
+      !isMissingModelColumn(error, 'Player', 'phone')
+    ) throw error
+    const { userId: _ignored, email: _ignoredEmail, phone: _ignoredPhone, ...legacyData } = { ...data, userId }
+    return withLegacyPlayerDefaults(await db.player.create({
+      data: legacyData,
+      select: legacyPlayerSelect(),
+    }))
+  }
+}
+
 function legacyAttendanceArgs(args: any = {}, where: any) {
   const includePlayer = Boolean(args.include?.player)
   return {
@@ -467,6 +484,47 @@ function legacyTrainingDrillSelect() {
   }
 }
 
+function isMissingMatchLegacyColumn(error: any) {
+  return (
+    isMissingModelColumn(error, 'Match', 'userId') ||
+    isMissingModelColumn(error, 'Match', 'updatedAt') ||
+    isMissingModelColumn(error, 'Match', 'opponentName')
+  )
+}
+
+function legacyMatchSelect(include?: any) {
+  return {
+    id: true,
+    type: true,
+    plateauId: true,
+    createdAt: true,
+    ...(include?.teams ? { teams: include.teams } : {}),
+    ...(include?.scorers ? { scorers: include.scorers } : {}),
+  }
+}
+
+function withLegacyMatchDefaults<T extends Record<string, any>>(row: T | null) {
+  if (!row) return row
+  return {
+    ...row,
+    userId: row.userId ?? null,
+    updatedAt: row.updatedAt ?? row.createdAt,
+    opponentName: row.opponentName ?? null,
+  }
+}
+
+function legacyDiagramSelect() {
+  return {
+    id: true,
+    title: true,
+    data: true,
+    drillId: true,
+    trainingDrillId: true,
+    createdAt: true,
+    updatedAt: true,
+  }
+}
+
 async function trainingFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
   try {
     const rows = await db.training.findMany({
@@ -605,24 +663,102 @@ async function matchFindManyForUser(db: any, userId: string, args: any = {}): Pr
       where: { ...(args.where || {}), userId },
     })
   } catch (error) {
-    if (!isMissingModelColumn(error, 'Match', 'userId')) throw error
+    if (!isMissingMatchLegacyColumn(error)) throw error
     const rows = await db.match.findMany({
       where: args.where,
       orderBy: args.orderBy,
-      select: {
-        id: true,
-        type: true,
-        plateauId: true,
-        createdAt: true,
-        teams: args.include?.teams || false,
-        scorers: args.include?.scorers || false,
-      },
+      select: legacyMatchSelect(args.include),
     })
-    return rows.map((row: any) => ({
-      ...row,
-      updatedAt: row.updatedAt ?? row.createdAt,
-      opponentName: row.opponentName ?? null,
+    return rows.map((row: any) => withLegacyMatchDefaults(row))
+  }
+}
+
+async function matchFindFirstForUser(db: any, userId: string, args: any = {}): Promise<any> {
+  try {
+    return await db.match.findFirst({
+      ...args,
+      where: { ...(args.where || {}), userId },
+    })
+  } catch (error) {
+    if (!isMissingMatchLegacyColumn(error)) throw error
+    const row = await db.match.findFirst({
+      where: args.where,
+      orderBy: args.orderBy,
+      select: legacyMatchSelect(args.include),
+    })
+    return withLegacyMatchDefaults(row)
+  }
+}
+
+async function matchFindUniqueCompat(db: any, args: any): Promise<any> {
+  try {
+    return await db.match.findUnique(args)
+  } catch (error) {
+    if (!isMissingMatchLegacyColumn(error)) throw error
+    const row = await db.match.findFirst({
+      where: args.where,
+      select: legacyMatchSelect(args.include),
+    })
+    return withLegacyMatchDefaults(row)
+  }
+}
+
+async function matchCreateForUser(db: any, userId: string, data: any) {
+  try {
+    return withLegacyMatchDefaults(await db.match.create({ data: { ...data, userId } }))
+  } catch (error) {
+    if (!isMissingMatchLegacyColumn(error)) throw error
+    const { userId: _ignored, opponentName: _ignoredOpponent, ...legacyData } = { ...data, userId }
+    return withLegacyMatchDefaults(await db.match.create({
+      data: legacyData,
+      select: legacyMatchSelect(),
     }))
+  }
+}
+
+async function diagramFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
+  try {
+    return await db.diagram.findMany({
+      ...args,
+      where: { ...(args.where || {}), userId },
+    })
+  } catch (error) {
+    if (!isMissingModelColumn(error, 'Diagram', 'userId')) throw error
+    return await db.diagram.findMany({
+      ...args,
+      where: args.where,
+      select: legacyDiagramSelect(),
+    })
+  }
+}
+
+async function diagramFindFirstForUser(db: any, userId: string, args: any = {}): Promise<any> {
+  try {
+    return await db.diagram.findFirst({
+      ...args,
+      where: { ...(args.where || {}), userId },
+    })
+  } catch (error) {
+    if (!isMissingModelColumn(error, 'Diagram', 'userId')) throw error
+    return await db.diagram.findFirst({
+      ...args,
+      where: args.where,
+      select: legacyDiagramSelect(),
+    })
+  }
+}
+
+async function diagramCreateForUser(db: any, userId: string, data: any) {
+  try {
+    return await db.diagram.create({
+      data: { ...data, userId }
+    })
+  } catch (error) {
+    if (!isMissingModelColumn(error, 'Diagram', 'userId')) throw error
+    return await db.diagram.create({
+      data,
+      select: legacyDiagramSelect(),
+    })
   }
 }
 
@@ -1074,15 +1210,7 @@ app.post('/players', authMiddleware, async (req: any, res) => {
   }
   if ('email' in parsed.data) baseData.email = parsed.data.email
   if ('phone' in parsed.data) baseData.phone = parsed.data.phone
-  let p
-  try {
-    p = await prisma.player.create({ data: baseData })
-  } catch (e) {
-    // Fallback if schema lacks columns: remove and retry
-    const fallback: any = { name: baseData.name, primary_position: baseData.primary_position }
-    if (baseData.secondary_position !== undefined) fallback.secondary_position = baseData.secondary_position
-    p = await prisma.player.create({ data: fallback })
-  }
+  const p = await playerCreateForUser(prisma, req.userId, baseData)
   res.json(p)
 })
 
@@ -1480,9 +1608,9 @@ app.delete('/plateaus/:id', authMiddleware, async (req: any, res) => {
     if (!exists) return res.status(404).json({ error: 'Plateau not found' })
 
     // Collect related matches and teams
-    const matches = await prisma.match.findMany({ where: { userId: req.userId, plateauId: id }, include: { teams: true } })
-    const matchIds = matches.map(m => m.id)
-    const teamIds = matches.flatMap(m => m.teams.map(t => t.id))
+    const matches = await matchFindManyForUser(prisma, req.userId, { where: { plateauId: id }, include: { teams: true } })
+    const matchIds = matches.map((m: any) => m.id)
+    const teamIds = matches.flatMap((m: any) => m.teams.map((t: any) => t.id))
 
     await prisma.$transaction(async (tx) => {
       await tx.scorer.deleteMany({ where: { matchId: { in: matchIds } } })
@@ -1759,7 +1887,7 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
     if (!ownedPlateau) return res.status(404).json({ error: 'Plateau not found' })
   }
 
-  const match = await prisma.match.create({ data: { userId: req.userId, type, plateauId, opponentName } })
+  const match = await matchCreateForUser(prisma, req.userId, { type, plateauId, opponentName })
   const home = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'home', score: score?.home ?? 0 } })
   const away = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'away', score: score?.away ?? 0 } })
 
@@ -1779,7 +1907,7 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
     await prisma.scorer.createMany({ data: buteurs.map(b => ({ matchId: match.id, playerId: b.playerId, side: b.side })) })
   }
 
-  const full = await prisma.match.findUnique({
+  const full = await matchFindUniqueCompat(prisma, {
     where: { id: match.id },
     include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
   })
@@ -1799,7 +1927,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
 
   try {
     // ensure exists
-    const exists = await prisma.match.findFirst({ where: { id: matchId, userId: req.userId } })
+    const exists = await matchFindFirstForUser(prisma, req.userId, { where: { id: matchId } })
     if (!exists) return res.status(404).json({ error: 'Match not found' })
 
     // update fields
@@ -1819,8 +1947,8 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
       ])
     }
 
-    const full = await prisma.match.findFirst({
-      where: { id: matchId, userId: req.userId },
+    const full = await matchFindFirstForUser(prisma, req.userId, {
+      where: { id: matchId },
       include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
     })
     res.json(full)
@@ -1834,7 +1962,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
 app.delete('/matches/:id', authMiddleware, async (req: any, res) => {
   const id = req.params.id
   try {
-    const exists = await prisma.match.findFirst({ where: { id, userId: req.userId } })
+    const exists = await matchFindFirstForUser(prisma, req.userId, { where: { id } })
     if (!exists) return res.status(404).json({ error: 'Match not found' })
 
     const teams = await prisma.matchTeam.findMany({ where: { matchId: id } })
@@ -1914,7 +2042,7 @@ app.post('/schedule/commit', authMiddleware, async (req: any, res) => {
   const createdIds = await prisma.$transaction(async (db) => {
     const ids: string[] = []
     for (const m of schedule.matches) {
-      const match = await db.match.create({ data: { userId: req.userId, type: plateauId ? 'PLATEAU' : 'ENTRAINEMENT', plateauId } })
+      const match = await matchCreateForUser(db, req.userId, { type: plateauId ? 'PLATEAU' : 'ENTRAINEMENT', plateauId })
       const home = await db.matchTeam.create({ data: { matchId: match.id, side: 'home', score: 0 } })
       const away = await db.matchTeam.create({ data: { matchId: match.id, side: 'away', score: 0 } })
 
@@ -1936,8 +2064,8 @@ app.post('/schedule/commit', authMiddleware, async (req: any, res) => {
     return ids
   })
 
-  const matches = await prisma.match.findMany({
-    where: { userId: req.userId, id: { in: createdIds } },
+  const matches = await matchFindManyForUser(prisma, req.userId, {
+    where: { id: { in: createdIds } },
     include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
   })
 
@@ -2039,18 +2167,18 @@ app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req:
 // ---- Diagrams (exercices) ----
 app.get('/drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const drillId = req.params.id
-  const rows = await prisma.diagram.findMany({ where: { userId: req.userId, drillId }, orderBy: { updatedAt: 'desc' } })
+  const rows = await diagramFindManyForUser(prisma, req.userId, { where: { drillId }, orderBy: { updatedAt: 'desc' } })
   res.json(rows)
 })
 
 app.get('/training-drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const trainingDrillId = req.params.id
-  const rows = await prisma.diagram.findMany({ where: { userId: req.userId, trainingDrillId }, orderBy: { updatedAt: 'desc' } })
+  const rows = await diagramFindManyForUser(prisma, req.userId, { where: { trainingDrillId }, orderBy: { updatedAt: 'desc' } })
   res.json(rows)
 })
 
 app.get('/diagrams/:id', authMiddleware, async (req: any, res) => {
-  const d = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } })
+  const d = await diagramFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } })
   if (!d) return res.status(404).json({ error: 'Not found' })
   res.json(d)
 })
@@ -2063,15 +2191,15 @@ app.post('/drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const created = await prisma.diagram.create({
-    data: { userId: req.userId, drillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
+  const created = await diagramCreateForUser(prisma, req.userId, {
+    drillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data)
   })
   res.json({ ...created, data: parsed.data.data })
 })
 
 app.post('/training-drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const trainingDrillId = req.params.id
-  const trainingDrill = await prisma.trainingDrill.findFirst({ where: { id: trainingDrillId, userId: req.userId } })
+  const trainingDrill = await trainingDrillFindFirstForUser(prisma, req.userId, { where: { id: trainingDrillId } })
   if (!trainingDrill) return res.status(404).json({ error: 'Training drill not found' })
   const schema = z.object({
     title: z.string().min(1).max(100),
@@ -2079,8 +2207,8 @@ app.post('/training-drills/:id/diagrams', authMiddleware, async (req: any, res) 
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const created = await prisma.diagram.create({
-    data: { userId: req.userId, trainingDrillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data) }
+  const created = await diagramCreateForUser(prisma, req.userId, {
+    trainingDrillId, title: parsed.data.title, data: JSON.stringify(parsed.data.data)
   })
   res.json({ ...created, data: parsed.data.data })
 })
@@ -2098,7 +2226,7 @@ app.put('/diagrams/:id', authMiddleware, async (req: any, res) => {
   if (parsed.data.data !== undefined) patch.data = JSON.stringify(parsed.data.data)
 
   try {
-    const existing = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } })
+    const existing = await diagramFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } })
     if (!existing) return res.status(404).json({ error: 'Not found' })
     const updated = await prisma.diagram.update({ where: { id: existing.id }, data: patch })
     res.json({ ...updated, data: parsed.data.data ?? JSON.parse(updated.data) })
@@ -2111,9 +2239,10 @@ app.put('/diagrams/:id', authMiddleware, async (req: any, res) => {
 
 app.delete('/diagrams/:id', authMiddleware, async (req: any, res) => {
   try {
-    const existing = await prisma.diagram.findFirst({ where: { id: req.params.id, userId: req.userId } })
+    const existing = await diagramFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } })
     if (!existing) return res.status(404).json({ error: 'Not found' })
-    await prisma.diagram.delete({ where: { id: existing.id } })
+    const deleted = await prisma.diagram.deleteMany({ where: { id: existing.id } })
+    if (!deleted.count) return res.status(404).json({ error: 'Not found' })
     res.json({ ok: true })
   } catch (e: any) {
     if (e?.code === 'P2025') return res.status(404).json({ error: 'Not found' })
