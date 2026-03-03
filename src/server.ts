@@ -339,6 +339,26 @@ async function trainingDrillCreateForUser(db: any, userId: string, data: any) {
   })
 }
 
+async function drillFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
+  return db.drill.findMany({
+    ...args,
+    where: { ...(args.where || {}), userId },
+  })
+}
+
+async function drillFindFirstForUser(db: any, userId: string, args: any = {}): Promise<any> {
+  return db.drill.findFirst({
+    ...args,
+    where: { ...(args.where || {}), userId },
+  })
+}
+
+async function drillCreateForUser(db: any, userId: string, data: any) {
+  return db.drill.create({
+    data: { ...data, userId }
+  })
+}
+
 async function resolveTrainingDrillForRouteRef(
   db: any,
   userId: string,
@@ -607,9 +627,6 @@ app.get('/plannings/:id/qr', authMiddleware, async (req: any, res) => {
 
 // === FOOT DOMAIN API ===
 // ---- Drills (exercises) ----
-// Simple in-memory catalog to mirror the old app behaviour. Move to DB later if needed.
-// id, title, category, duration (min), players (min-max or text), description, tags
-// Runtime additions (in-memory). Reset on server restart.
 interface DrillMutable {
   id: string
   title: string
@@ -619,9 +636,8 @@ interface DrillMutable {
   description: string
   tags: string[]
 }
-const EXTRA_DRILLS: DrillMutable[] = []
 
-const DRILLS: DrillMutable[] = [
+const DRILLS: ReadonlyArray<DrillMutable> = [
   {
     id: 'd_warmup_circle',
     title: 'Échauffement en cercle',
@@ -669,12 +685,42 @@ const DRILLS: DrillMutable[] = [
   }
 ]
 
+async function loadDrillCatalogForUser(userId: string): Promise<DrillMutable[]> {
+  const customDrills = await drillFindManyForUser(prisma, userId, { orderBy: { createdAt: 'asc' } })
+  return DRILLS.concat(customDrills.map((d: any) => ({
+    id: d.id,
+    title: d.title,
+    category: d.category,
+    duration: d.duration,
+    players: d.players,
+    description: d.description,
+    tags: Array.isArray(d.tags) ? d.tags : []
+  })))
+}
+
+async function findDrillForUser(userId: string, drillId: string): Promise<DrillMutable | null> {
+  const builtin = DRILLS.find(x => x.id === drillId)
+  if (builtin) return builtin
+  const custom = await drillFindFirstForUser(prisma, userId, { where: { id: drillId } })
+  if (!custom) return null
+  return {
+    id: custom.id,
+    title: custom.title,
+    category: custom.category,
+    duration: custom.duration,
+    players: custom.players,
+    description: custom.description,
+    tags: Array.isArray(custom.tags) ? custom.tags : []
+  }
+}
+
 app.get('/drills', authMiddleware, async (req: any, res) => {
   const q = (req.query.q as string | undefined)?.toLowerCase().trim()
   const cat = (req.query.category as string | undefined)?.toLowerCase().trim()
   const tag = (req.query.tag as string | undefined)?.toLowerCase().trim()
 
-  let items: DrillMutable[] = DRILLS.concat(EXTRA_DRILLS)
+  const catalog = await loadDrillCatalogForUser(req.userId)
+  let items: DrillMutable[] = catalog.slice()
   if (q) {
     items = items.filter(d =>
       d.title.toLowerCase().includes(q) ||
@@ -687,22 +733,22 @@ app.get('/drills', authMiddleware, async (req: any, res) => {
 
   res.json({
     items,
-    categories: Array.from(new Set(DRILLS.map(d => d.category))).sort(),
-    tags: Array.from(new Set(DRILLS.flatMap(d => d.tags))).sort()
+    categories: Array.from(new Set(catalog.map(d => d.category))).sort(),
+    tags: Array.from(new Set(catalog.flatMap(d => d.tags))).sort()
   })
 })
 
 app.get('/drills/:id', authMiddleware, async (req: any, res) => {
-  const d = DRILLS.find(x => x.id === req.params.id) || EXTRA_DRILLS.find(x => x.id === req.params.id)
+  const d = await findDrillForUser(req.userId, req.params.id)
   if (!d) return res.status(404).json({ error: 'Not found' })
   res.json(d)
 })
 
 app.delete('/drills/:id', authMiddleware, async (req: any, res) => {
-  const index = EXTRA_DRILLS.findIndex(x => x.id === req.params.id)
-  if (index === -1) return res.status(404).json({ error: 'Not found' })
+  const existing = await drillFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } })
+  if (!existing) return res.status(404).json({ error: 'Not found' })
 
-  const drillId = EXTRA_DRILLS[index].id
+  const drillId = existing.id
   const rows = await trainingDrillFindManyForUser(prisma, req.userId, {
     where: { drillId },
     select: { id: true }
@@ -713,9 +759,9 @@ app.delete('/drills/:id', authMiddleware, async (req: any, res) => {
     prisma.diagram.deleteMany({ where: { userId: req.userId, drillId } }),
     prisma.diagram.deleteMany({ where: { userId: req.userId, trainingDrillId: { in: trainingDrillIds } } }),
     prisma.trainingDrill.deleteMany({ where: { userId: req.userId, drillId } }),
+    prisma.drill.deleteMany({ where: { userId: req.userId, id: drillId } }),
   ])
 
-  EXTRA_DRILLS.splice(index, 1)
   res.json({ ok: true })
 })
 
@@ -731,15 +777,15 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-  // naive unique id; ensure no collision with seed ones
+  // readable id, unique against built-in drills and persisted custom drills
   const base = parsed.data.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
   let id = `d_${base || 'new'}`
   let i = 1
-  while (DRILLS.some(d => d.id === id) || EXTRA_DRILLS.some(d => d.id === id)) {
+  while (DRILLS.some(d => d.id === id) || await drillFindFirstForUser(prisma, req.userId, { where: { id } })) {
     id = `d_${base}_${i++}`
   }
 
-  const drill: DrillMutable = {
+  const drill = await drillCreateForUser(prisma, req.userId, {
     id,
     title: parsed.data.title,
     category: parsed.data.category,
@@ -747,8 +793,7 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
     players: parsed.data.players,
     description: parsed.data.description,
     tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
-  }
-  EXTRA_DRILLS.push(drill)
+  })
   res.status(201).json(drill)
 })
 // Models used: Player, Training, Plateau, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
@@ -1600,7 +1645,7 @@ app.get('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
     where: { trainingId },
     orderBy: { order: 'asc' },
   })
-  const catalog = (DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)
+  const catalog = await loadDrillCatalogForUser(req.userId)
   const items = rows.map(r => {
     const meta = catalog.find(d => d.id === r.drillId) || null
     return { ...r, meta }
@@ -1623,6 +1668,8 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  const drill = await findDrillForUser(req.userId, parsed.data.drillId)
+  if (!drill) return res.status(404).json({ error: 'Drill not found' })
 
   const requestedTrainingDrillRef =
     parsed.data.trainingDrillId ||
@@ -1640,7 +1687,7 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
         ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
       }
     })
-    const meta = ((DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)).find(d => d.id === updated.drillId) || null
+    const meta = drill
     return res.json({ ...updated, meta })
   }
 
@@ -1654,7 +1701,7 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   const row = await trainingDrillCreateForUser(prisma, req.userId, {
     trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder
   })
-  const meta = ((DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)).find(d => d.id === row.drillId) || null
+  const meta = drill
   res.json({ ...row, meta })
 })
 
@@ -1672,6 +1719,10 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: an
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  if (parsed.data.drillId !== undefined) {
+    const drill = await findDrillForUser(req.userId, parsed.data.drillId)
+    if (!drill) return res.status(404).json({ error: 'Drill not found' })
+  }
 
   try {
     const updated = await prisma.trainingDrill.update({
@@ -1683,7 +1734,7 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: an
         ...(parsed.data.order !== undefined ? { order: parsed.data.order } : {})
       }
     })
-    const meta = ((DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)).find(d => d.id === updated.drillId) || null
+    const meta = await findDrillForUser(req.userId, updated.drillId)
     res.json({ ...updated, meta })
   } catch {
     res.status(404).json({ error: 'Not found' })
@@ -1728,6 +1779,8 @@ app.get('/diagrams/:id', authMiddleware, async (req: any, res) => {
 
 app.post('/drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const drillId = req.params.id
+  const drill = await findDrillForUser(req.userId, drillId)
+  if (!drill) return res.status(404).json({ error: 'Drill not found' })
   const schema = z.object({
     title: z.string().min(1).max(100),
     data: z.any() // JSON
