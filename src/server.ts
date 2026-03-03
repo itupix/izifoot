@@ -339,6 +339,21 @@ async function trainingDrillCreateForUser(db: any, userId: string, data: any) {
   })
 }
 
+async function resolveTrainingDrillForRouteRef(
+  db: any,
+  userId: string,
+  trainingId: string,
+  trainingDrillRef: string
+): Promise<any> {
+  const byId = await trainingDrillFindFirstForUser(db, userId, {
+    where: { id: trainingDrillRef, trainingId },
+  })
+  if (byId) return byId
+  return trainingDrillFindFirstForUser(db, userId, {
+    where: { drillId: trainingDrillRef, trainingId },
+  })
+}
+
 async function diagramFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
   return db.diagram.findMany({
     ...args,
@@ -681,6 +696,27 @@ app.get('/drills/:id', authMiddleware, async (req: any, res) => {
   const d = DRILLS.find(x => x.id === req.params.id) || EXTRA_DRILLS.find(x => x.id === req.params.id)
   if (!d) return res.status(404).json({ error: 'Not found' })
   res.json(d)
+})
+
+app.delete('/drills/:id', authMiddleware, async (req: any, res) => {
+  const index = EXTRA_DRILLS.findIndex(x => x.id === req.params.id)
+  if (index === -1) return res.status(404).json({ error: 'Not found' })
+
+  const drillId = EXTRA_DRILLS[index].id
+  const rows = await trainingDrillFindManyForUser(prisma, req.userId, {
+    where: { drillId },
+    select: { id: true }
+  })
+  const trainingDrillIds = rows.map((row: any) => row.id)
+
+  await prisma.$transaction([
+    prisma.diagram.deleteMany({ where: { userId: req.userId, drillId } }),
+    prisma.diagram.deleteMany({ where: { userId: req.userId, trainingDrillId: { in: trainingDrillIds } } }),
+    prisma.trainingDrill.deleteMany({ where: { userId: req.userId, drillId } }),
+  ])
+
+  EXTRA_DRILLS.splice(index, 1)
+  res.json({ ok: true })
 })
 
 app.post('/drills', authMiddleware, async (req: any, res) => {
@@ -1580,10 +1616,33 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     drillId: z.string().min(1),
     duration: z.number().int().min(1).max(120).optional(),
-    notes: z.string().max(1000).optional()
+    notes: z.string().max(1000).optional(),
+    trainingDrillId: z.string().min(1).optional(),
+    replaceTrainingDrillId: z.string().min(1).optional(),
+    id: z.string().min(1).optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const requestedTrainingDrillRef =
+    parsed.data.trainingDrillId ||
+    parsed.data.replaceTrainingDrillId ||
+    (parsed.data.id && parsed.data.id !== parsed.data.drillId ? parsed.data.id : undefined)
+
+  if (requestedTrainingDrillRef) {
+    const existing = await resolveTrainingDrillForRouteRef(prisma, req.userId, trainingId, requestedTrainingDrillRef)
+    if (!existing) return res.status(404).json({ error: 'Not found' })
+    const updated = await prisma.trainingDrill.update({
+      where: { id: existing.id },
+      data: {
+        drillId: parsed.data.drillId,
+        ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration } : {}),
+        ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
+      }
+    })
+    const meta = ((DRILLS as readonly DrillMutable[]).concat(EXTRA_DRILLS)).find(d => d.id === updated.drillId) || null
+    return res.json({ ...updated, meta })
+  }
 
   // order auto-incrémental simple
   const existingRows = await trainingDrillFindManyForUser(prisma, req.userId, {
@@ -1603,9 +1662,10 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
 app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: any, res) => {
   const trainingId = req.params.id
   const trainingDrillId = req.params.trainingDrillId
-  const existing = await trainingDrillFindFirstForUser(prisma, req.userId, { where: { id: trainingDrillId, trainingId } })
+  const existing = await resolveTrainingDrillForRouteRef(prisma, req.userId, trainingId, trainingDrillId)
   if (!existing) return res.status(404).json({ error: 'Not found' })
   const schema = z.object({
+    drillId: z.string().min(1).optional(),
     duration: z.number().int().min(1).max(120).nullable().optional(),
     notes: z.string().max(1000).nullable().optional(),
     order: z.number().int().min(0).optional()
@@ -1617,6 +1677,7 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: an
     const updated = await prisma.trainingDrill.update({
       where: { id: existing.id },
       data: {
+        ...(parsed.data.drillId !== undefined ? { drillId: parsed.data.drillId } : {}),
         ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration ?? null } : {}),
         ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes ?? null } : {}),
         ...(parsed.data.order !== undefined ? { order: parsed.data.order } : {})
@@ -1634,8 +1695,9 @@ app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req:
   const trainingId = req.params.id
   const trainingDrillId = req.params.trainingDrillId
   try {
-    const existing = await trainingDrillFindFirstForUser(prisma, req.userId, { where: { id: trainingDrillId, trainingId } })
+    const existing = await resolveTrainingDrillForRouteRef(prisma, req.userId, trainingId, trainingDrillId)
     if (!existing) return res.status(404).json({ error: 'Not found' })
+    await prisma.diagram.deleteMany({ where: { userId: req.userId, trainingDrillId: existing.id } })
     const deleted = await prisma.trainingDrill.deleteMany({ where: { id: existing.id } })
     if (!deleted.count) return res.status(404).json({ error: 'Not found' })
     res.json({ ok: true })
