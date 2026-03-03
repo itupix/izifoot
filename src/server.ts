@@ -339,24 +339,61 @@ async function trainingDrillCreateForUser(db: any, userId: string, data: any) {
   })
 }
 
+function getDrillDelegate(db: any) {
+  const delegate = db?.drill
+  if (!delegate || typeof delegate.findMany !== 'function' || typeof delegate.findFirst !== 'function') {
+    return null
+  }
+  return delegate
+}
+
 async function drillFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
-  return db.drill.findMany({
-    ...args,
-    where: { ...(args.where || {}), userId },
-  })
+  const delegate = getDrillDelegate(db)
+  if (!delegate) return []
+  try {
+    return await delegate.findMany({
+      ...args,
+      where: { ...(args.where || {}), userId },
+    })
+  } catch (e: any) {
+    if (e?.code === 'P2021') return []
+    throw e
+  }
 }
 
 async function drillFindFirstForUser(db: any, userId: string, args: any = {}): Promise<any> {
-  return db.drill.findFirst({
-    ...args,
-    where: { ...(args.where || {}), userId },
-  })
+  const delegate = getDrillDelegate(db)
+  if (!delegate) return null
+  try {
+    return await delegate.findFirst({
+      ...args,
+      where: { ...(args.where || {}), userId },
+    })
+  } catch (e: any) {
+    if (e?.code === 'P2021') return null
+    throw e
+  }
 }
 
 async function drillCreateForUser(db: any, userId: string, data: any) {
-  return db.drill.create({
-    data: { ...data, userId }
-  })
+  const delegate = getDrillDelegate(db)
+  if (!delegate || typeof delegate.create !== 'function') {
+    const err: any = new Error('Drill storage unavailable')
+    err.code = 'DRILL_STORAGE_UNAVAILABLE'
+    throw err
+  }
+  try {
+    return await delegate.create({
+      data: { ...data, userId }
+    })
+  } catch (e: any) {
+    if (e?.code === 'P2021') {
+      const err: any = new Error('Drill storage unavailable')
+      err.code = 'DRILL_STORAGE_UNAVAILABLE'
+      throw err
+    }
+    throw e
+  }
 }
 
 async function resolveTrainingDrillForRouteRef(
@@ -785,16 +822,23 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
     id = `d_${base}_${i++}`
   }
 
-  const drill = await drillCreateForUser(prisma, req.userId, {
-    id,
-    title: parsed.data.title,
-    category: parsed.data.category,
-    duration: parsed.data.duration,
-    players: parsed.data.players,
-    description: parsed.data.description,
-    tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
-  })
-  res.status(201).json(drill)
+  try {
+    const drill = await drillCreateForUser(prisma, req.userId, {
+      id,
+      title: parsed.data.title,
+      category: parsed.data.category,
+      duration: parsed.data.duration,
+      players: parsed.data.players,
+      description: parsed.data.description,
+      tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
+    })
+    res.status(201).json(drill)
+  } catch (e: any) {
+    if (e?.code === 'DRILL_STORAGE_UNAVAILABLE') {
+      return res.status(503).json({ error: 'Drill storage unavailable' })
+    }
+    throw e
+  }
 })
 // Models used: Player, Training, Plateau, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
 // All endpoints are protected (same as plannings). Adjust if you want some public.

@@ -310,22 +310,65 @@ async function trainingDrillCreateForUser(db, userId, data) {
         data: { ...data, userId }
     });
 }
+function getDrillDelegate(db) {
+    const delegate = db?.drill;
+    if (!delegate || typeof delegate.findMany !== 'function' || typeof delegate.findFirst !== 'function') {
+        return null;
+    }
+    return delegate;
+}
 async function drillFindManyForUser(db, userId, args = {}) {
-    return db.drill.findMany({
-        ...args,
-        where: { ...(args.where || {}), userId },
-    });
+    const delegate = getDrillDelegate(db);
+    if (!delegate)
+        return [];
+    try {
+        return await delegate.findMany({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (e) {
+        if (e?.code === 'P2021')
+            return [];
+        throw e;
+    }
 }
 async function drillFindFirstForUser(db, userId, args = {}) {
-    return db.drill.findFirst({
-        ...args,
-        where: { ...(args.where || {}), userId },
-    });
+    const delegate = getDrillDelegate(db);
+    if (!delegate)
+        return null;
+    try {
+        return await delegate.findFirst({
+            ...args,
+            where: { ...(args.where || {}), userId },
+        });
+    }
+    catch (e) {
+        if (e?.code === 'P2021')
+            return null;
+        throw e;
+    }
 }
 async function drillCreateForUser(db, userId, data) {
-    return db.drill.create({
-        data: { ...data, userId }
-    });
+    const delegate = getDrillDelegate(db);
+    if (!delegate || typeof delegate.create !== 'function') {
+        const err = new Error('Drill storage unavailable');
+        err.code = 'DRILL_STORAGE_UNAVAILABLE';
+        throw err;
+    }
+    try {
+        return await delegate.create({
+            data: { ...data, userId }
+        });
+    }
+    catch (e) {
+        if (e?.code === 'P2021') {
+            const err = new Error('Drill storage unavailable');
+            err.code = 'DRILL_STORAGE_UNAVAILABLE';
+            throw err;
+        }
+        throw e;
+    }
 }
 async function resolveTrainingDrillForRouteRef(db, userId, trainingId, trainingDrillRef) {
     const byId = await trainingDrillFindFirstForUser(db, userId, {
@@ -728,16 +771,24 @@ app.post('/drills', authMiddleware, async (req, res) => {
     while (DRILLS.some(d => d.id === id) || await drillFindFirstForUser(prisma, req.userId, { where: { id } })) {
         id = `d_${base}_${i++}`;
     }
-    const drill = await drillCreateForUser(prisma, req.userId, {
-        id,
-        title: parsed.data.title,
-        category: parsed.data.category,
-        duration: parsed.data.duration,
-        players: parsed.data.players,
-        description: parsed.data.description,
-        tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
-    });
-    res.status(201).json(drill);
+    try {
+        const drill = await drillCreateForUser(prisma, req.userId, {
+            id,
+            title: parsed.data.title,
+            category: parsed.data.category,
+            duration: parsed.data.duration,
+            players: parsed.data.players,
+            description: parsed.data.description,
+            tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
+        });
+        res.status(201).json(drill);
+    }
+    catch (e) {
+        if (e?.code === 'DRILL_STORAGE_UNAVAILABLE') {
+            return res.status(503).json({ error: 'Drill storage unavailable' });
+        }
+        throw e;
+    }
 });
 // Models used: Player, Training, Plateau, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
 // All endpoints are protected (same as plannings). Adjust if you want some public.
