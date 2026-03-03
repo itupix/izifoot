@@ -376,9 +376,14 @@ async function resolveTrainingDrillForRouteRef(db, userId, trainingId, trainingD
     });
     if (byId)
         return byId;
-    return trainingDrillFindFirstForUser(db, userId, {
+    const byDrillId = await trainingDrillFindManyForUser(db, userId, {
         where: { drillId: trainingDrillRef, trainingId },
+        orderBy: { order: 'asc' },
+        take: 2,
     });
+    if (byDrillId.length !== 1)
+        return null;
+    return byDrillId[0];
 }
 async function diagramFindManyForUser(db, userId, args = {}) {
     return db.diagram.findMany({

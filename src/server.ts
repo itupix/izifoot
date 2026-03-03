@@ -406,9 +406,13 @@ async function resolveTrainingDrillForRouteRef(
     where: { id: trainingDrillRef, trainingId },
   })
   if (byId) return byId
-  return trainingDrillFindFirstForUser(db, userId, {
+  const byDrillId = await trainingDrillFindManyForUser(db, userId, {
     where: { drillId: trainingDrillRef, trainingId },
+    orderBy: { order: 'asc' },
+    take: 2,
   })
+  if (byDrillId.length !== 1) return null
+  return byDrillId[0]
 }
 
 async function diagramFindManyForUser(db: any, userId: string, args: any = {}): Promise<any[]> {
@@ -664,6 +668,7 @@ app.get('/plannings/:id/qr', authMiddleware, async (req: any, res) => {
 
 // === FOOT DOMAIN API ===
 // ---- Drills (exercises) ----
+// Built-in catalog shipped with the app. User-created drills are persisted in PostgreSQL.
 interface DrillMutable {
   id: string
   title: string

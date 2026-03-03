@@ -157,7 +157,7 @@ model TrainingDrill {
   user       User?    @relation(fields: [userId], references: [id])
   training   Training @relation(fields: [trainingId], references: [id])
   trainingId String
-  drillId    String // id d'un drill du catalogue en mémoire
+  drillId    String // id d'un drill du catalogue (seed ou personnalisé)
   order      Int      @default(0)
   duration   Int? // override (minutes) pour cette séance
   notes      String?
@@ -188,7 +188,7 @@ model Diagram {
   user            User?    @relation(fields: [userId], references: [id])
   title           String
   data            String // JSON string décrivant le dessin
-  drillId         String? // id d'un DRILL du catalogue en mémoire
+  drillId         String? // id d'un drill du catalogue
   trainingDrillId String? // id d'un exercice rattaché à une séance
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
