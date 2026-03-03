@@ -739,6 +739,43 @@ app.get('/drills/:id', authMiddleware, async (req, res) => {
         return res.status(404).json({ error: 'Not found' });
     res.json(d);
 });
+app.put('/drills/:id', authMiddleware, async (req, res) => {
+    if (DRILLS.some(d => d.id === req.params.id)) {
+        return res.status(400).json({ error: 'Built-in drills are read-only' });
+    }
+    const existing = await drillFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } });
+    if (!existing)
+        return res.status(404).json({ error: 'Not found' });
+    const schema = zod_1.z.object({
+        title: zod_1.z.string().min(1).max(100).optional(),
+        category: zod_1.z.string().min(1).max(50).optional(),
+        duration: zod_1.z.coerce.number().int().min(1).max(180).optional(),
+        players: zod_1.z.string().min(1).max(50).optional(),
+        description: zod_1.z.string().min(1).max(2000).optional(),
+        tags: zod_1.z.array(zod_1.z.string().min(1).max(32)).max(20).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const patch = {};
+    if (parsed.data.title !== undefined)
+        patch.title = parsed.data.title;
+    if (parsed.data.category !== undefined)
+        patch.category = parsed.data.category;
+    if (parsed.data.duration !== undefined)
+        patch.duration = parsed.data.duration;
+    if (parsed.data.players !== undefined)
+        patch.players = parsed.data.players;
+    if (parsed.data.description !== undefined)
+        patch.description = parsed.data.description;
+    if (parsed.data.tags !== undefined)
+        patch.tags = parsed.data.tags;
+    const updated = await prisma.drill.update({
+        where: { id: existing.id },
+        data: patch
+    });
+    res.json(updated);
+});
 app.delete('/drills/:id', authMiddleware, async (req, res) => {
     const existing = await drillFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } });
     if (!existing)
