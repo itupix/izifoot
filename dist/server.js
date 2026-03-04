@@ -385,6 +385,54 @@ async function resolveTrainingDrillForRouteRef(db, userId, trainingId, trainingD
         return null;
     return byDrillId[0];
 }
+async function listTrainingDrillsInOrder(db, userId, trainingId, args = {}) {
+    return trainingDrillFindManyForUser(db, userId, {
+        ...args,
+        where: { ...(args.where || {}), trainingId },
+        orderBy: args.orderBy || [{ order: 'asc' }, { id: 'asc' }],
+    });
+}
+async function normalizeTrainingDrillOrders(db, userId, trainingId) {
+    const rows = await listTrainingDrillsInOrder(db, userId, trainingId, {
+        select: { id: true, order: true },
+    });
+    for (const [index, row] of rows.entries()) {
+        if (row.order === index)
+            continue;
+        await db.trainingDrill.update({
+            where: { id: row.id },
+            data: { order: index },
+        });
+    }
+}
+async function moveTrainingDrillToOrder(db, userId, trainingId, trainingDrillId, targetOrder) {
+    const rows = await listTrainingDrillsInOrder(db, userId, trainingId, {
+        select: { id: true, order: true },
+    });
+    const currentIndex = rows.findIndex((row) => row.id === trainingDrillId);
+    if (currentIndex < 0) {
+        const err = new Error('Training drill not found');
+        err.code = 'TRAINING_DRILL_NOT_FOUND';
+        throw err;
+    }
+    if (targetOrder < 0 || targetOrder >= rows.length) {
+        const err = new Error('Invalid order');
+        err.code = 'INVALID_ORDER';
+        throw err;
+    }
+    if (currentIndex === targetOrder)
+        return;
+    const [moved] = rows.splice(currentIndex, 1);
+    rows.splice(targetOrder, 0, moved);
+    for (const [index, row] of rows.entries()) {
+        if (row.order === index)
+            continue;
+        await db.trainingDrill.update({
+            where: { id: row.id },
+            data: { order: index },
+        });
+    }
+}
 async function diagramFindManyForUser(db, userId, args = {}) {
     return db.diagram.findMany({
         ...args,
@@ -1619,13 +1667,11 @@ app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const training = await trainingFindFirstForUser(prisma, req.userId, { where: { id: trainingId } });
     if (!training)
         return res.status(404).json({ error: 'Training not found' });
-    const rows = await trainingDrillFindManyForUser(prisma, req.userId, {
-        where: { trainingId },
-        orderBy: { order: 'asc' },
-    });
+    const rows = await listTrainingDrillsInOrder(prisma, req.userId, trainingId);
     const catalog = await drillFindManyForUser(prisma, req.userId, { orderBy: { createdAt: 'asc' } });
+    const catalogById = new Map(catalog.map((drill) => [drill.id, drill]));
     const items = rows.map(r => {
-        const meta = catalog.find(d => d.id === r.drillId) || null;
+        const meta = catalogById.get(r.drillId) || null;
         return { ...r, meta };
     });
     res.json(items);
@@ -1668,14 +1714,15 @@ app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
         const meta = drill;
         return res.json({ ...updated, meta });
     }
-    // order auto-incrémental simple
-    const existingRows = await trainingDrillFindManyForUser(prisma, req.userId, {
-        where: { trainingId },
-        select: { order: true }
-    });
-    const nextOrder = existingRows.reduce((max, row) => Math.max(max, row.order ?? -1), -1) + 1;
-    const row = await trainingDrillCreateForUser(prisma, req.userId, {
-        trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder
+    const row = await prisma.$transaction(async (tx) => {
+        const existingRows = await trainingDrillFindManyForUser(tx, req.userId, {
+            where: { trainingId },
+            select: { order: true }
+        });
+        const nextOrder = existingRows.reduce((max, currentRow) => Math.max(max, currentRow.order ?? -1), -1) + 1;
+        return trainingDrillCreateForUser(tx, req.userId, {
+            trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder
+        });
     });
     const meta = drill;
     res.json({ ...row, meta });
@@ -1692,6 +1739,11 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, re
         duration: zod_1.z.number().int().min(1).max(120).nullable().optional(),
         notes: zod_1.z.string().max(1000).nullable().optional(),
         order: zod_1.z.number().int().min(0).optional()
+    }).refine((data) => (data.drillId !== undefined ||
+        data.duration !== undefined ||
+        data.notes !== undefined ||
+        data.order !== undefined), {
+        message: 'At least one field must be provided',
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -1702,19 +1754,34 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, re
             return res.status(404).json({ error: 'Drill not found' });
     }
     try {
-        const updated = await prisma.trainingDrill.update({
-            where: { id: existing.id },
-            data: {
-                ...(parsed.data.drillId !== undefined ? { drillId: parsed.data.drillId } : {}),
-                ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration ?? null } : {}),
-                ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes ?? null } : {}),
-                ...(parsed.data.order !== undefined ? { order: parsed.data.order } : {})
+        const updateData = {
+            ...(parsed.data.drillId !== undefined ? { drillId: parsed.data.drillId } : {}),
+            ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration ?? null } : {}),
+            ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes ?? null } : {}),
+        };
+        const updated = await prisma.$transaction(async (tx) => {
+            if (parsed.data.order !== undefined) {
+                await moveTrainingDrillToOrder(tx, req.userId, trainingId, existing.id, parsed.data.order);
             }
+            if (Object.keys(updateData).length > 0) {
+                return tx.trainingDrill.update({
+                    where: { id: existing.id },
+                    data: updateData
+                });
+            }
+            return tx.trainingDrill.findUnique({
+                where: { id: existing.id }
+            });
         });
+        if (!updated)
+            return res.status(404).json({ error: 'Not found' });
         const meta = await drillFindFirstForUser(prisma, req.userId, { where: { id: updated.drillId } });
         res.json({ ...updated, meta });
     }
-    catch {
+    catch (e) {
+        if (e?.code === 'INVALID_ORDER') {
+            return res.status(400).json({ error: 'Invalid order' });
+        }
         res.status(404).json({ error: 'Not found' });
     }
 });
@@ -1726,8 +1793,14 @@ app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req,
         const existing = await resolveTrainingDrillForRouteRef(prisma, req.userId, trainingId, trainingDrillId);
         if (!existing)
             return res.status(404).json({ error: 'Not found' });
-        await prisma.diagram.deleteMany({ where: { userId: req.userId, trainingDrillId: existing.id } });
-        const deleted = await prisma.trainingDrill.deleteMany({ where: { id: existing.id } });
+        const deleted = await prisma.$transaction(async (tx) => {
+            await tx.diagram.deleteMany({ where: { userId: req.userId, trainingDrillId: existing.id } });
+            const removed = await tx.trainingDrill.deleteMany({ where: { id: existing.id } });
+            if (removed.count) {
+                await normalizeTrainingDrillOrders(tx, req.userId, trainingId);
+            }
+            return removed;
+        });
         if (!deleted.count)
             return res.status(404).json({ error: 'Not found' });
         res.json({ ok: true });
