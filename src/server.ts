@@ -12,6 +12,7 @@ import { nanoid } from 'nanoid'
 import QRCode from 'qrcode'
 import nodemailer from 'nodemailer'
 import { addDays } from 'date-fns'
+import { randomUUID } from 'crypto'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -569,6 +570,138 @@ function safeParseJSON(s: string | null) {
   if (!s) return null
   try { return JSON.parse(s) } catch { return null }
 }
+
+function normalizePublicTeamLabel(raw: string | null | undefined, fallback: string) {
+  const normalized = String(raw || '').trim().toUpperCase()
+  if (!normalized) return fallback
+  if (normalized === 'HOME') return 'A'
+  if (normalized === 'AWAY') return 'B'
+  return normalized
+}
+
+function buildPublicPlateauRotation(matches: Array<{ createdAt: Date; updatedAt: Date; opponentName: string | null; teams: Array<{ side: string }> }>) {
+  if (!matches.length) return null
+
+  const slots = matches.map((match, index) => {
+    const orderedTeams = match.teams.slice().sort((a, b) => a.side.localeCompare(b.side))
+    const teamA = normalizePublicTeamLabel(orderedTeams[0]?.side, 'A')
+    const teamB = (match.opponentName && match.opponentName.trim().length > 0)
+      ? match.opponentName.trim()
+      : normalizePublicTeamLabel(orderedTeams[1]?.side, 'B')
+
+    return {
+      time: match.createdAt.toISOString(),
+      games: [{ pitch: `Terrain ${index + 1}`, A: teamA, B: teamB }]
+    }
+  })
+
+  const updatedAt = matches.reduce((latest, current) => current.updatedAt > latest ? current.updatedAt : latest, matches[0].updatedAt)
+  return { updatedAt: updatedAt.toISOString(), slots }
+}
+
+function normalizePublicRotation(candidate: any, defaultUpdatedAtIso: string) {
+  if (!candidate || !Array.isArray(candidate.slots)) return null
+  const slots = candidate.slots.map((slot: any) => ({
+    time: String(slot?.time ?? ''),
+    games: Array.isArray(slot?.games)
+      ? slot.games.map((game: any) => ({
+          pitch: String(game?.pitch ?? ''),
+          A: String(game?.A ?? ''),
+          B: String(game?.B ?? ''),
+        }))
+      : [],
+  }))
+  return {
+    updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : defaultUpdatedAtIso,
+    slots
+  }
+}
+
+function findRotationCandidate(data: any) {
+  if (!data || typeof data !== 'object') return null
+  const directCandidates = [
+    data.rotation,
+    data?.data?.rotation,
+    data?.planning?.rotation,
+    data?.schedule?.rotation,
+    data?.rotationData,
+    data,
+  ]
+  for (const c of directCandidates) {
+    if (c && typeof c === 'object' && Array.isArray((c as any).slots)) return c
+  }
+  return null
+}
+
+async function getPublicPlateauPayloadByToken(token: string) {
+  let share: any
+  try {
+    share = await prisma.plateauShareToken.findFirst({
+      where: {
+        OR: [
+          { token },
+          { id: token }, // compat if frontend accidentally stores share row id instead of token
+        ]
+      },
+      include: { plateau: true }
+    })
+  } catch (e: any) {
+    if (e?.code === 'P2021') {
+      return { status: 503 as const, body: { error: 'Public sharing is not ready on this environment' } }
+    }
+    throw e
+  }
+  if (!share) return { status: 404 as const, body: { error: 'Invalid link' } }
+  if (share.expiresAt && share.expiresAt < new Date()) return { status: 410 as const, body: { error: 'Link expired' } }
+
+  let rotation: any = null
+
+  // Prefer rotation saved by the planning editor (same coach + same day).
+  if (share.plateau.userId) {
+    const dayStart = new Date(share.plateau.date)
+    dayStart.setHours(0, 0, 0, 0)
+    const dayEnd = new Date(dayStart)
+    dayEnd.setDate(dayEnd.getDate() + 1)
+
+    const planning = await prisma.planning.findFirst({
+      where: {
+        userId: share.plateau.userId,
+        date: { gte: dayStart, lt: dayEnd }
+      },
+      orderBy: { updatedAt: 'desc' }
+    })
+
+    if (planning) {
+      const planningData = safeParseJSON(planning.data)
+      const candidate = findRotationCandidate(planningData)
+      rotation = normalizePublicRotation(candidate, planning.updatedAt.toISOString())
+    }
+  }
+
+  // Fallback: synthesize a minimal rotation from matches.
+  if (!rotation) {
+    const matches = await prisma.match.findMany({
+      where: { plateauId: share.plateauId },
+      select: {
+        createdAt: true,
+        updatedAt: true,
+        opponentName: true,
+        teams: { select: { side: true } }
+      },
+      orderBy: { createdAt: 'asc' }
+    })
+    rotation = buildPublicPlateauRotation(matches)
+  }
+
+  return {
+    status: 200 as const,
+    body: {
+      plateau: { id: share.plateau.id, date: share.plateau.date, lieu: share.plateau.lieu },
+      rotation
+    }
+  }
+}
+
 app.post('/auth/register', async (req, res) => {
   const schema = z.object({ email: z.string().email(), password: z.string().min(6) })
   const parsed = schema.safeParse(req.body)
@@ -602,7 +735,13 @@ app.post('/auth/logout', (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/me', authMiddleware, async (req: any, res) => {
+app.get('/me', async (req: any, res, next) => {
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  if (!token) {
+    return res.json({ id: null, email: null, isPremium: false, planningCount: 0, anonymous: true })
+  }
+  return next()
+}, authMiddleware, async (req: any, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.userId }, include: { plannings: true } })
   if (!user) return res.status(404).json({ error: 'User not found' })
   const planningCount = user.plannings.length
@@ -672,13 +811,25 @@ app.post('/plannings', authMiddleware, async (req: any, res) => {
   res.json({ ...planning, data })
 })
 
-app.get('/plannings', authMiddleware, async (req: any, res) => {
+app.get('/plannings', async (req: any, res, next) => {
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  if (!token) {
+    return res.json([])
+  }
+  return next()
+}, authMiddleware, async (req: any, res) => {
   const plans = await prisma.planning.findMany({ where: { userId: req.userId }, orderBy: { date: 'asc' } })
   const mapped = plans.map((p) => ({ ...p, data: safeParseJSON(p.data) }))
   res.json(mapped)
 })
 
-app.get('/plannings/:id', authMiddleware, async (req: any, res) => {
+app.get('/plannings/:id', async (req: any, res, next) => {
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  if (!token) {
+    return res.status(404).json({ error: 'Not found' })
+  }
+  return next()
+}, authMiddleware, async (req: any, res) => {
   const p = await prisma.planning.findFirst({ where: { id: req.params.id, userId: req.userId } })
   if (!p) return res.status(404).json({ error: 'Not found' })
   res.json({ ...p, data: safeParseJSON(p.data) })
@@ -1251,7 +1402,11 @@ app.delete('/trainings/:id', authMiddleware, async (req: any, res) => {
 })
 
 // ---- Plateaus ----
-app.get('/plateaus', authMiddleware, async (req: any, res) => {
+app.get('/plateaus', async (req: any, res, next) => {
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  if (!token) return res.json([])
+  return next()
+}, authMiddleware, async (req: any, res) => {
   const plateaus = await plateauFindManyForUser(prisma, req.userId, { orderBy: { date: 'desc' } })
   res.json(plateaus)
 })
@@ -1264,6 +1419,60 @@ app.post('/plateaus', authMiddleware, async (req: any, res) => {
   const date = new Date(parsed.data.date as any)
   const pl = await plateauCreateForUser(prisma, req.userId, { date, lieu: parsed.data.lieu })
   res.json(pl)
+})
+
+app.post('/plateaus/:id/share', authMiddleware, async (req: any, res) => {
+  const schema = z.object({ expiresInDays: z.number().int().min(1).max(365).optional() })
+  const parsed = schema.safeParse(req.body ?? {})
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const plateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } })
+  if (!plateau) return res.status(404).json({ error: 'Plateau not found' })
+
+  const existing = await prisma.plateauShareToken.findFirst({
+    where: { plateauId: plateau.id },
+    orderBy: { createdAt: 'desc' }
+  })
+
+  let token = existing?.token || randomUUID()
+  let expiresAt: Date | null = existing?.expiresAt ?? null
+
+  if (parsed.data.expiresInDays) {
+    expiresAt = addDays(new Date(), parsed.data.expiresInDays)
+  } else if (existing?.expiresAt && existing.expiresAt < new Date()) {
+    // Re-enable an expired link while keeping the same URL.
+    expiresAt = null
+  }
+
+  if (existing) {
+    await prisma.plateauShareToken.update({
+      where: { id: existing.id },
+      data: { expiresAt: expiresAt ?? null }
+    })
+  } else {
+    await prisma.plateauShareToken.create({
+      data: {
+        plateauId: plateau.id,
+        token,
+        expiresAt: expiresAt ?? undefined
+      }
+    })
+  }
+
+  const url = `${APP_BASE_URL.replace(/\/+$/, '')}/plateau/public/${token}`
+  res.json({ token, url, expiresAt })
+})
+
+app.delete('/plateaus/:id/share', authMiddleware, async (req: any, res) => {
+  const plateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } })
+  if (!plateau) return res.status(404).json({ error: 'Plateau not found' })
+  await prisma.plateauShareToken.deleteMany({ where: { plateauId: plateau.id } })
+  res.json({ ok: true })
+})
+
+app.get('/public/plateaus/:token', async (req, res) => {
+  const result = await getPublicPlateauPayloadByToken(req.params.token)
+  return res.status(result.status).json(result.body)
 })
 
 app.delete('/plateaus/:id', authMiddleware, async (req: any, res) => {
@@ -1299,6 +1508,14 @@ app.delete('/plateaus/:id', authMiddleware, async (req: any, res) => {
 })
 
 // Get a single plateau by id
+app.get('/plateaus/:id', async (req: any, res, next) => {
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  if (token) return next()
+  const result = await getPublicPlateauPayloadByToken(req.params.id)
+  if (result.status !== 200) return res.status(result.status).json(result.body)
+  return res.json(result.body.plateau)
+})
+
 app.get('/plateaus/:id', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {
@@ -1312,6 +1529,13 @@ app.get('/plateaus/:id', authMiddleware, async (req: any, res) => {
 })
 
 // Aggregated view for a match day (plateau)
+app.get('/plateaus/:id/summary', async (req: any, res, next) => {
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  if (token) return next()
+  const result = await getPublicPlateauPayloadByToken(req.params.id)
+  return res.status(result.status).json(result.body)
+})
+
 app.get('/plateaus/:id/summary', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {

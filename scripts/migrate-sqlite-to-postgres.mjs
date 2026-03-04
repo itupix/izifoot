@@ -10,6 +10,7 @@ const TABLE_ORDER = [
   'User',
   'Planning',
   'ShareToken',
+  'PlateauShareToken',
   'Player',
   'Training',
   'Plateau',

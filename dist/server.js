@@ -17,6 +17,7 @@ const nanoid_1 = require("nanoid");
 const qrcode_1 = __importDefault(require("qrcode"));
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const date_fns_1 = require("date-fns");
+const crypto_1 = require("crypto");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -527,6 +528,66 @@ function safeParseJSON(s) {
     catch {
         return null;
     }
+}
+function normalizePublicTeamLabel(raw, fallback) {
+    const normalized = String(raw || '').trim().toUpperCase();
+    if (!normalized)
+        return fallback;
+    if (normalized === 'HOME')
+        return 'A';
+    if (normalized === 'AWAY')
+        return 'B';
+    return normalized;
+}
+function buildPublicPlateauRotation(matches) {
+    if (!matches.length)
+        return null;
+    const slots = matches.map((match, index) => {
+        const orderedTeams = match.teams.slice().sort((a, b) => a.side.localeCompare(b.side));
+        const teamA = normalizePublicTeamLabel(orderedTeams[0]?.side, 'A');
+        const teamB = (match.opponentName && match.opponentName.trim().length > 0)
+            ? match.opponentName.trim()
+            : normalizePublicTeamLabel(orderedTeams[1]?.side, 'B');
+        return {
+            time: match.createdAt.toISOString(),
+            games: [{ pitch: `Terrain ${index + 1}`, A: teamA, B: teamB }]
+        };
+    });
+    const updatedAt = matches.reduce((latest, current) => current.updatedAt > latest ? current.updatedAt : latest, matches[0].updatedAt);
+    return { updatedAt: updatedAt.toISOString(), slots };
+}
+async function getPublicPlateauPayloadByToken(token) {
+    const share = await prisma.plateauShareToken.findFirst({
+        where: {
+            OR: [
+                { token },
+                { id: token }, // compat if frontend accidentally stores share row id instead of token
+            ]
+        },
+        include: { plateau: true }
+    });
+    if (!share)
+        return { status: 404, body: { error: 'Invalid link' } };
+    if (share.expiresAt && share.expiresAt < new Date())
+        return { status: 410, body: { error: 'Link expired' } };
+    const matches = await prisma.match.findMany({
+        where: { plateauId: share.plateauId },
+        select: {
+            createdAt: true,
+            updatedAt: true,
+            opponentName: true,
+            teams: { select: { side: true } }
+        },
+        orderBy: { createdAt: 'asc' }
+    });
+    const rotation = buildPublicPlateauRotation(matches);
+    return {
+        status: 200,
+        body: {
+            plateau: { id: share.plateau.id, date: share.plateau.date, lieu: share.plateau.lieu },
+            rotation
+        }
+    };
 }
 app.post('/auth/register', async (req, res) => {
     const schema = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string().min(6) });
@@ -1237,6 +1298,38 @@ app.post('/plateaus', authMiddleware, async (req, res) => {
     const pl = await plateauCreateForUser(prisma, req.userId, { date, lieu: parsed.data.lieu });
     res.json(pl);
 });
+app.post('/plateaus/:id/share', authMiddleware, async (req, res) => {
+    const schema = zod_1.z.object({ expiresInDays: zod_1.z.number().int().min(1).max(365).optional() });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const plateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } });
+    if (!plateau)
+        return res.status(404).json({ error: 'Plateau not found' });
+    await prisma.plateauShareToken.deleteMany({ where: { plateauId: plateau.id } });
+    const token = (0, crypto_1.randomUUID)();
+    const expiresAt = parsed.data.expiresInDays ? (0, date_fns_1.addDays)(new Date(), parsed.data.expiresInDays) : null;
+    await prisma.plateauShareToken.create({
+        data: {
+            plateauId: plateau.id,
+            token,
+            expiresAt: expiresAt ?? undefined
+        }
+    });
+    const url = `${APP_BASE_URL.replace(/\/+$/, '')}/plateau/public/${token}`;
+    res.json({ token, url, expiresAt });
+});
+app.delete('/plateaus/:id/share', authMiddleware, async (req, res) => {
+    const plateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } });
+    if (!plateau)
+        return res.status(404).json({ error: 'Plateau not found' });
+    await prisma.plateauShareToken.deleteMany({ where: { plateauId: plateau.id } });
+    res.json({ ok: true });
+});
+app.get('/public/plateaus/:token', async (req, res) => {
+    const result = await getPublicPlateauPayloadByToken(req.params.token);
+    return res.status(result.status).json(result.body);
+});
 app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
@@ -1269,6 +1362,15 @@ app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
     }
 });
 // Get a single plateau by id
+app.get('/plateaus/:id', async (req, res, next) => {
+    const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+    if (token)
+        return next();
+    const result = await getPublicPlateauPayloadByToken(req.params.id);
+    if (result.status !== 200)
+        return res.status(result.status).json(result.body);
+    return res.json(result.body.plateau);
+});
 app.get('/plateaus/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
@@ -1283,6 +1385,13 @@ app.get('/plateaus/:id', authMiddleware, async (req, res) => {
     }
 });
 // Aggregated view for a match day (plateau)
+app.get('/plateaus/:id/summary', async (req, res, next) => {
+    const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+    if (token)
+        return next();
+    const result = await getPublicPlateauPayloadByToken(req.params.id);
+    return res.status(result.status).json(result.body);
+});
 app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
