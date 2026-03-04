@@ -213,6 +213,27 @@ async function attendanceDeleteManyForUser(db: any, userId: string, where: any =
   return db.attendance.deleteMany({ where: { ...where, userId } })
 }
 
+function attendanceStoredSessionType(sessionType: string, present: boolean) {
+  return present ? sessionType : `${sessionType}_ABSENT`
+}
+
+function attendanceSessionTypeVariants(sessionType: string) {
+  return [sessionType, `${sessionType}_ABSENT`]
+}
+
+function normalizeAttendanceRow(row: any) {
+  if (row.session_type === 'TRAINING_ABSENT') {
+    return { ...row, session_type: 'TRAINING', present: false }
+  }
+  if (row.session_type === 'PLATEAU_ABSENT') {
+    return { ...row, session_type: 'PLATEAU', present: false }
+  }
+  if (row.session_type === 'TRAINING' || row.session_type === 'PLATEAU') {
+    return { ...row, present: true }
+  }
+  return row
+}
+
 async function attendanceUpsertMarkerForUser(db: any, userId: string, params: { session_type: string, session_id: string, playerId: string }) {
   const { session_type, session_id, playerId } = params
   return db.attendance.upsert({
@@ -224,18 +245,25 @@ async function attendanceUpsertMarkerForUser(db: any, userId: string, params: { 
 
 async function attendanceSetPresenceForUser(db: any, userId: string, params: { session_type: string, session_id: string, playerId: string, present: boolean }) {
   const { session_type, session_id, playerId, present } = params
+  const storedSessionType = attendanceStoredSessionType(session_type, present)
+  await attendanceDeleteManyForUser(db, userId, {
+    session_type: { in: attendanceSessionTypeVariants(session_type) } as any,
+    session_id,
+    playerId,
+  })
   return db.attendance.upsert({
-    where: { userId_session_type_session_id_playerId: { userId, session_type, session_id, playerId } },
-    create: { userId, session_type, session_id, playerId, present } as any,
-    update: { present } as any,
+    where: { userId_session_type_session_id_playerId: { userId, session_type: storedSessionType, session_id, playerId } },
+    create: { userId, session_type: storedSessionType, session_id, playerId },
+    update: {},
   })
 }
 
 async function attendanceSetPlateauRsvpForUser(db: any, userId: string, plateauId: string, playerId: string, present: boolean) {
-  return db.attendance.upsert({
-    where: { userId_session_type_session_id_playerId: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId } },
-    create: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId, present } as any,
-    update: { present } as any,
+  return attendanceSetPresenceForUser(db, userId, {
+    session_type: 'PLATEAU',
+    session_id: plateauId,
+    playerId,
+    present,
   })
 }
 
@@ -1440,10 +1468,11 @@ app.get('/attendance', authMiddleware, async (req: any, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { session_type, session_id } = parsed.data
   const where: any = {}
-  if (session_type) where.session_type = session_type
+  if (session_type) where.session_type = { in: attendanceSessionTypeVariants(session_type) } as any
+  else where.session_type = { in: ['TRAINING', 'TRAINING_ABSENT', 'PLATEAU', 'PLATEAU_ABSENT'] } as any
   if (session_id) where.session_id = session_id
   const rows = await attendanceFindManyForUser(prisma, req.userId, { where })
-  res.json(rows)
+  res.json(rows.map(normalizeAttendanceRow))
 })
 app.post('/attendance', authMiddleware, async (req: any, res) => {
   const schema = z.object({

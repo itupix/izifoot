@@ -204,6 +204,24 @@ async function attendanceFindFirstForUser(db, userId, args = {}) {
 async function attendanceDeleteManyForUser(db, userId, where = {}) {
     return db.attendance.deleteMany({ where: { ...where, userId } });
 }
+function attendanceStoredSessionType(sessionType, present) {
+    return present ? sessionType : `${sessionType}_ABSENT`;
+}
+function attendanceSessionTypeVariants(sessionType) {
+    return [sessionType, `${sessionType}_ABSENT`];
+}
+function normalizeAttendanceRow(row) {
+    if (row.session_type === 'TRAINING_ABSENT') {
+        return { ...row, session_type: 'TRAINING', present: false };
+    }
+    if (row.session_type === 'PLATEAU_ABSENT') {
+        return { ...row, session_type: 'PLATEAU', present: false };
+    }
+    if (row.session_type === 'TRAINING' || row.session_type === 'PLATEAU') {
+        return { ...row, present: true };
+    }
+    return row;
+}
 async function attendanceUpsertMarkerForUser(db, userId, params) {
     const { session_type, session_id, playerId } = params;
     return db.attendance.upsert({
@@ -214,17 +232,24 @@ async function attendanceUpsertMarkerForUser(db, userId, params) {
 }
 async function attendanceSetPresenceForUser(db, userId, params) {
     const { session_type, session_id, playerId, present } = params;
+    const storedSessionType = attendanceStoredSessionType(session_type, present);
+    await attendanceDeleteManyForUser(db, userId, {
+        session_type: { in: attendanceSessionTypeVariants(session_type) },
+        session_id,
+        playerId,
+    });
     return db.attendance.upsert({
-        where: { userId_session_type_session_id_playerId: { userId, session_type, session_id, playerId } },
-        create: { userId, session_type, session_id, playerId, present },
-        update: { present },
+        where: { userId_session_type_session_id_playerId: { userId, session_type: storedSessionType, session_id, playerId } },
+        create: { userId, session_type: storedSessionType, session_id, playerId },
+        update: {},
     });
 }
 async function attendanceSetPlateauRsvpForUser(db, userId, plateauId, playerId, present) {
-    return db.attendance.upsert({
-        where: { userId_session_type_session_id_playerId: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId } },
-        create: { userId, session_type: 'PLATEAU', session_id: plateauId, playerId, present },
-        update: { present },
+    return attendanceSetPresenceForUser(db, userId, {
+        session_type: 'PLATEAU',
+        session_id: plateauId,
+        playerId,
+        present,
     });
 }
 async function playerFindManyForUser(db, userId, args = {}) {
@@ -1431,11 +1456,13 @@ app.get('/attendance', authMiddleware, async (req, res) => {
     const { session_type, session_id } = parsed.data;
     const where = {};
     if (session_type)
-        where.session_type = session_type;
+        where.session_type = { in: attendanceSessionTypeVariants(session_type) };
+    else
+        where.session_type = { in: ['TRAINING', 'TRAINING_ABSENT', 'PLATEAU', 'PLATEAU_ABSENT'] };
     if (session_id)
         where.session_id = session_id;
     const rows = await attendanceFindManyForUser(prisma, req.userId, { where });
-    res.json(rows);
+    res.json(rows.map(normalizeAttendanceRow));
 });
 app.post('/attendance', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
