@@ -266,10 +266,24 @@ function pathStartsWith(pathname: string, prefix: string) {
   return pathname === prefix || pathname.startsWith(`${prefix}/`)
 }
 
+function getActiveTeamIdForAuth(auth: any): string | null {
+  if (!auth) return null
+  if (auth.role === 'COACH') {
+    const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : []
+    if (auth.teamId && managedIds.includes(auth.teamId)) return auth.teamId
+    if (managedIds.length === 1) return managedIds[0]
+    return null
+  }
+  if (auth.role === 'DIRECTION') return auth.teamId || null
+  return auth.teamId || null
+}
+
 function getReadableTeamIds(auth: any): string[] {
   if (!auth) return []
-  if (auth.role === 'DIRECTION') return []
-  if (auth.role === 'COACH') return Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : []
+  if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
+    const activeTeamId = getActiveTeamIdForAuth(auth)
+    return activeTeamId ? [activeTeamId] : []
+  }
   if (auth.role === 'PARENT') {
     const linkedTeamId = auth.parentLinkedPlayer?.teamId || auth.teamId
     return linkedTeamId ? [linkedTeamId] : []
@@ -281,18 +295,6 @@ function applyScopeWhere(auth: any, where: any = {}, opts: { includeLegacyOwner?
   const scopedWhere: any = { ...(where || {}) }
   if (auth?.clubId) scopedWhere.clubId = auth.clubId
   const teamIds = getReadableTeamIds(auth)
-
-  if (auth?.role === 'DIRECTION') {
-    if (opts.includeLegacyOwner) {
-      return {
-        OR: [
-          scopedWhere,
-          { ...(where || {}), userId: auth.id }
-        ]
-      }
-    }
-    return scopedWhere
-  }
 
   if (teamIds.length === 1) {
     scopedWhere.teamId = teamIds[0]
@@ -311,50 +313,34 @@ function applyScopeWhere(auth: any, where: any = {}, opts: { includeLegacyOwner?
   }
 }
 
-async function resolveTeamForWrite(auth: any, requestedTeamId?: string | null) {
+async function resolveTeamForWrite(auth: any) {
   if (!auth?.clubId) {
     const err: any = new Error('No club attached to account')
     err.code = 'NO_CLUB'
     throw err
   }
 
-  if (auth.role === 'DIRECTION') {
-    if (!requestedTeamId) {
-      const err: any = new Error('teamId is required')
+  if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
+    const activeTeamId = getActiveTeamIdForAuth(auth)
+    if (!activeTeamId) {
+      const err: any = new Error('Active team selection is required')
       err.code = 'TEAM_REQUIRED'
       throw err
     }
+    if (auth.role === 'COACH') {
+      const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : []
+      if (!managedIds.includes(activeTeamId)) {
+        const err: any = new Error('Coach cannot write outside managed teams')
+        err.code = 'TEAM_FORBIDDEN'
+        throw err
+      }
+    }
     const team = await prisma.team.findFirst({
-      where: { id: requestedTeamId, clubId: auth.clubId },
+      where: { id: activeTeamId, clubId: auth.clubId },
       select: { id: true, clubId: true }
     })
     if (!team) {
-      const err: any = new Error('Team not found in club')
-      err.code = 'TEAM_FORBIDDEN'
-      throw err
-    }
-    return team
-  }
-
-  if (auth.role === 'COACH') {
-    const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : []
-    const finalTeamId = requestedTeamId || (managedIds.length === 1 ? managedIds[0] : null)
-    if (!finalTeamId) {
-      const err: any = new Error('teamId is required for this coach account')
-      err.code = 'TEAM_REQUIRED'
-      throw err
-    }
-    if (!managedIds.includes(finalTeamId)) {
-      const err: any = new Error('Coach cannot write outside managed teams')
-      err.code = 'TEAM_FORBIDDEN'
-      throw err
-    }
-    const team = await prisma.team.findFirst({
-      where: { id: finalTeamId, clubId: auth.clubId },
-      select: { id: true, clubId: true }
-    })
-    if (!team) {
-      const err: any = new Error('Team not found in club')
+      const err: any = new Error('Selected team not found in club')
       err.code = 'TEAM_FORBIDDEN'
       throw err
     }
@@ -374,7 +360,7 @@ function normalizeScopeInput(scopeOrUserId: any) {
 
 function scopedWhereOrLegacy(scopeOrUserId: any, where: any = {}) {
   if (typeof scopeOrUserId === 'string') return { ...(where || {}), userId: scopeOrUserId }
-  return applyScopeWhere(normalizeScopeInput(scopeOrUserId), where, { includeLegacyOwner: true })
+  return applyScopeWhere(normalizeScopeInput(scopeOrUserId), where)
 }
 
 async function playerCreateForUser(db: any, scopeOrUserId: any, data: any) {
@@ -1134,6 +1120,48 @@ app.get('/me', async (req: any, res, next) => {
   })
 })
 
+app.put('/me/team', authMiddleware, async (req: any, res) => {
+  if (!req.auth?.clubId) return res.status(400).json({ error: 'No club attached to account' })
+  if (req.auth?.role !== 'DIRECTION' && req.auth?.role !== 'COACH') {
+    return res.status(403).json({ error: 'Only direction and coach accounts can change active team' })
+  }
+
+  const schema = z.object({ teamId: z.string().min(1) })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const requestedTeamId = parsed.data.teamId
+  if (req.auth.role === 'COACH') {
+    const managedIds = Array.isArray(req.auth.managedTeamIds) ? req.auth.managedTeamIds : []
+    if (!managedIds.includes(requestedTeamId)) {
+      return res.status(403).json({ error: 'Coach cannot select an unmanaged team' })
+    }
+  }
+
+  const team = await prisma.team.findFirst({
+    where: {
+      id: requestedTeamId,
+      clubId: req.auth.clubId
+    },
+    select: { id: true }
+  })
+  if (!team) return res.status(404).json({ error: 'Team not found in club' })
+
+  const updated = await prisma.user.update({
+    where: { id: req.auth.id },
+    data: { teamId: team.id },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      clubId: true,
+      teamId: true,
+      managedTeamIds: true
+    }
+  })
+  res.json(updated)
+})
+
 app.get('/clubs/me', authMiddleware, async (req: any, res) => {
   if (!req.auth?.clubId) return res.status(404).json({ error: 'Club not found' })
   const club = await prisma.club.findUnique({
@@ -1426,6 +1454,9 @@ app.use(async (req: any, res: any, next: any) => {
     if (isReadOnlyRole(auth)) {
       return res.status(403).json({ error: 'Read-only account: write access is not allowed' })
     }
+    if ((auth.role === 'DIRECTION' || auth.role === 'COACH') && !getActiveTeamIdForAuth(auth)) {
+      return res.status(400).json({ error: 'Select an active team before making changes' })
+    }
   } catch {
     return res.status(401).json({ error: 'Invalid token' })
   }
@@ -1639,14 +1670,13 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
     duration: z.coerce.number().int().min(1).max(180),
     players: z.string().min(1).max(50),
     description: z.string().min(1).max(2000),
-    tags: z.array(z.string().min(1).max(32)).max(20).optional(),
-    teamId: z.string().optional()
+    tags: z.array(z.string().min(1).max(32)).max(20).optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
   try {
-    team = await resolveTeamForWrite(req.auth, parsed.data.teamId)
+    team = await resolveTeamForWrite(req.auth)
   } catch (e: any) {
     return res.status(400).json({ error: e.message })
   }
@@ -1692,7 +1722,6 @@ app.get('/players', authMiddleware, async (req: any, res) => {
 app.post('/players', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
   const schema = z.object({
-    teamId: z.string().optional(),
     name: z.string().min(1),
     primary_position: z.string().min(1),
     secondary_position: z.string().optional(),
@@ -1703,7 +1732,7 @@ app.post('/players', authMiddleware, async (req: any, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
   try {
-    team = await resolveTeamForWrite(req.auth, parsed.data.teamId)
+    team = await resolveTeamForWrite(req.auth)
   } catch (e: any) {
     return res.status(400).json({ error: e.message })
   }
@@ -2011,12 +2040,12 @@ app.get('/trainings/:id', authMiddleware, async (req: any, res) => {
 
 app.post('/trainings', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const schema = z.object({ date: z.string().or(z.date()), teamId: z.string().optional() })
+  const schema = z.object({ date: z.string().or(z.date()) })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
   try {
-    team = await resolveTeamForWrite(req.auth, parsed.data.teamId)
+    team = await resolveTeamForWrite(req.auth)
   } catch (e: any) {
     return res.status(400).json({ error: e.message })
   }
@@ -2091,12 +2120,12 @@ app.get('/plateaus', async (req: any, res, next) => {
 
 app.post('/plateaus', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const schema = z.object({ date: z.string().or(z.date()), lieu: z.string().min(1), teamId: z.string().optional() })
+  const schema = z.object({ date: z.string().or(z.date()), lieu: z.string().min(1) })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
   try {
-    team = await resolveTeamForWrite(req.auth, parsed.data.teamId)
+    team = await resolveTeamForWrite(req.auth)
   } catch (e: any) {
     return res.status(400).json({ error: e.message })
   }
@@ -2418,7 +2447,6 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     type: z.enum(['ENTRAINEMENT', 'PLATEAU']),
     plateauId: z.string().optional(),
-    teamId: z.string().optional(),
     sides: z.object({
       home: z.object({
         starters: z.array(z.string()).default([]),
@@ -2435,7 +2463,7 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const { type, plateauId, sides, score, buteurs, opponentName, teamId: requestedTeamId } = parsed.data
+  const { type, plateauId, sides, score, buteurs, opponentName } = parsed.data
 
   let team: any = null
   if (plateauId) {
@@ -2444,7 +2472,7 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
     team = { id: ownedPlateau.teamId, clubId: ownedPlateau.clubId }
   } else {
     try {
-      team = await resolveTeamForWrite(req.auth, requestedTeamId)
+      team = await resolveTeamForWrite(req.auth)
     } catch (e: any) {
       return res.status(400).json({ error: e.message })
     }
@@ -2594,14 +2622,13 @@ app.post('/schedule/commit', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
   const schema = z.object({
     plateauId: z.string().optional(),
-    teamId: z.string().optional(),
     teams: z.array(z.array(z.string().min(1))).min(2),
     schedule: z.object({ matches: z.array(z.object({ home: z.number().int().min(0), away: z.number().int().min(0) })) }),
     defaults: z.object({ startersPerTeam: z.number().int().min(1).max(11).default(5) }).optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const { plateauId, teamId: requestedTeamId, teams, schedule, defaults } = parsed.data
+  const { plateauId, teams, schedule, defaults } = parsed.data
   const startersPerTeam = defaults?.startersPerTeam ?? 5
   let targetTeam: any = null
   if (plateauId) {
@@ -2610,7 +2637,7 @@ app.post('/schedule/commit', authMiddleware, async (req: any, res) => {
     targetTeam = { id: ownedPlateau.teamId, clubId: ownedPlateau.clubId }
   } else {
     try {
-      targetTeam = await resolveTeamForWrite(req.auth, requestedTeamId)
+      targetTeam = await resolveTeamForWrite(req.auth)
     } catch (e: any) {
       return res.status(400).json({ error: e.message })
     }

@@ -255,13 +255,28 @@ function isWriteMethod(method) {
 function pathStartsWith(pathname, prefix) {
     return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
+function getActiveTeamIdForAuth(auth) {
+    if (!auth)
+        return null;
+    if (auth.role === 'COACH') {
+        const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : [];
+        if (auth.teamId && managedIds.includes(auth.teamId))
+            return auth.teamId;
+        if (managedIds.length === 1)
+            return managedIds[0];
+        return null;
+    }
+    if (auth.role === 'DIRECTION')
+        return auth.teamId || null;
+    return auth.teamId || null;
+}
 function getReadableTeamIds(auth) {
     if (!auth)
         return [];
-    if (auth.role === 'DIRECTION')
-        return [];
-    if (auth.role === 'COACH')
-        return Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : [];
+    if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
+        const activeTeamId = getActiveTeamIdForAuth(auth);
+        return activeTeamId ? [activeTeamId] : [];
+    }
     if (auth.role === 'PARENT') {
         const linkedTeamId = auth.parentLinkedPlayer?.teamId || auth.teamId;
         return linkedTeamId ? [linkedTeamId] : [];
@@ -273,17 +288,6 @@ function applyScopeWhere(auth, where = {}, opts = {}) {
     if (auth?.clubId)
         scopedWhere.clubId = auth.clubId;
     const teamIds = getReadableTeamIds(auth);
-    if (auth?.role === 'DIRECTION') {
-        if (opts.includeLegacyOwner) {
-            return {
-                OR: [
-                    scopedWhere,
-                    { ...(where || {}), userId: auth.id }
-                ]
-            };
-        }
-        return scopedWhere;
-    }
     if (teamIds.length === 1) {
         scopedWhere.teamId = teamIds[0];
     }
@@ -302,48 +306,33 @@ function applyScopeWhere(auth, where = {}, opts = {}) {
         ]
     };
 }
-async function resolveTeamForWrite(auth, requestedTeamId) {
+async function resolveTeamForWrite(auth) {
     if (!auth?.clubId) {
         const err = new Error('No club attached to account');
         err.code = 'NO_CLUB';
         throw err;
     }
-    if (auth.role === 'DIRECTION') {
-        if (!requestedTeamId) {
-            const err = new Error('teamId is required');
+    if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
+        const activeTeamId = getActiveTeamIdForAuth(auth);
+        if (!activeTeamId) {
+            const err = new Error('Active team selection is required');
             err.code = 'TEAM_REQUIRED';
             throw err;
         }
+        if (auth.role === 'COACH') {
+            const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : [];
+            if (!managedIds.includes(activeTeamId)) {
+                const err = new Error('Coach cannot write outside managed teams');
+                err.code = 'TEAM_FORBIDDEN';
+                throw err;
+            }
+        }
         const team = await prisma.team.findFirst({
-            where: { id: requestedTeamId, clubId: auth.clubId },
+            where: { id: activeTeamId, clubId: auth.clubId },
             select: { id: true, clubId: true }
         });
         if (!team) {
-            const err = new Error('Team not found in club');
-            err.code = 'TEAM_FORBIDDEN';
-            throw err;
-        }
-        return team;
-    }
-    if (auth.role === 'COACH') {
-        const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : [];
-        const finalTeamId = requestedTeamId || (managedIds.length === 1 ? managedIds[0] : null);
-        if (!finalTeamId) {
-            const err = new Error('teamId is required for this coach account');
-            err.code = 'TEAM_REQUIRED';
-            throw err;
-        }
-        if (!managedIds.includes(finalTeamId)) {
-            const err = new Error('Coach cannot write outside managed teams');
-            err.code = 'TEAM_FORBIDDEN';
-            throw err;
-        }
-        const team = await prisma.team.findFirst({
-            where: { id: finalTeamId, clubId: auth.clubId },
-            select: { id: true, clubId: true }
-        });
-        if (!team) {
-            const err = new Error('Team not found in club');
+            const err = new Error('Selected team not found in club');
             err.code = 'TEAM_FORBIDDEN';
             throw err;
         }
@@ -363,7 +352,7 @@ function normalizeScopeInput(scopeOrUserId) {
 function scopedWhereOrLegacy(scopeOrUserId, where = {}) {
     if (typeof scopeOrUserId === 'string')
         return { ...(where || {}), userId: scopeOrUserId };
-    return applyScopeWhere(normalizeScopeInput(scopeOrUserId), where, { includeLegacyOwner: true });
+    return applyScopeWhere(normalizeScopeInput(scopeOrUserId), where);
 }
 async function playerCreateForUser(db, scopeOrUserId, data) {
     const auth = normalizeScopeInput(scopeOrUserId);
@@ -1080,6 +1069,46 @@ app.get('/me', async (req, res, next) => {
         managedTeamIds: user.managedTeamIds
     });
 });
+app.put('/me/team', authMiddleware, async (req, res) => {
+    if (!req.auth?.clubId)
+        return res.status(400).json({ error: 'No club attached to account' });
+    if (req.auth?.role !== 'DIRECTION' && req.auth?.role !== 'COACH') {
+        return res.status(403).json({ error: 'Only direction and coach accounts can change active team' });
+    }
+    const schema = zod_1.z.object({ teamId: zod_1.z.string().min(1) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const requestedTeamId = parsed.data.teamId;
+    if (req.auth.role === 'COACH') {
+        const managedIds = Array.isArray(req.auth.managedTeamIds) ? req.auth.managedTeamIds : [];
+        if (!managedIds.includes(requestedTeamId)) {
+            return res.status(403).json({ error: 'Coach cannot select an unmanaged team' });
+        }
+    }
+    const team = await prisma.team.findFirst({
+        where: {
+            id: requestedTeamId,
+            clubId: req.auth.clubId
+        },
+        select: { id: true }
+    });
+    if (!team)
+        return res.status(404).json({ error: 'Team not found in club' });
+    const updated = await prisma.user.update({
+        where: { id: req.auth.id },
+        data: { teamId: team.id },
+        select: {
+            id: true,
+            email: true,
+            role: true,
+            clubId: true,
+            teamId: true,
+            managedTeamIds: true
+        }
+    });
+    res.json(updated);
+});
 app.get('/clubs/me', authMiddleware, async (req, res) => {
     if (!req.auth?.clubId)
         return res.status(404).json({ error: 'Club not found' });
@@ -1372,6 +1401,9 @@ app.use(async (req, res, next) => {
         if (isReadOnlyRole(auth)) {
             return res.status(403).json({ error: 'Read-only account: write access is not allowed' });
         }
+        if ((auth.role === 'DIRECTION' || auth.role === 'COACH') && !getActiveTeamIdForAuth(auth)) {
+            return res.status(400).json({ error: 'Select an active team before making changes' });
+        }
     }
     catch {
         return res.status(401).json({ error: 'Invalid token' });
@@ -1582,15 +1614,14 @@ app.post('/drills', authMiddleware, async (req, res) => {
         duration: zod_1.z.coerce.number().int().min(1).max(180),
         players: zod_1.z.string().min(1).max(50),
         description: zod_1.z.string().min(1).max(2000),
-        tags: zod_1.z.array(zod_1.z.string().min(1).max(32)).max(20).optional(),
-        teamId: zod_1.z.string().optional()
+        tags: zod_1.z.array(zod_1.z.string().min(1).max(32)).max(20).optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     let team;
     try {
-        team = await resolveTeamForWrite(req.auth, parsed.data.teamId);
+        team = await resolveTeamForWrite(req.auth);
     }
     catch (e) {
         return res.status(400).json({ error: e.message });
@@ -1636,7 +1667,6 @@ app.post('/players', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
     const schema = zod_1.z.object({
-        teamId: zod_1.z.string().optional(),
         name: zod_1.z.string().min(1),
         primary_position: zod_1.z.string().min(1),
         secondary_position: zod_1.z.string().optional(),
@@ -1648,7 +1678,7 @@ app.post('/players', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: parsed.error.flatten() });
     let team;
     try {
-        team = await resolveTeamForWrite(req.auth, parsed.data.teamId);
+        team = await resolveTeamForWrite(req.auth);
     }
     catch (e) {
         return res.status(400).json({ error: e.message });
@@ -1974,13 +2004,13 @@ app.get('/trainings/:id', authMiddleware, async (req, res) => {
 app.post('/trainings', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
-    const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()), teamId: zod_1.z.string().optional() });
+    const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     let team;
     try {
-        team = await resolveTeamForWrite(req.auth, parsed.data.teamId);
+        team = await resolveTeamForWrite(req.auth);
     }
     catch (e) {
         return res.status(400).json({ error: e.message });
@@ -2058,13 +2088,13 @@ app.get('/plateaus', async (req, res, next) => {
 app.post('/plateaus', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
-    const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()), lieu: zod_1.z.string().min(1), teamId: zod_1.z.string().optional() });
+    const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()), lieu: zod_1.z.string().min(1) });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     let team;
     try {
-        team = await resolveTeamForWrite(req.auth, parsed.data.teamId);
+        team = await resolveTeamForWrite(req.auth);
     }
     catch (e) {
         return res.status(400).json({ error: e.message });
@@ -2402,7 +2432,6 @@ app.post('/matches', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']),
         plateauId: zod_1.z.string().optional(),
-        teamId: zod_1.z.string().optional(),
         sides: zod_1.z.object({
             home: zod_1.z.object({
                 starters: zod_1.z.array(zod_1.z.string()).default([]),
@@ -2420,7 +2449,7 @@ app.post('/matches', authMiddleware, async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const { type, plateauId, sides, score, buteurs, opponentName, teamId: requestedTeamId } = parsed.data;
+    const { type, plateauId, sides, score, buteurs, opponentName } = parsed.data;
     let team = null;
     if (plateauId) {
         const ownedPlateau = await plateauFindFirstForUser(prisma, req.auth, { where: { id: plateauId } });
@@ -2430,7 +2459,7 @@ app.post('/matches', authMiddleware, async (req, res) => {
     }
     else {
         try {
-            team = await resolveTeamForWrite(req.auth, requestedTeamId);
+            team = await resolveTeamForWrite(req.auth);
         }
         catch (e) {
             return res.status(400).json({ error: e.message });
@@ -2572,7 +2601,6 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
         return;
     const schema = zod_1.z.object({
         plateauId: zod_1.z.string().optional(),
-        teamId: zod_1.z.string().optional(),
         teams: zod_1.z.array(zod_1.z.array(zod_1.z.string().min(1))).min(2),
         schedule: zod_1.z.object({ matches: zod_1.z.array(zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) })) }),
         defaults: zod_1.z.object({ startersPerTeam: zod_1.z.number().int().min(1).max(11).default(5) }).optional()
@@ -2580,7 +2608,7 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const { plateauId, teamId: requestedTeamId, teams, schedule, defaults } = parsed.data;
+    const { plateauId, teams, schedule, defaults } = parsed.data;
     const startersPerTeam = defaults?.startersPerTeam ?? 5;
     let targetTeam = null;
     if (plateauId) {
@@ -2591,7 +2619,7 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
     }
     else {
         try {
-            targetTeam = await resolveTeamForWrite(req.auth, requestedTeamId);
+            targetTeam = await resolveTeamForWrite(req.auth);
         }
         catch (e) {
             return res.status(400).json({ error: e.message });
