@@ -85,6 +85,8 @@ model Player {
   id                 String            @id @default(cuid())
   userId             String?
   user               User?             @relation(fields: [userId], references: [id])
+  clubId             String?
+  teamId             String?
   name               String
   primary_position   String
   secondary_position String?
@@ -103,6 +105,8 @@ model Training {
   id            String          @id @default(cuid())
   userId        String?
   user          User?           @relation(fields: [userId], references: [id])
+  clubId        String?
+  teamId        String?
   date          DateTime
   status        String          @default("PLANNED") // <= DOIT être là
   attendance    Attendance[]
@@ -115,6 +119,8 @@ model Plateau {
   id         String       @id @default(cuid())
   userId     String?
   user       User?        @relation(fields: [userId], references: [id])
+  clubId     String?
+  teamId     String?
   date       DateTime
   lieu       String
   matches    Match[]
@@ -137,6 +143,8 @@ model Attendance {
   id           String    @id @default(cuid())
   userId       String?
   user         User?     @relation(fields: [userId], references: [id])
+  clubId       String?
+  teamId       String?
   session_type String
   session_id   String
   player       Player    @relation(fields: [playerId], references: [id])
@@ -153,6 +161,8 @@ model Match {
   id           String      @id @default(cuid())
   userId       String?
   user         User?       @relation(fields: [userId], references: [id])
+  clubId       String?
+  teamId       String?
   type         String
   plateau      Plateau?    @relation(fields: [plateauId], references: [id])
   plateauId    String?
@@ -198,6 +208,8 @@ model TrainingDrill {
   id         String   @id @default(cuid())
   userId     String?
   user       User?    @relation(fields: [userId], references: [id])
+  clubId     String?
+  teamId     String?
   training   Training @relation(fields: [trainingId], references: [id])
   trainingId String
   drillId    String // id d'un drill du catalogue (seed ou personnalisé)
@@ -213,6 +225,8 @@ model Drill {
   id          String   @id
   userId      String?
   user        User?    @relation(fields: [userId], references: [id])
+  clubId      String?
+  teamId      String?
   title       String
   category    String
   duration    Int
@@ -229,6 +243,8 @@ model Diagram {
   id              String   @id @default(cuid())
   userId          String?
   user            User?    @relation(fields: [userId], references: [id])
+  clubId          String?
+  teamId          String?
   title           String
   data            String // JSON string décrivant le dessin
   drillId         String? // id d'un drill du catalogue
