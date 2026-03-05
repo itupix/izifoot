@@ -1011,6 +1011,23 @@ app.get('/clubs/me', authMiddleware, async (req, res) => {
         return res.status(404).json({ error: 'Club not found' });
     res.json(club);
 });
+app.put('/clubs/me', authMiddleware, async (req, res) => {
+    if (!ensureDirection(req, res))
+        return;
+    if (!req.auth?.clubId)
+        return res.status(404).json({ error: 'Club not found' });
+    const schema = zod_1.z.object({
+        name: zod_1.z.string().min(2).max(120)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const updated = await prisma.club.update({
+        where: { id: req.auth.clubId },
+        data: { name: parsed.data.name.trim() }
+    });
+    res.json(updated);
+});
 app.get('/teams', authMiddleware, async (req, res) => {
     if (!req.auth?.clubId)
         return res.json([]);

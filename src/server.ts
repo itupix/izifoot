@@ -1061,6 +1061,23 @@ app.get('/clubs/me', authMiddleware, async (req: any, res) => {
   res.json(club)
 })
 
+app.put('/clubs/me', authMiddleware, async (req: any, res) => {
+  if (!ensureDirection(req, res)) return
+  if (!req.auth?.clubId) return res.status(404).json({ error: 'Club not found' })
+
+  const schema = z.object({
+    name: z.string().min(2).max(120)
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const updated = await prisma.club.update({
+    where: { id: req.auth.clubId },
+    data: { name: parsed.data.name.trim() }
+  })
+  res.json(updated)
+})
+
 app.get('/teams', authMiddleware, async (req: any, res) => {
   if (!req.auth?.clubId) return res.json([])
   const teams = await prisma.team.findMany({
