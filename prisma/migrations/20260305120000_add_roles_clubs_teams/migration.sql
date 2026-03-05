@@ -1,0 +1,59 @@
+-- Multi-role accounts with club and teams
+
+DO $$ BEGIN
+  CREATE TYPE "UserRole" AS ENUM ('DIRECTION', 'COACH', 'PLAYER', 'PARENT');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+CREATE TABLE IF NOT EXISTS "Club" (
+  "id" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "Club_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE IF NOT EXISTS "Team" (
+  "id" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "clubId" TEXT NOT NULL,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "Team_pkey" PRIMARY KEY ("id")
+);
+
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "role" "UserRole" NOT NULL DEFAULT 'DIRECTION';
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "clubId" TEXT;
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "teamId" TEXT;
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "managedTeamIds" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "linkedPlayerUserId" TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS "Team_clubId_name_key" ON "Team"("clubId", "name");
+CREATE INDEX IF NOT EXISTS "User_clubId_idx" ON "User"("clubId");
+CREATE INDEX IF NOT EXISTS "User_teamId_idx" ON "User"("teamId");
+
+DO $$ BEGIN
+  ALTER TABLE "Team"
+    ADD CONSTRAINT "Team_clubId_fkey"
+    FOREIGN KEY ("clubId") REFERENCES "Club"("id")
+    ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE "User"
+    ADD CONSTRAINT "User_clubId_fkey"
+    FOREIGN KEY ("clubId") REFERENCES "Club"("id")
+    ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE "User"
+    ADD CONSTRAINT "User_teamId_fkey"
+    FOREIGN KEY ("teamId") REFERENCES "Team"("id")
+    ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;

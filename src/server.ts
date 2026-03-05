@@ -180,16 +180,90 @@ function signToken(userId: string) {
   return jwt.sign({ sub: userId }, JWT_SECRET, { expiresIn: '7d' })
 }
 
-function authMiddleware(req: any, res: any, next: any) {
+async function resolveUserAuthContext(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: {
+      team: true,
+      club: true,
+    }
+  })
+  if (!user) return null
+
+  let managedTeamIds: string[] = []
+  if (user.role === 'COACH') {
+    const candidateIds = Array.isArray((user as any).managedTeamIds) ? (user as any).managedTeamIds : []
+    if (candidateIds.length) {
+      const managedTeams = await prisma.team.findMany({
+        where: {
+          id: { in: candidateIds },
+          ...(user.clubId ? { clubId: user.clubId } : {}),
+        },
+        select: { id: true }
+      })
+      managedTeamIds = managedTeams.map((t) => t.id)
+    }
+  }
+
+  let parentLinkedPlayer: any = null
+  if (user.role === 'PARENT' && user.linkedPlayerUserId) {
+    parentLinkedPlayer = await prisma.user.findUnique({
+      where: { id: user.linkedPlayerUserId },
+      select: { id: true, role: true, teamId: true, clubId: true }
+    })
+  }
+
+  return {
+    id: user.id,
+    email: user.email,
+    role: user.role,
+    clubId: user.clubId,
+    teamId: user.teamId,
+    managedTeamIds,
+    linkedPlayerUserId: user.linkedPlayerUserId,
+    parentLinkedPlayer,
+  }
+}
+
+async function authMiddleware(req: any, res: any, next: any) {
   const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
   if (!token) return res.status(401).json({ error: 'Unauthorized' })
   try {
     const payload = jwt.verify(token, JWT_SECRET) as any
-    req.userId = payload.sub
+    const auth = await resolveUserAuthContext(payload.sub)
+    if (!auth) return res.status(401).json({ error: 'Unauthorized' })
+    req.userId = auth.id
+    req.auth = auth
     next()
   } catch (e) {
     return res.status(401).json({ error: 'Invalid token' })
   }
+}
+
+function ensureDirection(req: any, res: any): boolean {
+  if (req.auth?.role !== 'DIRECTION') {
+    res.status(403).json({ error: 'Only direction accounts can perform this action' })
+    return false
+  }
+  return true
+}
+
+function isReadOnlyRole(auth: any): boolean {
+  return auth?.role === 'PLAYER' || auth?.role === 'PARENT'
+}
+
+function ensureStaff(req: any, res: any): boolean {
+  if (req.auth?.role === 'DIRECTION' || req.auth?.role === 'COACH') return true
+  res.status(403).json({ error: 'Only direction and coach accounts can perform this action' })
+  return false
+}
+
+function isWriteMethod(method: string) {
+  return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE'
+}
+
+function pathStartsWith(pathname: string, prefix: string) {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`)
 }
 
 async function playerCreateForUser(db: any, userId: string, data: any) {
@@ -703,17 +777,33 @@ async function getPublicPlateauPayloadByToken(token: string) {
 }
 
 app.post('/auth/register', async (req, res) => {
-  const schema = z.object({ email: z.string().email(), password: z.string().min(6) })
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+    clubName: z.string().min(2),
+    role: z.enum(['DIRECTION']).optional()
+  })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const { email, password } = parsed.data
+  const { email, password, clubName } = parsed.data
   const existing = await prisma.user.findUnique({ where: { email } })
   if (existing) return res.status(409).json({ error: 'Email already in use' })
   const passwordHash = await bcrypt.hash(password, 10)
-  const user = await prisma.user.create({ data: { email, passwordHash } })
+  const club = await prisma.club.create({ data: { name: clubName } })
+  const user = await prisma.user.create({
+    data: { email, passwordHash, role: 'DIRECTION', clubId: club.id }
+  })
   const token = signToken(user.id)
   res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts())
-  res.json({ id: user.id, email: user.email, isPremium: user.isPremium })
+  res.json({
+    id: user.id,
+    email: user.email,
+    isPremium: user.isPremium,
+    role: user.role,
+    clubId: user.clubId,
+    teamId: user.teamId,
+    managedTeamIds: user.managedTeamIds
+  })
 })
 
 app.post('/auth/login', async (req, res) => {
@@ -727,7 +817,15 @@ app.post('/auth/login', async (req, res) => {
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' })
   const token = signToken(user.id)
   res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts())
-  res.json({ id: user.id, email: user.email, isPremium: user.isPremium })
+  res.json({
+    id: user.id,
+    email: user.email,
+    isPremium: user.isPremium,
+    role: user.role,
+    clubId: user.clubId,
+    teamId: user.teamId,
+    managedTeamIds: user.managedTeamIds
+  })
 })
 
 app.post('/auth/logout', (req, res) => {
@@ -738,14 +836,164 @@ app.post('/auth/logout', (req, res) => {
 app.get('/me', async (req: any, res, next) => {
   const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
   if (!token) {
-    return res.json({ id: null, email: null, isPremium: false, planningCount: 0, anonymous: true })
+    return res.json({
+      id: null,
+      email: null,
+      isPremium: false,
+      planningCount: 0,
+      anonymous: true,
+      role: null,
+      clubId: null,
+      teamId: null,
+      managedTeamIds: []
+    })
   }
   return next()
 }, authMiddleware, async (req: any, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.userId }, include: { plannings: true } })
   if (!user) return res.status(404).json({ error: 'User not found' })
   const planningCount = user.plannings.length
-  res.json({ id: user.id, email: user.email, isPremium: user.isPremium, planningCount })
+  res.json({
+    id: user.id,
+    email: user.email,
+    isPremium: user.isPremium,
+    planningCount,
+    role: user.role,
+    clubId: user.clubId,
+    teamId: user.teamId,
+    managedTeamIds: user.managedTeamIds
+  })
+})
+
+app.get('/clubs/me', authMiddleware, async (req: any, res) => {
+  if (!req.auth?.clubId) return res.status(404).json({ error: 'Club not found' })
+  const club = await prisma.club.findUnique({
+    where: { id: req.auth.clubId },
+    include: {
+      teams: { orderBy: { name: 'asc' } },
+      users: {
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          teamId: true,
+          managedTeamIds: true,
+          linkedPlayerUserId: true,
+          createdAt: true
+        },
+        orderBy: { createdAt: 'asc' }
+      }
+    }
+  })
+  if (!club) return res.status(404).json({ error: 'Club not found' })
+  res.json(club)
+})
+
+app.get('/teams', authMiddleware, async (req: any, res) => {
+  if (!req.auth?.clubId) return res.json([])
+  const teams = await prisma.team.findMany({
+    where: { clubId: req.auth.clubId },
+    orderBy: { name: 'asc' }
+  })
+  res.json(teams)
+})
+
+app.post('/teams', authMiddleware, async (req: any, res) => {
+  if (!ensureDirection(req, res)) return
+  if (!req.auth?.clubId) return res.status(400).json({ error: 'Direction account must be attached to a club' })
+  const schema = z.object({ name: z.string().min(2).max(80) })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  const team = await prisma.team.create({
+    data: { name: parsed.data.name, clubId: req.auth.clubId }
+  })
+  res.status(201).json(team)
+})
+
+app.post('/accounts', authMiddleware, async (req: any, res) => {
+  if (!ensureDirection(req, res)) return
+  if (!req.auth?.clubId) return res.status(400).json({ error: 'Direction account must be attached to a club' })
+
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+    role: z.enum(['DIRECTION', 'COACH', 'PLAYER', 'PARENT']),
+    teamId: z.string().optional(),
+    managedTeamIds: z.array(z.string()).optional(),
+    linkedPlayerUserId: z.string().optional()
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const { email, password, role } = parsed.data
+  const existing = await prisma.user.findUnique({ where: { email } })
+  if (existing) return res.status(409).json({ error: 'Email already in use' })
+
+  const clubTeams = await prisma.team.findMany({
+    where: { clubId: req.auth.clubId },
+    select: { id: true }
+  })
+  const clubTeamIds = new Set(clubTeams.map((t) => t.id))
+
+  let teamId: string | null = null
+  let managedTeamIds: string[] = []
+  let linkedPlayerUserId: string | null = null
+
+  if (role === 'COACH') {
+    managedTeamIds = (parsed.data.managedTeamIds || []).filter((id) => clubTeamIds.has(id))
+    if (!managedTeamIds.length) {
+      return res.status(400).json({ error: 'Coach account needs at least one managed team in the club' })
+    }
+    teamId = parsed.data.teamId && clubTeamIds.has(parsed.data.teamId) ? parsed.data.teamId : managedTeamIds[0]
+  } else if (role === 'PLAYER') {
+    if (!parsed.data.teamId || !clubTeamIds.has(parsed.data.teamId)) {
+      return res.status(400).json({ error: 'Player account requires a valid teamId in the club' })
+    }
+    teamId = parsed.data.teamId
+  } else if (role === 'PARENT') {
+    if (!parsed.data.linkedPlayerUserId) {
+      return res.status(400).json({ error: 'Parent account requires linkedPlayerUserId' })
+    }
+    const linkedPlayer = await prisma.user.findFirst({
+      where: {
+        id: parsed.data.linkedPlayerUserId,
+        role: 'PLAYER',
+        clubId: req.auth.clubId
+      },
+      select: { id: true, teamId: true }
+    })
+    if (!linkedPlayer) {
+      return res.status(404).json({ error: 'Linked player account not found in this club' })
+    }
+    linkedPlayerUserId = linkedPlayer.id
+    teamId = linkedPlayer.teamId
+  } else if (role === 'DIRECTION') {
+    teamId = null
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10)
+  const created = await prisma.user.create({
+    data: {
+      email,
+      passwordHash,
+      role,
+      clubId: req.auth.clubId,
+      teamId,
+      managedTeamIds,
+      linkedPlayerUserId
+    },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      clubId: true,
+      teamId: true,
+      managedTeamIds: true,
+      linkedPlayerUserId: true,
+      createdAt: true
+    }
+  })
+  res.status(201).json(created)
 })
 
 // Collect waitlist emails
@@ -788,6 +1036,40 @@ app.post('/waitlist', async (req, res) => {
     return res.status(500).json({ error: 'Internal error' });
   }
 });
+
+app.use(async (req: any, res: any, next: any) => {
+  if (!isWriteMethod(req.method)) return next()
+
+  const guardedPrefixes = [
+    '/plannings',
+    '/players',
+    '/trainings',
+    '/plateaus',
+    '/attendance',
+    '/matches',
+    '/schedule',
+    '/drills',
+    '/training-drills',
+    '/diagrams',
+  ]
+  const isGuarded = guardedPrefixes.some((prefix) => pathStartsWith(req.path, prefix))
+  if (!isGuarded) return next()
+
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  if (!token) return next()
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as any
+    const auth = await resolveUserAuthContext(payload.sub)
+    if (!auth) return res.status(401).json({ error: 'Unauthorized' })
+    if (isReadOnlyRole(auth)) {
+      return res.status(403).json({ error: 'Read-only account: write access is not allowed' })
+    }
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' })
+  }
+  return next()
+})
 
 // FREE TIER RULE: non-premium users can create **one planning total** (for any chosen date). They can update it, but not create a second one.
 
@@ -906,6 +1188,7 @@ app.get('/plannings/:id/qr', authMiddleware, async (req: any, res) => {
 // ---- Drills (exercises) ----
 
 app.get('/drills', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
   const q = (req.query.q as string | undefined)?.toLowerCase().trim()
   const cat = (req.query.category as string | undefined)?.toLowerCase().trim()
   const tag = (req.query.tag as string | undefined)?.toLowerCase().trim()
@@ -930,6 +1213,7 @@ app.get('/drills', authMiddleware, async (req: any, res) => {
 })
 
 app.get('/drills/:id', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
   const d = await drillFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } })
   if (!d) return res.status(404).json({ error: 'Not found' })
   res.json(d)
@@ -1029,6 +1313,7 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
 
 // ---- Players ----
 app.get('/players', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
   const players = await playerFindManyForUser(prisma, req.userId, { orderBy: { name: 'asc' } })
   res.json(players)
 })

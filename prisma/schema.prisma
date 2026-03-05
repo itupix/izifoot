@@ -12,6 +12,13 @@ model User {
   email        String     @unique
   passwordHash String
   isPremium    Boolean    @default(false)
+  role         UserRole   @default(DIRECTION)
+  clubId       String?
+  club         Club?      @relation(fields: [clubId], references: [id])
+  teamId       String?
+  team         Team?      @relation(fields: [teamId], references: [id])
+  managedTeamIds String[] @default([])
+  linkedPlayerUserId String?
   createdAt    DateTime   @default(now())
   drills       Drill[]
   plannings    Planning[]
@@ -22,6 +29,32 @@ model User {
   matches      Match[]
   trainingDrills TrainingDrill[]
   diagrams     Diagram[]
+}
+
+enum UserRole {
+  DIRECTION
+  COACH
+  PLAYER
+  PARENT
+}
+
+model Club {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  users     User[]
+  teams     Team[]
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  users     User[]
+
+  @@unique([clubId, name])
 }
 
 model Planning {

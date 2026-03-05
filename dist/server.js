@@ -174,18 +174,86 @@ function playerCookieOpts() {
 function signToken(userId) {
     return jsonwebtoken_1.default.sign({ sub: userId }, JWT_SECRET, { expiresIn: '7d' });
 }
-function authMiddleware(req, res, next) {
+async function resolveUserAuthContext(userId) {
+    const user = await prisma.user.findUnique({
+        where: { id: userId },
+        include: {
+            team: true,
+            club: true,
+        }
+    });
+    if (!user)
+        return null;
+    let managedTeamIds = [];
+    if (user.role === 'COACH') {
+        const candidateIds = Array.isArray(user.managedTeamIds) ? user.managedTeamIds : [];
+        if (candidateIds.length) {
+            const managedTeams = await prisma.team.findMany({
+                where: {
+                    id: { in: candidateIds },
+                    ...(user.clubId ? { clubId: user.clubId } : {}),
+                },
+                select: { id: true }
+            });
+            managedTeamIds = managedTeams.map((t) => t.id);
+        }
+    }
+    let parentLinkedPlayer = null;
+    if (user.role === 'PARENT' && user.linkedPlayerUserId) {
+        parentLinkedPlayer = await prisma.user.findUnique({
+            where: { id: user.linkedPlayerUserId },
+            select: { id: true, role: true, teamId: true, clubId: true }
+        });
+    }
+    return {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        clubId: user.clubId,
+        teamId: user.teamId,
+        managedTeamIds,
+        linkedPlayerUserId: user.linkedPlayerUserId,
+        parentLinkedPlayer,
+    };
+}
+async function authMiddleware(req, res, next) {
     const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
     if (!token)
         return res.status(401).json({ error: 'Unauthorized' });
     try {
         const payload = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        req.userId = payload.sub;
+        const auth = await resolveUserAuthContext(payload.sub);
+        if (!auth)
+            return res.status(401).json({ error: 'Unauthorized' });
+        req.userId = auth.id;
+        req.auth = auth;
         next();
     }
     catch (e) {
         return res.status(401).json({ error: 'Invalid token' });
     }
+}
+function ensureDirection(req, res) {
+    if (req.auth?.role !== 'DIRECTION') {
+        res.status(403).json({ error: 'Only direction accounts can perform this action' });
+        return false;
+    }
+    return true;
+}
+function isReadOnlyRole(auth) {
+    return auth?.role === 'PLAYER' || auth?.role === 'PARENT';
+}
+function ensureStaff(req, res) {
+    if (req.auth?.role === 'DIRECTION' || req.auth?.role === 'COACH')
+        return true;
+    res.status(403).json({ error: 'Only direction and coach accounts can perform this action' });
+    return false;
+}
+function isWriteMethod(method) {
+    return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+}
+function pathStartsWith(pathname, prefix) {
+    return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
 async function playerCreateForUser(db, userId, data) {
     return db.player.create({ data: { ...data, userId } });
@@ -556,31 +624,98 @@ function buildPublicPlateauRotation(matches) {
     const updatedAt = matches.reduce((latest, current) => current.updatedAt > latest ? current.updatedAt : latest, matches[0].updatedAt);
     return { updatedAt: updatedAt.toISOString(), slots };
 }
+function normalizePublicRotation(candidate, defaultUpdatedAtIso) {
+    if (!candidate || !Array.isArray(candidate.slots))
+        return null;
+    const slots = candidate.slots.map((slot) => ({
+        time: String(slot?.time ?? ''),
+        games: Array.isArray(slot?.games)
+            ? slot.games.map((game) => ({
+                pitch: String(game?.pitch ?? ''),
+                A: String(game?.A ?? ''),
+                B: String(game?.B ?? ''),
+            }))
+            : [],
+    }));
+    return {
+        updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : defaultUpdatedAtIso,
+        slots
+    };
+}
+function findRotationCandidate(data) {
+    if (!data || typeof data !== 'object')
+        return null;
+    const directCandidates = [
+        data.rotation,
+        data?.data?.rotation,
+        data?.planning?.rotation,
+        data?.schedule?.rotation,
+        data?.rotationData,
+        data,
+    ];
+    for (const c of directCandidates) {
+        if (c && typeof c === 'object' && Array.isArray(c.slots))
+            return c;
+    }
+    return null;
+}
 async function getPublicPlateauPayloadByToken(token) {
-    const share = await prisma.plateauShareToken.findFirst({
-        where: {
-            OR: [
-                { token },
-                { id: token }, // compat if frontend accidentally stores share row id instead of token
-            ]
-        },
-        include: { plateau: true }
-    });
+    let share;
+    try {
+        share = await prisma.plateauShareToken.findFirst({
+            where: {
+                OR: [
+                    { token },
+                    { id: token }, // compat if frontend accidentally stores share row id instead of token
+                ]
+            },
+            include: { plateau: true }
+        });
+    }
+    catch (e) {
+        if (e?.code === 'P2021') {
+            return { status: 503, body: { error: 'Public sharing is not ready on this environment' } };
+        }
+        throw e;
+    }
     if (!share)
         return { status: 404, body: { error: 'Invalid link' } };
     if (share.expiresAt && share.expiresAt < new Date())
         return { status: 410, body: { error: 'Link expired' } };
-    const matches = await prisma.match.findMany({
-        where: { plateauId: share.plateauId },
-        select: {
-            createdAt: true,
-            updatedAt: true,
-            opponentName: true,
-            teams: { select: { side: true } }
-        },
-        orderBy: { createdAt: 'asc' }
-    });
-    const rotation = buildPublicPlateauRotation(matches);
+    let rotation = null;
+    // Prefer rotation saved by the planning editor (same coach + same day).
+    if (share.plateau.userId) {
+        const dayStart = new Date(share.plateau.date);
+        dayStart.setHours(0, 0, 0, 0);
+        const dayEnd = new Date(dayStart);
+        dayEnd.setDate(dayEnd.getDate() + 1);
+        const planning = await prisma.planning.findFirst({
+            where: {
+                userId: share.plateau.userId,
+                date: { gte: dayStart, lt: dayEnd }
+            },
+            orderBy: { updatedAt: 'desc' }
+        });
+        if (planning) {
+            const planningData = safeParseJSON(planning.data);
+            const candidate = findRotationCandidate(planningData);
+            rotation = normalizePublicRotation(candidate, planning.updatedAt.toISOString());
+        }
+    }
+    // Fallback: synthesize a minimal rotation from matches.
+    if (!rotation) {
+        const matches = await prisma.match.findMany({
+            where: { plateauId: share.plateauId },
+            select: {
+                createdAt: true,
+                updatedAt: true,
+                opponentName: true,
+                teams: { select: { side: true } }
+            },
+            orderBy: { createdAt: 'asc' }
+        });
+        rotation = buildPublicPlateauRotation(matches);
+    }
     return {
         status: 200,
         body: {
@@ -590,19 +725,35 @@ async function getPublicPlateauPayloadByToken(token) {
     };
 }
 app.post('/auth/register', async (req, res) => {
-    const schema = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string().min(6) });
+    const schema = zod_1.z.object({
+        email: zod_1.z.string().email(),
+        password: zod_1.z.string().min(6),
+        clubName: zod_1.z.string().min(2),
+        role: zod_1.z.enum(['DIRECTION']).optional()
+    });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const { email, password } = parsed.data;
+    const { email, password, clubName } = parsed.data;
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing)
         return res.status(409).json({ error: 'Email already in use' });
     const passwordHash = await bcryptjs_1.default.hash(password, 10);
-    const user = await prisma.user.create({ data: { email, passwordHash } });
+    const club = await prisma.club.create({ data: { name: clubName } });
+    const user = await prisma.user.create({
+        data: { email, passwordHash, role: 'DIRECTION', clubId: club.id }
+    });
     const token = signToken(user.id);
     res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts());
-    res.json({ id: user.id, email: user.email, isPremium: user.isPremium });
+    res.json({
+        id: user.id,
+        email: user.email,
+        isPremium: user.isPremium,
+        role: user.role,
+        clubId: user.clubId,
+        teamId: user.teamId,
+        managedTeamIds: user.managedTeamIds
+    });
 });
 app.post('/auth/login', async (req, res) => {
     const schema = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string() });
@@ -618,18 +769,185 @@ app.post('/auth/login', async (req, res) => {
         return res.status(401).json({ error: 'Invalid credentials' });
     const token = signToken(user.id);
     res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts());
-    res.json({ id: user.id, email: user.email, isPremium: user.isPremium });
+    res.json({
+        id: user.id,
+        email: user.email,
+        isPremium: user.isPremium,
+        role: user.role,
+        clubId: user.clubId,
+        teamId: user.teamId,
+        managedTeamIds: user.managedTeamIds
+    });
 });
 app.post('/auth/logout', (req, res) => {
     res.clearCookie(AUTH_COOKIE_NAME, authClearCookieOpts());
     res.json({ ok: true });
 });
-app.get('/me', authMiddleware, async (req, res) => {
+app.get('/me', async (req, res, next) => {
+    const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+    if (!token) {
+        return res.json({
+            id: null,
+            email: null,
+            isPremium: false,
+            planningCount: 0,
+            anonymous: true,
+            role: null,
+            clubId: null,
+            teamId: null,
+            managedTeamIds: []
+        });
+    }
+    return next();
+}, authMiddleware, async (req, res) => {
     const user = await prisma.user.findUnique({ where: { id: req.userId }, include: { plannings: true } });
     if (!user)
         return res.status(404).json({ error: 'User not found' });
     const planningCount = user.plannings.length;
-    res.json({ id: user.id, email: user.email, isPremium: user.isPremium, planningCount });
+    res.json({
+        id: user.id,
+        email: user.email,
+        isPremium: user.isPremium,
+        planningCount,
+        role: user.role,
+        clubId: user.clubId,
+        teamId: user.teamId,
+        managedTeamIds: user.managedTeamIds
+    });
+});
+app.get('/clubs/me', authMiddleware, async (req, res) => {
+    if (!req.auth?.clubId)
+        return res.status(404).json({ error: 'Club not found' });
+    const club = await prisma.club.findUnique({
+        where: { id: req.auth.clubId },
+        include: {
+            teams: { orderBy: { name: 'asc' } },
+            users: {
+                select: {
+                    id: true,
+                    email: true,
+                    role: true,
+                    teamId: true,
+                    managedTeamIds: true,
+                    linkedPlayerUserId: true,
+                    createdAt: true
+                },
+                orderBy: { createdAt: 'asc' }
+            }
+        }
+    });
+    if (!club)
+        return res.status(404).json({ error: 'Club not found' });
+    res.json(club);
+});
+app.get('/teams', authMiddleware, async (req, res) => {
+    if (!req.auth?.clubId)
+        return res.json([]);
+    const teams = await prisma.team.findMany({
+        where: { clubId: req.auth.clubId },
+        orderBy: { name: 'asc' }
+    });
+    res.json(teams);
+});
+app.post('/teams', authMiddleware, async (req, res) => {
+    if (!ensureDirection(req, res))
+        return;
+    if (!req.auth?.clubId)
+        return res.status(400).json({ error: 'Direction account must be attached to a club' });
+    const schema = zod_1.z.object({ name: zod_1.z.string().min(2).max(80) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const team = await prisma.team.create({
+        data: { name: parsed.data.name, clubId: req.auth.clubId }
+    });
+    res.status(201).json(team);
+});
+app.post('/accounts', authMiddleware, async (req, res) => {
+    if (!ensureDirection(req, res))
+        return;
+    if (!req.auth?.clubId)
+        return res.status(400).json({ error: 'Direction account must be attached to a club' });
+    const schema = zod_1.z.object({
+        email: zod_1.z.string().email(),
+        password: zod_1.z.string().min(6),
+        role: zod_1.z.enum(['DIRECTION', 'COACH', 'PLAYER', 'PARENT']),
+        teamId: zod_1.z.string().optional(),
+        managedTeamIds: zod_1.z.array(zod_1.z.string()).optional(),
+        linkedPlayerUserId: zod_1.z.string().optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const { email, password, role } = parsed.data;
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing)
+        return res.status(409).json({ error: 'Email already in use' });
+    const clubTeams = await prisma.team.findMany({
+        where: { clubId: req.auth.clubId },
+        select: { id: true }
+    });
+    const clubTeamIds = new Set(clubTeams.map((t) => t.id));
+    let teamId = null;
+    let managedTeamIds = [];
+    let linkedPlayerUserId = null;
+    if (role === 'COACH') {
+        managedTeamIds = (parsed.data.managedTeamIds || []).filter((id) => clubTeamIds.has(id));
+        if (!managedTeamIds.length) {
+            return res.status(400).json({ error: 'Coach account needs at least one managed team in the club' });
+        }
+        teamId = parsed.data.teamId && clubTeamIds.has(parsed.data.teamId) ? parsed.data.teamId : managedTeamIds[0];
+    }
+    else if (role === 'PLAYER') {
+        if (!parsed.data.teamId || !clubTeamIds.has(parsed.data.teamId)) {
+            return res.status(400).json({ error: 'Player account requires a valid teamId in the club' });
+        }
+        teamId = parsed.data.teamId;
+    }
+    else if (role === 'PARENT') {
+        if (!parsed.data.linkedPlayerUserId) {
+            return res.status(400).json({ error: 'Parent account requires linkedPlayerUserId' });
+        }
+        const linkedPlayer = await prisma.user.findFirst({
+            where: {
+                id: parsed.data.linkedPlayerUserId,
+                role: 'PLAYER',
+                clubId: req.auth.clubId
+            },
+            select: { id: true, teamId: true }
+        });
+        if (!linkedPlayer) {
+            return res.status(404).json({ error: 'Linked player account not found in this club' });
+        }
+        linkedPlayerUserId = linkedPlayer.id;
+        teamId = linkedPlayer.teamId;
+    }
+    else if (role === 'DIRECTION') {
+        teamId = null;
+    }
+    const passwordHash = await bcryptjs_1.default.hash(password, 10);
+    const created = await prisma.user.create({
+        data: {
+            email,
+            passwordHash,
+            role,
+            clubId: req.auth.clubId,
+            teamId,
+            managedTeamIds,
+            linkedPlayerUserId
+        },
+        select: {
+            id: true,
+            email: true,
+            role: true,
+            clubId: true,
+            teamId: true,
+            managedTeamIds: true,
+            linkedPlayerUserId: true,
+            createdAt: true
+        }
+    });
+    res.status(201).json(created);
 });
 // Collect waitlist emails
 app.post('/waitlist', async (req, res) => {
@@ -672,6 +990,41 @@ app.post('/waitlist', async (req, res) => {
         return res.status(500).json({ error: 'Internal error' });
     }
 });
+app.use(async (req, res, next) => {
+    if (!isWriteMethod(req.method))
+        return next();
+    const guardedPrefixes = [
+        '/plannings',
+        '/players',
+        '/trainings',
+        '/plateaus',
+        '/attendance',
+        '/matches',
+        '/schedule',
+        '/drills',
+        '/training-drills',
+        '/diagrams',
+    ];
+    const isGuarded = guardedPrefixes.some((prefix) => pathStartsWith(req.path, prefix));
+    if (!isGuarded)
+        return next();
+    const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+    if (!token)
+        return next();
+    try {
+        const payload = jsonwebtoken_1.default.verify(token, JWT_SECRET);
+        const auth = await resolveUserAuthContext(payload.sub);
+        if (!auth)
+            return res.status(401).json({ error: 'Unauthorized' });
+        if (isReadOnlyRole(auth)) {
+            return res.status(403).json({ error: 'Read-only account: write access is not allowed' });
+        }
+    }
+    catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+    return next();
+});
 // FREE TIER RULE: non-premium users can create **one planning total** (for any chosen date). They can update it, but not create a second one.
 app.post('/plannings', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ date: zod_1.z.string(), data: zod_1.z.any() });
@@ -692,12 +1045,24 @@ app.post('/plannings', authMiddleware, async (req, res) => {
     const planning = await prisma.planning.create({ data: { userId: user.id, date: isoDate, data: JSON.stringify(data) } });
     res.json({ ...planning, data });
 });
-app.get('/plannings', authMiddleware, async (req, res) => {
+app.get('/plannings', async (req, res, next) => {
+    const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+    if (!token) {
+        return res.json([]);
+    }
+    return next();
+}, authMiddleware, async (req, res) => {
     const plans = await prisma.planning.findMany({ where: { userId: req.userId }, orderBy: { date: 'asc' } });
     const mapped = plans.map((p) => ({ ...p, data: safeParseJSON(p.data) }));
     res.json(mapped);
 });
-app.get('/plannings/:id', authMiddleware, async (req, res) => {
+app.get('/plannings/:id', async (req, res, next) => {
+    const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+    if (!token) {
+        return res.status(404).json({ error: 'Not found' });
+    }
+    return next();
+}, authMiddleware, async (req, res) => {
     const p = await prisma.planning.findFirst({ where: { id: req.params.id, userId: req.userId } });
     if (!p)
         return res.status(404).json({ error: 'Not found' });
@@ -773,6 +1138,8 @@ app.get('/plannings/:id/qr', authMiddleware, async (req, res) => {
 // === FOOT DOMAIN API ===
 // ---- Drills (exercises) ----
 app.get('/drills', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
     const q = req.query.q?.toLowerCase().trim();
     const cat = req.query.category?.toLowerCase().trim();
     const tag = req.query.tag?.toLowerCase().trim();
@@ -794,6 +1161,8 @@ app.get('/drills', authMiddleware, async (req, res) => {
     });
 });
 app.get('/drills/:id', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
     const d = await drillFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } });
     if (!d)
         return res.status(404).json({ error: 'Not found' });
@@ -893,6 +1262,8 @@ app.post('/drills', authMiddleware, async (req, res) => {
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 // ---- Players ----
 app.get('/players', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
     const players = await playerFindManyForUser(prisma, req.userId, { orderBy: { name: 'asc' } });
     res.json(players);
 });
@@ -1285,7 +1656,12 @@ app.delete('/trainings/:id', authMiddleware, async (req, res) => {
     }
 });
 // ---- Plateaus ----
-app.get('/plateaus', authMiddleware, async (req, res) => {
+app.get('/plateaus', async (req, res, next) => {
+    const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+    if (!token)
+        return res.json([]);
+    return next();
+}, authMiddleware, async (req, res) => {
     const plateaus = await plateauFindManyForUser(prisma, req.userId, { orderBy: { date: 'desc' } });
     res.json(plateaus);
 });
@@ -1306,16 +1682,34 @@ app.post('/plateaus/:id/share', authMiddleware, async (req, res) => {
     const plateau = await plateauFindFirstForUser(prisma, req.userId, { where: { id: req.params.id } });
     if (!plateau)
         return res.status(404).json({ error: 'Plateau not found' });
-    await prisma.plateauShareToken.deleteMany({ where: { plateauId: plateau.id } });
-    const token = (0, crypto_1.randomUUID)();
-    const expiresAt = parsed.data.expiresInDays ? (0, date_fns_1.addDays)(new Date(), parsed.data.expiresInDays) : null;
-    await prisma.plateauShareToken.create({
-        data: {
-            plateauId: plateau.id,
-            token,
-            expiresAt: expiresAt ?? undefined
-        }
+    const existing = await prisma.plateauShareToken.findFirst({
+        where: { plateauId: plateau.id },
+        orderBy: { createdAt: 'desc' }
     });
+    let token = existing?.token || (0, crypto_1.randomUUID)();
+    let expiresAt = existing?.expiresAt ?? null;
+    if (parsed.data.expiresInDays) {
+        expiresAt = (0, date_fns_1.addDays)(new Date(), parsed.data.expiresInDays);
+    }
+    else if (existing?.expiresAt && existing.expiresAt < new Date()) {
+        // Re-enable an expired link while keeping the same URL.
+        expiresAt = null;
+    }
+    if (existing) {
+        await prisma.plateauShareToken.update({
+            where: { id: existing.id },
+            data: { expiresAt: expiresAt ?? null }
+        });
+    }
+    else {
+        await prisma.plateauShareToken.create({
+            data: {
+                plateauId: plateau.id,
+                token,
+                expiresAt: expiresAt ?? undefined
+            }
+        });
+    }
     const url = `${APP_BASE_URL.replace(/\/+$/, '')}/plateau/public/${token}`;
     res.json({ token, url, expiresAt });
 });
