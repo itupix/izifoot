@@ -20,6 +20,8 @@ model User {
   managedTeamIds String[] @default([])
   linkedPlayerUserId String?
   createdAt    DateTime   @default(now())
+  accountInvitesSent AccountInvite[] @relation("InviteSender")
+  acceptedInvite AccountInvite? @relation("InviteAcceptedUser")
   drills       Drill[]
   plannings    Planning[]
   players      Player[]
@@ -36,6 +38,13 @@ enum UserRole {
   COACH
   PLAYER
   PARENT
+}
+
+enum AccountInviteStatus {
+  PENDING
+  ACCEPTED
+  CANCELLED
+  EXPIRED
 }
 
 model Club {
@@ -55,6 +64,30 @@ model Team {
   users     User[]
 
   @@unique([clubId, name])
+}
+
+model AccountInvite {
+  id                 String            @id @default(cuid())
+  token              String            @unique
+  email              String
+  role               UserRole
+  status             AccountInviteStatus @default(PENDING)
+  clubId             String
+  invitedByUserId    String
+  teamId             String?
+  managedTeamIds     String[]          @default([])
+  linkedPlayerUserId String?
+  userId             String?           @unique
+  expiresAt          DateTime
+  acceptedAt         DateTime?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  invitedBy          User              @relation("InviteSender", fields: [invitedByUserId], references: [id], onDelete: Cascade)
+  user               User?             @relation("InviteAcceptedUser", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([clubId, status])
+  @@index([email, status])
 }
 
 model Planning {

@@ -1000,6 +1000,103 @@ app.post('/auth/login', async (req, res) => {
   })
 })
 
+app.get('/auth/invitations/:token', async (req, res) => {
+  const invite = await prisma.accountInvite.findUnique({
+    where: { token: req.params.token },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      status: true,
+      expiresAt: true,
+      teamId: true,
+      managedTeamIds: true,
+      linkedPlayerUserId: true
+    }
+  })
+  if (!invite) return res.status(404).json({ error: 'Invitation not found' })
+  if (invite.status !== 'PENDING') return res.status(409).json({ error: `Invitation is ${invite.status.toLowerCase()}` })
+  if (invite.expiresAt < new Date()) {
+    await prisma.accountInvite.update({
+      where: { id: invite.id },
+      data: { status: 'EXPIRED' }
+    })
+    return res.status(410).json({ error: 'Invitation expired' })
+  }
+  res.json(invite)
+})
+
+app.post('/auth/invitations/accept', async (req, res) => {
+  const schema = z.object({
+    token: z.string().min(8),
+    password: z.string().min(6)
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const invite = await prisma.accountInvite.findUnique({ where: { token: parsed.data.token } })
+  if (!invite) return res.status(404).json({ error: 'Invitation not found' })
+  if (invite.status !== 'PENDING') return res.status(409).json({ error: `Invitation is ${invite.status.toLowerCase()}` })
+  if (invite.expiresAt < new Date()) {
+    await prisma.accountInvite.update({
+      where: { id: invite.id },
+      data: { status: 'EXPIRED' }
+    })
+    return res.status(410).json({ error: 'Invitation expired' })
+  }
+
+  const existing = await prisma.user.findUnique({ where: { email: invite.email } })
+  if (existing) return res.status(409).json({ error: 'Email already in use' })
+
+  const passwordHash = await bcrypt.hash(parsed.data.password, 10)
+  const { user } = await prisma.$transaction(async (tx) => {
+    const createdUser = await tx.user.create({
+      data: {
+        email: invite.email,
+        passwordHash,
+        role: invite.role,
+        clubId: invite.clubId,
+        teamId: invite.teamId,
+        managedTeamIds: invite.managedTeamIds,
+        linkedPlayerUserId: invite.linkedPlayerUserId
+      }
+    })
+
+    await tx.accountInvite.update({
+      where: { id: invite.id },
+      data: {
+        status: 'ACCEPTED',
+        acceptedAt: new Date(),
+        userId: createdUser.id
+      }
+    })
+
+    await tx.accountInvite.updateMany({
+      where: {
+        clubId: invite.clubId,
+        email: invite.email,
+        status: 'PENDING',
+        id: { not: invite.id }
+      },
+      data: { status: 'CANCELLED' }
+    })
+
+    return { user: createdUser }
+  })
+
+  const token = signToken(user.id)
+  res.cookie(AUTH_COOKIE_NAME, token, authCookieOpts())
+  res.json({
+    id: user.id,
+    email: user.email,
+    isPremium: user.isPremium,
+    role: user.role,
+    clubId: user.clubId,
+    teamId: user.teamId,
+    managedTeamIds: user.managedTeamIds
+  })
+})
+
 app.post('/auth/logout', (req, res) => {
   res.clearCookie(AUTH_COOKIE_NAME, authClearCookieOpts())
   res.json({ ok: true })
@@ -1105,16 +1202,17 @@ app.post('/accounts', authMiddleware, async (req: any, res) => {
 
   const schema = z.object({
     email: z.string().email(),
-    password: z.string().min(6),
     role: z.enum(['DIRECTION', 'COACH', 'PLAYER', 'PARENT']),
     teamId: z.string().optional(),
     managedTeamIds: z.array(z.string()).optional(),
-    linkedPlayerUserId: z.string().optional()
+    linkedPlayerUserId: z.string().optional(),
+    expiresInDays: z.number().int().min(1).max(30).optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
-  const { email, password, role } = parsed.data
+  const email = normEmail(parsed.data.email)
+  const { role } = parsed.data
   const existing = await prisma.user.findUnique({ where: { email } })
   if (existing) return res.status(409).json({ error: 'Email already in use' })
 
@@ -1160,29 +1258,103 @@ app.post('/accounts', authMiddleware, async (req: any, res) => {
     teamId = null
   }
 
-  const passwordHash = await bcrypt.hash(password, 10)
-  const created = await prisma.user.create({
+  await prisma.accountInvite.updateMany({
+    where: {
+      clubId: req.auth.clubId,
+      email,
+      status: 'PENDING'
+    },
+    data: { status: 'CANCELLED' }
+  })
+
+  const inviteToken = nanoid(48)
+  const expiresAt = addDays(new Date(), parsed.data.expiresInDays ?? 7)
+  const created = await prisma.accountInvite.create({
     data: {
       email,
-      passwordHash,
+      token: inviteToken,
       role,
       clubId: req.auth.clubId,
+      invitedByUserId: req.auth.id,
       teamId,
       managedTeamIds,
-      linkedPlayerUserId
+      linkedPlayerUserId,
+      expiresAt
     },
     select: {
       id: true,
       email: true,
+      token: true,
       role: true,
       clubId: true,
       teamId: true,
       managedTeamIds: true,
       linkedPlayerUserId: true,
+      status: true,
+      expiresAt: true,
       createdAt: true
     }
   })
-  res.status(201).json(created)
+
+  const acceptPath = process.env.INVITE_ACCEPT_PATH || '/invite/accept'
+  const inviteUrl = `${APP_BASE_URL.replace(/\/+$/, '')}${acceptPath}?token=${encodeURIComponent(created.token)}`
+
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || 'no-reply@example.com',
+        to: created.email,
+        subject: 'Invitation Izifoot',
+        html: `<p>Vous avez ete invite sur Izifoot.</p>
+<p>Pour finaliser votre compte et definir votre mot de passe, cliquez ici :</p>
+<p><a href="${inviteUrl}">${inviteUrl}</a></p>
+<p>Ce lien expire le ${created.expiresAt.toISOString()}.</p>`
+      })
+    } catch (e) {
+      console.warn('[accounts invite] email failed:', e)
+    }
+  }
+
+  res.status(201).json({ ...created, inviteUrl })
+})
+
+app.get('/accounts/invitations', authMiddleware, async (req: any, res) => {
+  if (!ensureDirection(req, res)) return
+  if (!req.auth?.clubId) return res.json([])
+
+  await prisma.accountInvite.updateMany({
+    where: {
+      clubId: req.auth.clubId,
+      status: 'PENDING',
+      expiresAt: { lt: new Date() }
+    },
+    data: { status: 'EXPIRED' }
+  })
+
+  const invites = await prisma.accountInvite.findMany({
+    where: { clubId: req.auth.clubId },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      status: true,
+      teamId: true,
+      managedTeamIds: true,
+      linkedPlayerUserId: true,
+      expiresAt: true,
+      acceptedAt: true,
+      createdAt: true,
+      user: {
+        select: {
+          id: true,
+          email: true,
+          createdAt: true
+        }
+      }
+    },
+    orderBy: { createdAt: 'desc' }
+  })
+  res.json(invites)
 })
 
 // Collect waitlist emails
