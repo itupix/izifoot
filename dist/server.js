@@ -302,7 +302,7 @@ function applyScopeWhere(auth, where = {}, opts = {}) {
     return {
         OR: [
             scopedWhere,
-            { ...(where || {}), userId: auth?.id, teamId: null }
+            { ...(where || {}), userId: auth?.id }
         ]
     };
 }

@@ -308,7 +308,7 @@ function applyScopeWhere(auth: any, where: any = {}, opts: { includeLegacyOwner?
   return {
     OR: [
       scopedWhere,
-      { ...(where || {}), userId: auth?.id, teamId: null }
+      { ...(where || {}), userId: auth?.id }
     ]
   }
 }
