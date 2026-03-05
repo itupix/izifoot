@@ -308,7 +308,7 @@ function applyScopeWhere(auth: any, where: any = {}, opts: { includeLegacyOwner?
   return {
     OR: [
       scopedWhere,
-      { ...(where || {}), userId: auth?.id }
+      { ...(where || {}), userId: auth?.id, teamId: null }
     ]
   }
 }
@@ -360,7 +360,7 @@ function normalizeScopeInput(scopeOrUserId: any) {
 
 function scopedWhereOrLegacy(scopeOrUserId: any, where: any = {}) {
   if (typeof scopeOrUserId === 'string') return { ...(where || {}), userId: scopeOrUserId }
-  return applyScopeWhere(normalizeScopeInput(scopeOrUserId), where)
+  return applyScopeWhere(normalizeScopeInput(scopeOrUserId), where, { includeLegacyOwner: true })
 }
 
 async function playerCreateForUser(db: any, scopeOrUserId: any, data: any) {
