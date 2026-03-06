@@ -18,6 +18,7 @@ const qrcode_1 = __importDefault(require("qrcode"));
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const date_fns_1 = require("date-fns");
 const crypto_1 = require("crypto");
+const plateau_metadata_1 = require("./plateau-metadata");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -879,7 +880,7 @@ async function getPublicPlateauPayloadByToken(token) {
     return {
         status: 200,
         body: {
-            plateau: { id: share.plateau.id, date: share.plateau.date, lieu: share.plateau.lieu },
+            plateau: (0, plateau_metadata_1.toPublicPlateau)(share.plateau),
             rotation
         }
     };
@@ -2088,7 +2089,10 @@ app.get('/plateaus', async (req, res, next) => {
 app.post('/plateaus', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
-    const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()), lieu: zod_1.z.string().min(1) });
+    const schema = zod_1.z.object({
+        date: zod_1.z.string().or(zod_1.z.date()),
+        lieu: zod_1.z.string().min(1),
+    }).merge(plateau_metadata_1.plateauMetadataSchema);
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
@@ -2103,10 +2107,35 @@ app.post('/plateaus', authMiddleware, async (req, res) => {
     const pl = await plateauCreateForUser(prisma, req.auth, {
         date,
         lieu: parsed.data.lieu,
+        ...(0, plateau_metadata_1.buildPlateauMetadataPatch)(parsed.data),
         clubId: team.clubId,
         teamId: team.id
     });
     res.json(pl);
+});
+app.put('/plateaus/:id', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const parsed = plateau_metadata_1.plateauMetadataSchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const data = (0, plateau_metadata_1.buildPlateauMetadataPatch)(parsed.data);
+    if (Object.keys(data).length === 0) {
+        return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+    try {
+        const existing = await plateauFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
+        if (!existing)
+            return res.status(404).json({ error: 'Plateau not found' });
+        const updated = await prisma.plateau.update({ where: { id: existing.id }, data });
+        res.json(updated);
+    }
+    catch (e) {
+        if (e?.code === 'P2025')
+            return res.status(404).json({ error: 'Plateau not found' });
+        console.error('[PUT /plateaus/:id] update failed', e);
+        return res.status(500).json({ error: 'Failed to update plateau' });
+    }
 });
 app.post('/plateaus/:id/share', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ expiresInDays: zod_1.z.number().int().min(1).max(365).optional() });

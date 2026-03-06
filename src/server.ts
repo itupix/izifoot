@@ -13,6 +13,7 @@ import QRCode from 'qrcode'
 import nodemailer from 'nodemailer'
 import { addDays } from 'date-fns'
 import { randomUUID } from 'crypto'
+import { buildPlateauMetadataPatch, plateauMetadataSchema, toPublicPlateau } from './plateau-metadata'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -928,7 +929,7 @@ async function getPublicPlateauPayloadByToken(token: string) {
   return {
     status: 200 as const,
     body: {
-      plateau: { id: share.plateau.id, date: share.plateau.date, lieu: share.plateau.lieu },
+      plateau: toPublicPlateau(share.plateau),
       rotation
     }
   }
@@ -2120,7 +2121,10 @@ app.get('/plateaus', async (req: any, res, next) => {
 
 app.post('/plateaus', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const schema = z.object({ date: z.string().or(z.date()), lieu: z.string().min(1) })
+  const schema = z.object({
+    date: z.string().or(z.date()),
+    lieu: z.string().min(1),
+  }).merge(plateauMetadataSchema)
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
@@ -2133,10 +2137,33 @@ app.post('/plateaus', authMiddleware, async (req: any, res) => {
   const pl = await plateauCreateForUser(prisma, req.auth, {
     date,
     lieu: parsed.data.lieu,
+    ...buildPlateauMetadataPatch(parsed.data),
     clubId: team.clubId,
     teamId: team.id
   })
   res.json(pl)
+})
+
+app.put('/plateaus/:id', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const parsed = plateauMetadataSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const data = buildPlateauMetadataPatch(parsed.data)
+  if (Object.keys(data).length === 0) {
+    return res.status(400).json({ error: 'No updatable fields provided' })
+  }
+
+  try {
+    const existing = await plateauFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
+    if (!existing) return res.status(404).json({ error: 'Plateau not found' })
+    const updated = await prisma.plateau.update({ where: { id: existing.id }, data })
+    res.json(updated)
+  } catch (e: any) {
+    if (e?.code === 'P2025') return res.status(404).json({ error: 'Plateau not found' })
+    console.error('[PUT /plateaus/:id] update failed', e)
+    return res.status(500).json({ error: 'Failed to update plateau' })
+  }
 })
 
 app.post('/plateaus/:id/share', authMiddleware, async (req: any, res) => {

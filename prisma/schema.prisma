@@ -156,6 +156,9 @@ model Plateau {
   teamId     String
   date       DateTime
   lieu       String
+  address    String?
+  startTime  String?      @map("start_time") @db.VarChar(5)
+  meetingTime String?     @map("meeting_time") @db.VarChar(5)
   matches    Match[]
   attendance Attendance[]
   shares     PlateauShareToken[]
