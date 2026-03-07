@@ -2462,6 +2462,66 @@ app.post('/attendance', authMiddleware, async (req, res) => {
     res.json({ ok: true });
 });
 // ---- Matches ----
+function rowsForMatchTeam(matchTeamId, ids, role) {
+    return ids.map((playerId) => ({ matchTeamId, playerId, role }));
+}
+async function getMatchDetailForUser(db, scopeOrUserId, id) {
+    const match = await matchFindFirstForUser(db, scopeOrUserId, {
+        where: { id },
+        include: { teams: true, scorers: true }
+    });
+    if (!match)
+        return null;
+    const teamIds = (match.teams || []).map((t) => t.id);
+    const teamPlayers = teamIds.length ? await db.matchTeamPlayer.findMany({
+        where: { matchTeamId: { in: teamIds } },
+        include: { player: true }
+    }) : [];
+    const byTeam = {};
+    for (const row of teamPlayers) {
+        if (!byTeam[row.matchTeamId])
+            byTeam[row.matchTeamId] = [];
+        byTeam[row.matchTeamId].push(row);
+    }
+    const playersById = {};
+    const teams = (match.teams || []).map((team) => ({
+        id: team.id,
+        side: team.side,
+        score: team.score,
+        players: (byTeam[team.id] || []).map((row) => {
+            const pl = row.player;
+            if (pl) {
+                playersById[pl.id] = playersById[pl.id] || {
+                    id: pl.id,
+                    name: pl.name,
+                    primary_position: pl.primary_position ?? null,
+                    secondary_position: pl.secondary_position ?? null
+                };
+            }
+            return {
+                playerId: row.playerId,
+                role: row.role,
+                player: pl ? playersById[pl.id] : null
+            };
+        })
+    }));
+    const scorers = (match.scorers || []).map((s) => ({
+        id: s.id,
+        playerId: s.playerId,
+        side: s.side,
+        playerName: playersById[s.playerId]?.name || null
+    }));
+    return {
+        id: match.id,
+        createdAt: match.createdAt,
+        type: match.type,
+        plateauId: match.plateauId ?? null,
+        opponentName: match.opponentName ?? null,
+        teams,
+        scorers,
+        playersById
+    };
+}
 app.get('/matches', authMiddleware, async (req, res) => {
     const { plateauId } = req.query;
     const where = plateauId ? { plateauId: String(plateauId) } : {};
@@ -2471,6 +2531,19 @@ app.get('/matches', authMiddleware, async (req, res) => {
         orderBy: { createdAt: 'desc' }
     });
     res.json(matches);
+});
+app.get('/matches/:id', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const match = await getMatchDetailForUser(prisma, req.auth, id);
+        if (!match)
+            return res.status(404).json({ error: 'Match not found' });
+        return res.json(match);
+    }
+    catch (e) {
+        console.error('[GET /matches/:id] failed', e);
+        return res.status(500).json({ error: 'Failed to fetch match' });
+    }
 });
 app.post('/matches', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
@@ -2541,41 +2614,99 @@ app.post('/matches', authMiddleware, async (req, res) => {
 app.put('/matches/:id', authMiddleware, async (req, res) => {
     const matchId = req.params.id;
     const schema = zod_1.z.object({
-        score: zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) }).optional(),
-        opponentName: zod_1.z.string().min(1).max(100).optional(),
-        buteurs: zod_1.z.array(zod_1.z.object({ playerId: zod_1.z.string(), side: zod_1.z.enum(['home', 'away']) })).optional()
+        type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']).optional(),
+        plateauId: zod_1.z.string().nullable().optional(),
+        sides: zod_1.z.object({
+            home: zod_1.z.object({
+                starters: zod_1.z.array(zod_1.z.string()).default([]),
+                subs: zod_1.z.array(zod_1.z.string()).default([])
+            }),
+            away: zod_1.z.object({
+                starters: zod_1.z.array(zod_1.z.string()).default([]),
+                subs: zod_1.z.array(zod_1.z.string()).default([])
+            })
+        }),
+        score: zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) }),
+        buteurs: zod_1.z.array(zod_1.z.object({ playerId: zod_1.z.string(), side: zod_1.z.enum(['home', 'away']) })).default([]),
+        opponentName: zod_1.z.string().max(100).optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     try {
-        // ensure exists
-        const exists = await matchFindFirstForUser(prisma, req.auth, { where: { id: matchId } });
-        if (!exists)
-            return res.status(404).json({ error: 'Match not found' });
-        // update fields
-        if (parsed.data.opponentName !== undefined) {
-            await prisma.match.update({ where: { id: exists.id }, data: { opponentName: parsed.data.opponentName } });
-        }
-        if (parsed.data.score) {
-            await prisma.$transaction([
-                prisma.matchTeam.updateMany({ where: { matchId, side: 'home' }, data: { score: parsed.data.score.home } }),
-                prisma.matchTeam.updateMany({ where: { matchId, side: 'away' }, data: { score: parsed.data.score.away } }),
+        const payload = parsed.data;
+        const updatedId = await prisma.$transaction(async (tx) => {
+            const existing = await matchFindFirstForUser(tx, req.auth, {
+                where: { id: matchId },
+                include: { teams: { select: { id: true, side: true } } }
+            });
+            if (!existing) {
+                const err = new Error('Match not found');
+                err.code = 'MATCH_NOT_FOUND';
+                throw err;
+            }
+            if (payload.plateauId !== undefined && payload.plateauId) {
+                const plateau = await plateauFindFirstForUser(tx, req.auth, { where: { id: payload.plateauId }, select: { id: true } });
+                if (!plateau) {
+                    const err = new Error('Plateau not found');
+                    err.code = 'PLATEAU_NOT_FOUND';
+                    throw err;
+                }
+            }
+            const teamBySide = { home: null, away: null };
+            for (const team of existing.teams || []) {
+                if (team.side === 'home' || team.side === 'away') {
+                    const side = team.side;
+                    teamBySide[side] = team;
+                }
+            }
+            if (!teamBySide.home) {
+                teamBySide.home = await tx.matchTeam.create({ data: { matchId, side: 'home', score: payload.score.home }, select: { id: true, side: true } });
+            }
+            if (!teamBySide.away) {
+                teamBySide.away = await tx.matchTeam.create({ data: { matchId, side: 'away', score: payload.score.away }, select: { id: true, side: true } });
+            }
+            const matchPatch = {};
+            if (payload.type !== undefined)
+                matchPatch.type = payload.type;
+            if (payload.plateauId !== undefined)
+                matchPatch.plateauId = payload.plateauId;
+            if (payload.opponentName !== undefined)
+                matchPatch.opponentName = payload.opponentName;
+            if (Object.keys(matchPatch).length > 0) {
+                await tx.match.update({ where: { id: matchId }, data: matchPatch });
+            }
+            await Promise.all([
+                tx.matchTeam.update({ where: { id: teamBySide.home.id }, data: { score: payload.score.home } }),
+                tx.matchTeam.update({ where: { id: teamBySide.away.id }, data: { score: payload.score.away } })
             ]);
-        }
-        if (parsed.data.buteurs) {
-            await prisma.$transaction([
-                prisma.scorer.deleteMany({ where: { matchId } }),
-                prisma.scorer.createMany({ data: parsed.data.buteurs.map(b => ({ matchId, playerId: b.playerId, side: b.side })) })
-            ]);
-        }
-        const full = await matchFindFirstForUser(prisma, req.auth, {
-            where: { id: matchId },
-            include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
+            await tx.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: [teamBySide.home.id, teamBySide.away.id] } } });
+            const mtps = [
+                ...rowsForMatchTeam(teamBySide.home.id, payload.sides.home.starters, 'starter'),
+                ...rowsForMatchTeam(teamBySide.home.id, payload.sides.home.subs, 'sub'),
+                ...rowsForMatchTeam(teamBySide.away.id, payload.sides.away.starters, 'starter'),
+                ...rowsForMatchTeam(teamBySide.away.id, payload.sides.away.subs, 'sub'),
+            ];
+            const uniqueMtps = Array.from(new Map(mtps.map((r) => [`${r.matchTeamId}:${r.playerId}:${r.role}`, r])).values());
+            if (uniqueMtps.length) {
+                await tx.matchTeamPlayer.createMany({ data: uniqueMtps });
+            }
+            await tx.scorer.deleteMany({ where: { matchId } });
+            if (payload.buteurs.length) {
+                await tx.scorer.createMany({ data: payload.buteurs.map((b) => ({ matchId, playerId: b.playerId, side: b.side })) });
+            }
+            return existing.id;
         });
-        res.json(full);
+        const updated = await getMatchDetailForUser(prisma, req.auth, updatedId);
+        if (!updated)
+            return res.status(404).json({ error: 'Match not found' });
+        return res.json(updated);
     }
     catch (e) {
+        if (e?.code === 'MATCH_NOT_FOUND')
+            return res.status(404).json({ error: 'Match not found' });
+        if (e?.code === 'PLATEAU_NOT_FOUND')
+            return res.status(404).json({ error: 'Plateau not found' });
         console.error('[PUT /matches/:id] failed', e);
         return res.status(500).json({ error: 'Failed to update match' });
     }
