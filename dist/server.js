@@ -185,6 +185,17 @@ async function resolveUserAuthContext(userId) {
     });
     if (!user)
         return null;
+    let resolvedTeamId = user.teamId;
+    if (user.role === 'DIRECTION' && !resolvedTeamId && user.clubId) {
+        const clubTeams = await prisma.team.findMany({
+            where: { clubId: user.clubId },
+            orderBy: { name: 'asc' },
+            select: { id: true },
+            take: 2
+        });
+        if (clubTeams.length === 1)
+            resolvedTeamId = clubTeams[0].id;
+    }
     let managedTeamIds = [];
     if (user.role === 'COACH') {
         const candidateIds = Array.isArray(user.managedTeamIds) ? user.managedTeamIds : [];
@@ -211,7 +222,7 @@ async function resolveUserAuthContext(userId) {
         email: user.email,
         role: user.role,
         clubId: user.clubId,
-        teamId: user.teamId,
+        teamId: resolvedTeamId,
         managedTeamIds,
         linkedPlayerUserId: user.linkedPlayerUserId,
         parentLinkedPlayer,
@@ -889,13 +900,19 @@ app.post('/auth/register', async (req, res) => {
     const schema = zod_1.z.object({
         email: zod_1.z.string().email(),
         password: zod_1.z.string().min(6),
-        clubName: zod_1.z.string().min(2),
+        clubName: zod_1.z.string().trim().min(2).optional(),
+        // Backward compatibility for old front payloads.
+        club: zod_1.z.string().trim().min(2).optional(),
         role: zod_1.z.enum(['DIRECTION']).optional()
+    }).refine((data) => Boolean(data.clubName || data.club), {
+        path: ['clubName'],
+        message: 'Required'
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const { email, password, clubName } = parsed.data;
+    const { email, password } = parsed.data;
+    const clubName = parsed.data.clubName || parsed.data.club;
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing)
         return res.status(409).json({ error: 'Email already in use' });
