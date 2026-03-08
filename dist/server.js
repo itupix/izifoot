@@ -1428,7 +1428,6 @@ app.use(async (req, res, next) => {
     }
     return next();
 });
-// FREE TIER RULE: non-premium users can create **one planning total** (for any chosen date). They can update it, but not create a second one.
 app.post('/plannings', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ date: zod_1.z.string(), data: zod_1.z.any() });
     const parsed = schema.safeParse(req.body);
@@ -1438,14 +1437,12 @@ app.post('/plannings', authMiddleware, async (req, res) => {
     const user = await prisma.user.findUnique({ where: { id: req.userId }, include: { plannings: true } });
     if (!user)
         return res.status(404).json({ error: 'User not found' });
-    if (!user.isPremium && user.plannings.length >= 1) {
-        return res.status(402).json({ error: 'Free tier: only one planning allowed. Upgrade to premium.' });
-    }
     const isoDate = new Date(date);
-    const existsForDate = await prisma.planning.findFirst({ where: { userId: user.id, date: isoDate } });
-    if (existsForDate)
-        return res.status(409).json({ error: 'Planning already exists for this date' });
-    const planning = await prisma.planning.create({ data: { userId: user.id, date: isoDate, data: JSON.stringify(data) } });
+    const planning = await prisma.planning.upsert({
+        where: { userId_date: { userId: user.id, date: isoDate } },
+        update: { data: JSON.stringify(data) },
+        create: { userId: user.id, date: isoDate, data: JSON.stringify(data) },
+    });
     res.json({ ...planning, data });
 });
 app.get('/plannings', async (req, res, next) => {
