@@ -532,10 +532,12 @@ async function matchFindUniqueCompat(db, args) {
 }
 async function matchCreateForUser(db, scopeOrUserId, data) {
     const auth = normalizeScopeInput(scopeOrUserId);
+    const { plateauId, ...rest } = data;
     return db.match.create({
         data: {
-            ...data,
-            ...(auth?.id ? { userId: auth.id } : {}),
+            ...rest,
+            ...(plateauId ? { plateau: { connect: { id: plateauId } } } : {}),
+            ...(auth?.id ? { user: { connect: { id: auth.id } } } : {}),
             ...(auth?.clubId ? { clubId: auth.clubId } : {}),
             ...(auth?.teamId ? { teamId: auth.teamId } : {}),
         }
@@ -2681,8 +2683,11 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                 matchPatch.type = payload.type;
             if (payload.played !== undefined)
                 matchPatch.played = normalized.played;
-            if (payload.plateauId !== undefined)
-                matchPatch.plateauId = payload.plateauId;
+            if (payload.plateauId !== undefined) {
+                matchPatch.plateau = payload.plateauId
+                    ? { connect: { id: payload.plateauId } }
+                    : { disconnect: true };
+            }
             if (payload.opponentName !== undefined)
                 matchPatch.opponentName = payload.opponentName;
             if (Object.keys(matchPatch).length > 0) {
