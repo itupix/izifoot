@@ -200,6 +200,7 @@ model Match {
   clubId       String?
   teamId       String?
   type         String
+  played       Boolean     @default(false)
   plateau      Plateau?    @relation(fields: [plateauId], references: [id])
   plateauId    String?
   teams        MatchTeam[]

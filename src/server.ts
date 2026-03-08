@@ -2474,6 +2474,18 @@ function rowsForMatchTeam(matchTeamId: string, ids: string[], role: 'starter' | 
   return ids.map((playerId) => ({ matchTeamId, playerId, role }))
 }
 
+function normalizeMatchState<T extends { score?: { home: number; away: number }; buteurs?: Array<{ playerId: string; side: 'home' | 'away' }>; played?: boolean }>(
+  payload: T,
+  fallbackPlayed = false
+) {
+  const played = payload.played ?? fallbackPlayed
+  return {
+    played,
+    score: played ? (payload.score ?? { home: 0, away: 0 }) : { home: 0, away: 0 },
+    buteurs: played ? (payload.buteurs ?? []) : []
+  }
+}
+
 async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
   const match = await matchFindFirstForUser(db, scopeOrUserId, {
     where: { id },
@@ -2527,6 +2539,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     id: match.id,
     createdAt: match.createdAt,
     type: match.type,
+    played: Boolean(match.played),
     plateauId: match.plateauId ?? null,
     opponentName: match.opponentName ?? null,
     teams,
@@ -2562,6 +2575,7 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
   const schema = z.object({
     type: z.enum(['ENTRAINEMENT', 'PLATEAU']),
+    played: z.boolean().optional(),
     plateauId: z.string().optional(),
     sides: z.object({
       home: z.object({
@@ -2579,7 +2593,8 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const { type, plateauId, sides, score, buteurs, opponentName } = parsed.data
+  const { type, plateauId, sides, score, buteurs, opponentName, played } = parsed.data
+  const normalized = normalizeMatchState({ played, score, buteurs })
 
   let team: any = null
   if (plateauId) {
@@ -2595,12 +2610,12 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
   }
 
   const match = await matchCreateForUser(prisma, req.auth, {
-    type, plateauId, opponentName,
+    type, plateauId, opponentName, played: normalized.played,
     clubId: team?.clubId ?? req.auth.clubId ?? null,
     teamId: team?.id ?? null
   })
-  const home = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'home', score: score?.home ?? 0 } })
-  const away = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'away', score: score?.away ?? 0 } })
+  const home = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'home', score: normalized.score.home } })
+  const away = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'away', score: normalized.score.away } })
 
   const toMTP = (matchTeamId: string, ids: string[], role: 'starter' | 'sub') => ids.map(playerId => ({ matchTeamId, playerId, role }))
   const mtps = [
@@ -2614,8 +2629,8 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
   )
   if (uniqueMtps.length) await prisma.matchTeamPlayer.createMany({ data: uniqueMtps })
 
-  if (buteurs?.length) {
-    await prisma.scorer.createMany({ data: buteurs.map(b => ({ matchId: match.id, playerId: b.playerId, side: b.side })) })
+  if (normalized.buteurs.length) {
+    await prisma.scorer.createMany({ data: normalized.buteurs.map(b => ({ matchId: match.id, playerId: b.playerId, side: b.side })) })
   }
 
   const full = await matchFindUniqueCompat(prisma, {
@@ -2630,6 +2645,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
   const matchId = req.params.id
   const schema = z.object({
     type: z.enum(['ENTRAINEMENT', 'PLATEAU']).optional(),
+    played: z.boolean().optional(),
     plateauId: z.string().nullable().optional(),
     sides: z.object({
       home: z.object({
@@ -2660,6 +2676,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
         err.code = 'MATCH_NOT_FOUND'
         throw err
       }
+      const normalized = normalizeMatchState(payload, Boolean(existing.played))
 
       if (payload.plateauId !== undefined && payload.plateauId) {
         const plateau = await plateauFindFirstForUser(tx, req.auth, { where: { id: payload.plateauId }, select: { id: true } })
@@ -2679,14 +2696,15 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
       }
 
       if (!teamBySide.home) {
-        teamBySide.home = await tx.matchTeam.create({ data: { matchId, side: 'home', score: payload.score.home }, select: { id: true, side: true } })
+        teamBySide.home = await tx.matchTeam.create({ data: { matchId, side: 'home', score: normalized.score.home }, select: { id: true, side: true } })
       }
       if (!teamBySide.away) {
-        teamBySide.away = await tx.matchTeam.create({ data: { matchId, side: 'away', score: payload.score.away }, select: { id: true, side: true } })
+        teamBySide.away = await tx.matchTeam.create({ data: { matchId, side: 'away', score: normalized.score.away }, select: { id: true, side: true } })
       }
 
       const matchPatch: any = {}
       if (payload.type !== undefined) matchPatch.type = payload.type
+      if (payload.played !== undefined) matchPatch.played = normalized.played
       if (payload.plateauId !== undefined) matchPatch.plateauId = payload.plateauId
       if (payload.opponentName !== undefined) matchPatch.opponentName = payload.opponentName
       if (Object.keys(matchPatch).length > 0) {
@@ -2694,8 +2712,8 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
       }
 
       await Promise.all([
-        tx.matchTeam.update({ where: { id: teamBySide.home.id }, data: { score: payload.score.home } }),
-        tx.matchTeam.update({ where: { id: teamBySide.away.id }, data: { score: payload.score.away } })
+        tx.matchTeam.update({ where: { id: teamBySide.home.id }, data: { score: normalized.score.home } }),
+        tx.matchTeam.update({ where: { id: teamBySide.away.id }, data: { score: normalized.score.away } })
       ])
 
       await tx.matchTeamPlayer.deleteMany({ where: { matchTeamId: { in: [teamBySide.home.id, teamBySide.away.id] } } })
@@ -2711,8 +2729,8 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
       }
 
       await tx.scorer.deleteMany({ where: { matchId } })
-      if (payload.buteurs.length) {
-        await tx.scorer.createMany({ data: payload.buteurs.map((b) => ({ matchId, playerId: b.playerId, side: b.side })) })
+      if (normalized.buteurs.length) {
+        await tx.scorer.createMany({ data: normalized.buteurs.map((b) => ({ matchId, playerId: b.playerId, side: b.side })) })
       }
 
       return existing.id

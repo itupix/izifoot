@@ -28,6 +28,7 @@ export type MatchType = 'ENTRAINEMENT' | 'PLATEAU';
 export interface Match {
   id: string;
   type: MatchType;
+  played: boolean;
   home: PlayerId[];
   away: PlayerId[];
   starters?: PlayerId[];
