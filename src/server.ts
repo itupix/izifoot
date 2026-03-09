@@ -946,10 +946,12 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '')
+    const parsedDetail = safeParseJSON(detail) as any
     const err: any = new Error(`OpenAI request failed (${response.status})`)
     err.code = 'OPENAI_REQUEST_FAILED'
     err.status = response.status
     err.detail = detail.slice(0, 500)
+    err.openai = parsedDetail?.error || null
     throw err
   }
 
@@ -3053,7 +3055,10 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
   const team = await prisma.team.findFirst({
-    where: applyScopeWhere(req.auth, { id: training.teamId }, { includeLegacyOwner: false }),
+    where: {
+      id: training.teamId,
+      ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+    },
     select: { id: true, name: true }
   })
   if (!team) return res.status(404).json({ error: 'Team not found' })
@@ -3069,6 +3074,12 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
   } catch (e: any) {
     if (e?.code === 'OPENAI_API_KEY_MISSING') {
       return res.status(503).json({ error: 'AI service unavailable (missing OPENAI_API_KEY)' })
+    }
+    if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.openai?.code === 'insufficient_quota') {
+      return res.status(503).json({ error: 'AI quota exceeded', code: 'INSUFFICIENT_QUOTA' })
+    }
+    if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.status === 401) {
+      return res.status(503).json({ error: 'AI authentication failed', code: 'OPENAI_AUTH_FAILED' })
     }
     console.error('[POST /trainings/:id/drills/generate-ai] OpenAI failed', e?.detail || e?.message || e)
     return res.status(502).json({ error: 'Failed to generate drills with AI' })
