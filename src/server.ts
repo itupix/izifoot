@@ -842,11 +842,11 @@ function inferAgeBandFromTeamName(teamName: string | null | undefined) {
 
 const aiGeneratedDrillSchema = z.object({
   t: z.string().min(1).max(100),
-  c: z.string().min(1).max(50),
+  c: z.string().min(1).max(500),
   m: z.number().int().min(6).max(40),
-  p: z.string().min(1).max(50),
-  s: z.string().min(1).max(300),
-  g: z.array(z.string().min(1).max(24)).max(3)
+  p: z.string().min(1).max(500),
+  s: z.string().min(1).max(2000),
+  g: z.array(z.string().min(1).max(64)).max(8)
 })
 
 const aiGeneratedBundleSchema = z.object({
@@ -878,12 +878,28 @@ function readTags(value: any) {
     .filter(Boolean)
 }
 
-function normalizeAiDrillValue(value: z.infer<typeof aiGeneratedDrillSchema>) {
+function buildDetailedDescription(raw: string, title: string, ageBand: string, objective: string) {
+  const compact = raw.trim().replace(/\s+/g, ' ').slice(0, 1400)
+  if (compact.length >= 260) return compact
+  const fallback = [
+    compact || `But: ${title}.`,
+    `Organisation: 1 zone de 20x20m, 4 à 8 joueurs actifs, rotation toutes les 60-90 secondes.`,
+    `Consignes: contrôle orienté, prise d'information avant réception, enchaînement en 2 touches max.`,
+    `Variables: réduire l'espace ou imposer un sens de jeu pour augmenter la difficulté en ${ageBand}.`,
+    `Vigilance: intensité maîtrisée, contacts contrôlés, rappeler l'objectif "${objective}".`,
+  ].join(' ')
+  return fallback.slice(0, 1400)
+}
+
+function normalizeAiDrillValue(
+  value: z.infer<typeof aiGeneratedDrillSchema>,
+  ctx: { ageBand: string, objective: string }
+) {
   const title = value.t.trim().slice(0, 100)
   const category = value.c.trim().slice(0, 50)
   const duration = Math.max(6, Math.min(40, Math.trunc(value.m)))
   const players = value.p.trim().slice(0, 50)
-  const description = value.s.trim().replace(/\s+/g, ' ').slice(0, 300)
+  const description = buildDetailedDescription(value.s, title, ctx.ageBand, ctx.objective).slice(0, 1200)
   const tags = Array.from(
     new Set(
       value.g
@@ -923,14 +939,37 @@ function shortNodeId() {
 function buildDefaultDiagramData(index: number) {
   const offset = (index % 5) * 14
   const startX = 88 + offset
+  const frameCount = 10
+  const playerId = shortNodeId()
+  const coneAId = shortNodeId()
+  const coneBId = shortNodeId()
+  const ballId = shortNodeId()
+  const supportId = shortNodeId()
+  const startY = 96
+  const endX = startX + 62
+  const endY = 60
+
+  const frames = Array.from({ length: frameCount }, (_unused, frameIndex) => {
+    const t = frameIndex / (frameCount - 1)
+    const px = startX + (endX - startX) * t
+    const py = startY + (endY - startY) * t
+    const supportX = startX + 10 + (endX - startX) * t * 0.6
+    const supportY = startY + 18 - (startY - endY) * t * 0.5
+    return {
+      items: [
+        { type: 'player', id: playerId, x: px, y: py, side: 'home', label: 'J1' },
+        { type: 'player', id: supportId, x: supportX, y: supportY, side: 'home', label: 'J2' },
+        { type: 'ball', id: ballId, x: px + 4, y: py - 3 },
+        { type: 'cone', id: coneAId, x: startX + 28, y: 84 },
+        { type: 'cone', id: coneBId, x: startX + 56, y: 64 },
+        { type: 'arrow', id: shortNodeId(), from: { x: px, y: py }, to: { x: px + 8, y: py - 6 } },
+      ]
+    }
+  })
+
   return {
-    items: [
-      { type: 'player', id: shortNodeId(), x: startX, y: 88, side: 'home', label: 'J1' },
-      { type: 'cone', id: shortNodeId(), x: startX + 28, y: 82 },
-      { type: 'cone', id: shortNodeId(), x: startX + 56, y: 62 },
-      { type: 'arrow', id: shortNodeId(), from: { x: startX + 4, y: 101 }, to: { x: startX + 30, y: 84 } },
-      { type: 'arrow', id: shortNodeId(), from: { x: startX + 30, y: 84 }, to: { x: startX + 58, y: 64 } },
-    ]
+    items: frames[0].items,
+    frames
   }
 }
 
@@ -961,7 +1000,7 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
       content: [
         {
           type: 'input_text',
-          text: `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression du plus simple au plus complexe; sécurité; descriptions actionnables; pas de doublons; m en minutes entières; g max 3 tags courts.`
+          text: `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s détaillée et opérationnelle (organisation, consignes, rotation, critères de réussite, vigilance), entre 320 et 900 caractères.`
         }
       ]
     }
@@ -982,7 +1021,7 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
         model,
         input,
         temperature: 0.4,
-        max_output_tokens: 900,
+        max_output_tokens: 1400,
         text: { format: { type: 'json_object' } }
       }),
       signal: controller.signal,
@@ -1021,7 +1060,7 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
 
   const strictParsed = aiGeneratedBundleSchema.safeParse(parsedJson)
   if (strictParsed.success) {
-    return strictParsed.data.d.map(normalizeAiDrillValue)
+    return strictParsed.data.d.map((drill) => normalizeAiDrillValue(drill, { ageBand: params.ageBand, objective: params.objective }))
   }
 
   const coerced = coerceOpenAiBundle(parsedJson)
@@ -1029,10 +1068,13 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
   if (!parsed.success) {
     const err: any = new Error('OpenAI response does not match expected schema')
     err.code = 'OPENAI_SCHEMA_MISMATCH'
+    err.raw = JSON.stringify(parsedJson).slice(0, 2000)
+    err.coerced = JSON.stringify(coerced).slice(0, 2000)
+    err.issues = parsed.error.issues.slice(0, 6)
     throw err
   }
 
-  return parsed.data.d.map(normalizeAiDrillValue)
+  return parsed.data.d.map((drill) => normalizeAiDrillValue(drill, { ageBand: params.ageBand, objective: params.objective }))
 }
 
 function normalizePublicTeamLabel(raw: string | null | undefined, fallback: string) {
@@ -3133,6 +3175,13 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
     }
     if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.status === 401) {
       return res.status(503).json({ error: 'AI authentication failed', code: 'OPENAI_AUTH_FAILED' })
+    }
+    if (e?.code === 'OPENAI_SCHEMA_MISMATCH') {
+      console.error('[POST /trainings/:id/drills/generate-ai] OpenAI schema mismatch', {
+        issues: e?.issues,
+        raw: e?.raw,
+        coerced: e?.coerced
+      })
     }
     console.error('[POST /trainings/:id/drills/generate-ai] OpenAI failed', e?.detail || e?.message || e)
     return res.status(502).json({ error: 'Failed to generate drills with AI' })
