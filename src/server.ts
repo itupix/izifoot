@@ -936,33 +936,69 @@ function shortNodeId() {
   return randomUUID().replace(/-/g, '').slice(0, 8)
 }
 
-function buildDefaultDiagramData(index: number) {
+function hashText(input: string) {
+  let hash = 0
+  for (let i = 0; i < input.length; i += 1) {
+    hash = ((hash << 5) - hash + input.charCodeAt(i)) | 0
+  }
+  return Math.abs(hash)
+}
+
+function buildDefaultDiagramData(index: number, drill: { title: string, category: string, tags: string[] }) {
   const offset = (index % 5) * 14
   const startX = 88 + offset
   const frameCount = 10
+  const seed = hashText(`${drill.title}|${drill.category}|${(drill.tags || []).join(',')}`)
+  const variant = (seed + index) % 4
+
   const playerId = shortNodeId()
+  const supportId = shortNodeId()
   const coneAId = shortNodeId()
   const coneBId = shortNodeId()
-  const ballId = shortNodeId()
-  const supportId = shortNodeId()
-  const startY = 96
-  const endX = startX + 62
+  const coneCId = shortNodeId()
+
+  const startY = 98
+  const endX = startX + 58
   const endY = 60
 
   const frames = Array.from({ length: frameCount }, (_unused, frameIndex) => {
     const t = frameIndex / (frameCount - 1)
-    const px = startX + (endX - startX) * t
-    const py = startY + (endY - startY) * t
-    const supportX = startX + 10 + (endX - startX) * t * 0.6
-    const supportY = startY + 18 - (startY - endY) * t * 0.5
+    let px = startX
+    let py = startY
+    let supportX = startX + 10
+    let supportY = startY + 18
+
+    if (variant === 0) {
+      px = startX + (endX - startX) * t
+      py = startY + (endY - startY) * t
+      supportX = startX + 6 + (endX - startX) * t * 0.55
+      supportY = startY + 20 - (startY - endY) * t * 0.45
+    } else if (variant === 1) {
+      px = startX + (endX - startX) * t
+      py = 84 + Math.sin(t * Math.PI * 2) * 16
+      supportX = startX + 18 + (endX - startX) * t * 0.7
+      supportY = 106 - Math.sin(t * Math.PI * 2) * 10
+    } else if (variant === 2) {
+      px = startX + (endX - startX) * t * 0.75
+      py = startY - 8 - t * 24
+      supportX = startX + 60 - t * 42
+      supportY = 62 + t * 30
+    } else {
+      px = startX + 10 + Math.sin(t * Math.PI) * 18
+      py = startY - t * 26
+      supportX = startX + 56 - Math.sin(t * Math.PI) * 18
+      supportY = startY - 18 + t * 18
+    }
+
     return {
       items: [
         { type: 'player', id: playerId, x: px, y: py, side: 'home', label: 'J1' },
         { type: 'player', id: supportId, x: supportX, y: supportY, side: 'home', label: 'J2' },
-        { type: 'ball', id: ballId, x: px + 4, y: py - 3 },
-        { type: 'cone', id: coneAId, x: startX + 28, y: 84 },
-        { type: 'cone', id: coneBId, x: startX + 56, y: 64 },
-        { type: 'arrow', id: shortNodeId(), from: { x: px, y: py }, to: { x: px + 8, y: py - 6 } },
+        { type: 'cone', id: coneAId, x: startX + (variant === 3 ? 14 : 26), y: 84 },
+        { type: 'cone', id: coneBId, x: startX + 56, y: variant === 1 ? 72 : 64 },
+        { type: 'cone', id: coneCId, x: startX + 36, y: variant === 2 ? 52 : 102 },
+        { type: 'arrow', id: shortNodeId(), from: { x: px, y: py }, to: { x: px + (variant === 2 ? 5 : 8), y: py - 6 } },
+        { type: 'arrow', id: shortNodeId(), from: { x: supportX, y: supportY }, to: { x: px, y: py } },
       ]
     }
   })
@@ -3217,7 +3253,7 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
         order: nextOrder++,
       })
 
-      const diagramData = buildDefaultDiagramData(index)
+      const diagramData = buildDefaultDiagramData(index, item)
       const diagram = await diagramCreateForUser(tx, req.auth, {
         drillId: drill.id,
         title: `${drill.title} - Diagramme`,
