@@ -952,15 +952,132 @@ function normalizeFrameSeries(frames: Array<{ p1: [number, number], p2: [number,
 
 function buildDetailedDescription(raw: string, title: string, ageBand: string, objective: string) {
   const compact = raw.trim().replace(/\s+/g, ' ').slice(0, 1400)
-  if (compact.length >= 260) return compact
+  const hasSections =
+    /organisation\s*:|consignes?\s*:|variables?\s*:|vigilance\s*:/i.test(compact)
+
+  if (compact.length >= 420 && hasSections) return compact
+
   const fallback = [
-    compact || `But: ${title}.`,
-    `Organisation: 1 zone de 20x20m, 4 à 8 joueurs actifs, rotation toutes les 60-90 secondes.`,
-    `Consignes: contrôle orienté, prise d'information avant réception, enchaînement en 2 touches max.`,
-    `Variables: réduire l'espace ou imposer un sens de jeu pour augmenter la difficulté en ${ageBand}.`,
-    `Vigilance: intensité maîtrisée, contacts contrôlés, rappeler l'objectif "${objective}".`,
+    `Organisation: ${compact || `atelier "${title}"`} sur 20x20m, 2 couloirs de jeu, rotation toutes les 60-90 secondes, groupes équilibrés pour ${ageBand}.`,
+    `Consignes: contrôler orienté, annoncer l'information avant réception, enchaîner en 2 touches max, se replacer immédiatement après action.`,
+    `Déroulé: démarrage à faible intensité (2 min), montée en rythme (4-6 min), situation opposée finale avec score/objectif lié à "${objective}".`,
+    `Variables: réduire l'espace, ajouter un défenseur, imposer un sens de circulation ou une zone de finition pour augmenter la complexité.`,
+    `Vigilance: distances de sécurité, contacts maîtrisés, qualité des appuis et correction courte entre rotations.`,
   ].join(' ')
   return fallback.slice(0, 1400)
+}
+
+function sentenceize(value: string) {
+  const compact = value.trim().replace(/\s+/g, ' ')
+  if (!compact) return ''
+  return /[.!?]$/.test(compact) ? compact : `${compact}.`
+}
+
+function extractSection(content: string, section: string) {
+  const lower = content.toLowerCase()
+  const sectionLabel = `${section.toLowerCase()}:`
+  const start = lower.indexOf(sectionLabel)
+  if (start < 0) return ''
+  const after = start + sectionLabel.length
+  const nextCandidates = ['organisation:', 'consignes:', 'deroule:', 'déroulé:', 'variables:', 'vigilance:']
+    .map((label) => lower.indexOf(label, after))
+    .filter((index) => index >= 0)
+  const end = nextCandidates.length ? Math.min(...nextCandidates) : content.length
+  return content.slice(after, end).trim()
+}
+
+function formatDrillDescription(raw: string) {
+  const compact = raw.trim().replace(/\r\n/g, '\n').replace(/\s+/g, ' ')
+  const normalized = compact
+    .replace(/déroulé\s*:/gi, 'Deroule:')
+    .replace(/organisation\s*:/gi, 'Organisation:')
+    .replace(/consignes?\s*:/gi, 'Consignes:')
+    .replace(/variables?\s*:/gi, 'Variables:')
+    .replace(/vigilance\s*:/gi, 'Vigilance:')
+
+  const organisation = extractSection(normalized, 'Organisation')
+  const consignes = extractSection(normalized, 'Consignes')
+  const deroule = extractSection(normalized, 'Deroule')
+  const variables = extractSection(normalized, 'Variables')
+  const vigilance = extractSection(normalized, 'Vigilance')
+
+  if (organisation || consignes || deroule || variables || vigilance) {
+    const lines = [
+      organisation ? `**Organisation :** ${sentenceize(organisation)}` : '',
+      consignes ? `**Consignes :** ${sentenceize(consignes)}` : '',
+      deroule ? `**Déroulé :** ${sentenceize(deroule)}` : '',
+      variables ? `**Variables :** ${sentenceize(variables)}` : '',
+      vigilance ? `**Vigilance :** ${sentenceize(vigilance)}` : '',
+    ].filter(Boolean)
+    return lines.join('\n')
+  }
+
+  // Fallback: split dense text into digestible action lines.
+  const parts = compact
+    .split(/[.!?]\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .slice(0, 5)
+
+  const fallbackLines = [
+    parts[0] ? `**Organisation :** ${sentenceize(parts[0])}` : '',
+    parts[1] ? `**Consignes :** ${sentenceize(parts[1])}` : '',
+    parts[2] ? `**Déroulé :** ${sentenceize(parts[2])}` : '',
+    parts[3] ? `**Variables :** ${sentenceize(parts[3])}` : '',
+    parts[4] ? `**Vigilance :** ${sentenceize(parts[4])}` : '',
+  ].filter(Boolean)
+
+  return fallbackLines.join('\n')
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function toDrillDescriptionHtml(value: string) {
+  const lines = value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  if (!lines.length) return ''
+
+  return lines.map((line) => {
+    const md = line.match(/^\*\*(.+?)\*\*\s*(.*)$/)
+    if (md) {
+      return `<p><strong>${escapeHtml(md[1].trim())}</strong> ${escapeHtml(md[2])}</p>`
+    }
+    const plain = line.match(/^([^:]+)\s*:\s*(.*)$/)
+    if (plain) {
+      return `<p><strong>${escapeHtml(plain[1].trim())} :</strong> ${escapeHtml(plain[2])}</p>`
+    }
+    return `<p>${escapeHtml(line)}</p>`
+  }).join('')
+}
+
+function normalizeIncomingDescription(raw: string) {
+  const noHtml = raw.replace(/<[^>]*>/g, ' ')
+  const noMarkdown = noHtml
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+  return noMarkdown.replace(/\s+/g, ' ').trim()
+}
+
+function withDrillDescriptionHtml<T extends { description?: string | null }>(drill: T): T & { descriptionHtml: string } {
+  const raw = typeof drill?.description === 'string' ? drill.description : ''
+  const normalizedRaw = normalizeIncomingDescription(raw)
+  const formatted = formatDrillDescription(normalizedRaw)
+  return {
+    ...drill,
+    description: formatted,
+    descriptionHtml: toDrillDescriptionHtml(formatted),
+  }
 }
 
 function normalizeAiDrillValue(
@@ -1012,6 +1129,8 @@ function normalizeAiDrillValue(
   const descriptionWithPlan = sequence
     ? `${description} Séquence: ${sequence}.`
     : description
+  const formattedDescription = formatDrillDescription(descriptionWithPlan).slice(0, 1200)
+  const descriptionHtml = toDrillDescriptionHtml(formattedDescription)
   const visualCones = (value.v?.c || []).map(clampPoint).slice(0, 4)
   const visualFramesRaw = normalizeFrameSeries(
     (value.v?.f || []).map((frame) => ({
@@ -1030,7 +1149,8 @@ function normalizeAiDrillValue(
     category,
     duration,
     players,
-    description: descriptionWithPlan.slice(0, 1200),
+    description: formattedDescription,
+    descriptionHtml,
     tags,
     animation,
     tacticalPlan,
@@ -1325,7 +1445,10 @@ function buildDefaultDiagramData(
   return scaleDiagramToViewport(raw)
 }
 
-async function generateDrillsWithOpenAI(params: { objective: string, ageBand: string, teamName: string }) {
+async function generateDrillsWithOpenAI(
+  params: { objective: string, ageBand: string, teamName: string },
+  opts: { includeVisualPlan?: boolean } = {}
+) {
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {
     const err: any = new Error('OPENAI_API_KEY is missing')
@@ -1337,13 +1460,20 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
   const objective = params.objective.trim()
   const ageBand = params.ageBand.trim()
   const teamName = params.teamName.trim()
+  const includeVisualPlan = !!opts.includeVisualPlan
+  const systemFormat = includeVisualPlan
+    ? 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":[""],"v":{"c":[[20,30],[80,50],[45,80]],"f":[{"p1":[10,70],"p2":[30,80],"b":[10,70]}]},"k":{"f":[{"a":"PASS","t":[30,60]},{"a":"DRIBBLE","t":[60,45]},{"a":"FINISH","t":[85,35]}]},"a":{"p":[[0,0],[100,100]],"s":[[0,0],[100,100]],"c":[[20,30],[80,60],[40,80]]}}]} avec exactement 5 exercices.'
+    : 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":[""]}]} avec exactement 5 exercices.'
+  const userConstraints = includeVisualPlan
+    ? `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères; k obligatoire: 3 à 5 phases ordonnées (a+t) cohérentes avec la description; v obligatoire: 10 frames (f) avec p1/p2/b en 0..100 + 2-3 cônes (c); les 5 exercices doivent avoir des schémas visuels nettement différents (zones, trajectoires et orientation).`
+    : `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères.`
   const input = [
     {
       role: 'system',
       content: [
         {
           type: 'input_text',
-          text: 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":[""],"v":{"c":[[20,30],[80,50],[45,80]],"f":[{"p1":[10,70],"p2":[30,80],"b":[10,70]}]},"k":{"f":[{"a":"PASS","t":[30,60]},{"a":"DRIBBLE","t":[60,45]},{"a":"FINISH","t":[85,35]}]},"a":{"p":[[0,0],[100,100]],"s":[[0,0],[100,100]],"c":[[20,30],[80,60],[40,80]]}}]} avec exactement 5 exercices.'
+          text: systemFormat
         }
       ]
     },
@@ -1352,7 +1482,7 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
       content: [
         {
           type: 'input_text',
-          text: `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s détaillée et opérationnelle (organisation, consignes, rotation, critères de réussite, vigilance), entre 320 et 900 caractères; k obligatoire: 3 à 5 phases ordonnées (a+t) cohérentes avec la description; v obligatoire: 10 frames (f) avec p1/p2/b en 0..100 + 2-3 cônes (c); les 5 exercices doivent avoir des schémas visuels nettement différents (zones, trajectoires et orientation).`
+          text: userConstraints
         }
       ]
     }
@@ -1374,7 +1504,7 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
           model,
           input,
           temperature: 0.4,
-          max_output_tokens: 2800,
+          max_output_tokens: includeVisualPlan ? 2800 : 1400,
           text: { format: { type: 'json_object' } }
         }),
         signal: controller.signal,
@@ -1435,6 +1565,145 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
   }
 
   return parsed.data.d.map((drill) => normalizeAiDrillValue(drill, { ageBand: params.ageBand, objective: params.objective }))
+}
+
+const aiVisualPlanSchema = z.object({
+  c: z.array(z.tuple([z.number(), z.number()])).min(2).max(12),
+  f: z.array(z.object({
+    p1: z.tuple([z.number(), z.number()]),
+    p2: z.tuple([z.number(), z.number()]),
+    b: z.tuple([z.number(), z.number()]).optional(),
+  })).min(3).max(12)
+})
+
+function coerceVisualPlan(raw: any) {
+  const root = raw && typeof raw === 'object' ? raw : {}
+  return {
+    c: readPointPairs(root?.c ?? root?.cones ?? root?.visual?.c ?? root?.v?.c),
+    f: readVisualFrames(root?.f ?? root?.frames ?? root?.visual?.f ?? root?.v?.f),
+  }
+}
+
+async function generateVisualPlanWithOpenAI(params: {
+  title: string,
+  category: string,
+  description: string,
+  tags: string[],
+  ageBand: string,
+  objective?: string,
+}) {
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) {
+    const err: any = new Error('OPENAI_API_KEY is missing')
+    err.code = 'OPENAI_API_KEY_MISSING'
+    throw err
+  }
+
+  const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini'
+  const input = [
+    {
+      role: 'system',
+      content: [
+        {
+          type: 'input_text',
+          text: 'Tu crées uniquement un plan visuel de diagramme football jeunes. Réponds en JSON compact valide sans markdown. Format strict: {"c":[[20,30],[80,50],[45,80]],"f":[{"p1":[10,70],"p2":[30,80],"b":[10,70]}]}.'
+        }
+      ]
+    },
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: `Exercice:${params.title}\nCategorie:${params.category}\nAge:${params.ageBand}\nObjectif:${params.objective || params.title}\nTags:${params.tags.join(',')}\nDescription:${params.description}\nContraintes: produire 10 frames cohérentes avec le texte; p1=joueur principal, p2=soutien; b=ballon; coordonnées 0..100; trajectoires lisibles; schéma différent des exercices classiques (éviter ligne droite simple).`
+        }
+      ]
+    }
+  ]
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 15000)
+  let response: Response
+  try {
+    try {
+      response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          input,
+          temperature: 0.3,
+          max_output_tokens: 1100,
+          text: { format: { type: 'json_object' } }
+        }),
+        signal: controller.signal,
+      })
+    } catch (e: any) {
+      const err: any = new Error('OpenAI network request failed')
+      err.code = e?.name === 'AbortError' ? 'OPENAI_TIMEOUT' : 'OPENAI_NETWORK_ERROR'
+      err.detail = e?.message || String(e)
+      throw err
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    const parsedDetail = safeParseJSON(detail) as any
+    const err: any = new Error(`OpenAI request failed (${response.status})`)
+    err.code = 'OPENAI_REQUEST_FAILED'
+    err.status = response.status
+    err.detail = detail.slice(0, 500)
+    err.openai = parsedDetail?.error || null
+    throw err
+  }
+
+  const payload: any = await response.json()
+  const rawText = typeof payload?.output_text === 'string'
+    ? payload.output_text
+    : Array.isArray(payload?.output)
+      ? payload.output
+        .flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
+        .map((chunk: any) => chunk?.text || '')
+        .join('\n')
+      : ''
+
+  const parsedJson = safeParseJSON(rawText)
+  if (!parsedJson) {
+    const err: any = new Error('OpenAI response is not valid JSON')
+    err.code = 'OPENAI_INVALID_JSON'
+    err.raw = String(rawText || '').slice(0, 2000)
+    throw err
+  }
+
+  const strict = aiVisualPlanSchema.safeParse(parsedJson)
+  const value = strict.success ? strict.data : coerceVisualPlan(parsedJson)
+  const parsed = aiVisualPlanSchema.safeParse(value)
+  if (!parsed.success) {
+    const err: any = new Error('OpenAI visual response schema mismatch')
+    err.code = 'OPENAI_SCHEMA_MISMATCH'
+    err.raw = JSON.stringify(parsedJson).slice(0, 2000)
+    err.coerced = JSON.stringify(value).slice(0, 2000)
+    err.issues = parsed.error.issues.slice(0, 6)
+    throw err
+  }
+
+  const clampPoint = ([x, y]: [number, number]): [number, number] => [
+    Math.max(0, Math.min(100, Math.round(x))),
+    Math.max(0, Math.min(100, Math.round(y))),
+  ]
+  return {
+    c: parsed.data.c.map(clampPoint).slice(0, 4),
+    f: normalizeFrameSeries(parsed.data.f.map((frame) => ({
+      p1: clampPoint(frame.p1),
+      p2: clampPoint(frame.p2),
+      b: frame.b ? clampPoint(frame.b) : clampPoint(frame.p1),
+    }))).slice(0, 10),
+  }
 }
 
 function summarizeErrorForLog(error: any) {
@@ -2244,11 +2513,13 @@ app.get('/drills', authMiddleware, async (req: any, res) => {
   }
   if (cat) items = items.filter(d => d.category.toLowerCase() === cat)
   if (tag) items = items.filter(d => d.tags.map((t: string) => t.toLowerCase()).includes(tag))
+  const renderedItems = items.map((d: any) => withDrillDescriptionHtml(d))
+  const renderedCatalog = catalog.map((d: any) => withDrillDescriptionHtml(d))
 
   res.json({
-    items,
-    categories: Array.from(new Set(catalog.map(d => d.category))).sort(),
-    tags: Array.from(new Set(catalog.flatMap(d => d.tags))).sort()
+    items: renderedItems,
+    categories: Array.from(new Set(renderedCatalog.map(d => d.category))).sort(),
+    tags: Array.from(new Set(renderedCatalog.flatMap(d => d.tags))).sort()
   })
 })
 
@@ -2256,7 +2527,7 @@ app.get('/drills/:id', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
   const d = await drillFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
   if (!d) return res.status(404).json({ error: 'Not found' })
-  res.json(d)
+  res.json(withDrillDescriptionHtml(d))
 })
 
 app.put('/drills/:id', authMiddleware, async (req: any, res) => {
@@ -2286,7 +2557,7 @@ app.put('/drills/:id', authMiddleware, async (req: any, res) => {
     where: { id: existing.id },
     data: patch
   })
-  res.json(updated)
+  res.json(withDrillDescriptionHtml(updated))
 })
 
 app.delete('/drills/:id', authMiddleware, async (req: any, res) => {
@@ -2343,7 +2614,7 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
       description: parsed.data.description,
       tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
     })
-    res.status(201).json(drill)
+    res.status(201).json(withDrillDescriptionHtml(drill))
   } catch (e: any) {
     if (e?.code === 'DRILL_STORAGE_UNAVAILABLE') {
       return res.status(503).json({ error: 'Drill storage unavailable' })
@@ -3517,7 +3788,8 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
   if (!training) return res.status(404).json({ error: 'Training not found' })
 
   const schema = z.object({
-    objective: z.string().min(10).max(400)
+    objective: z.string().min(10).max(400),
+    includeDiagrams: z.boolean().optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
@@ -3532,6 +3804,7 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
   if (!team) return res.status(404).json({ error: 'Team not found' })
 
   const ageBand = inferAgeBandFromTeamName(team.name)
+  const includeDiagrams = parsed.data.includeDiagrams === true
   const aiRequestId = randomUUID().slice(0, 8)
   const aiStartAt = Date.now()
   let generated: Array<{
@@ -3540,6 +3813,7 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
     duration: number,
     players: string,
     description: string,
+    descriptionHtml: string,
     tags: string[],
     animation?: { p?: Array<[number, number]>, s?: Array<[number, number]>, c?: Array<[number, number]> },
     tacticalPlan?: { phases?: Array<{ a: string, t: [number, number] }> },
@@ -3550,7 +3824,7 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
       objective: parsed.data.objective,
       ageBand,
       teamName: team.name || 'Equipe',
-    })
+    }, { includeVisualPlan: false })
     console.log('[POST /trainings/:id/drills/generate-ai] OpenAI success', {
       requestId: aiRequestId,
       durationMs: Date.now() - aiStartAt,
@@ -3617,18 +3891,21 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
         order: nextOrder++,
       })
 
-      const diagramData = buildDefaultDiagramData(index, item)
-      const diagram = await diagramCreateForUser(tx, req.auth, {
-        drillId: drill.id,
-        title: `${drill.title} - Diagramme`,
-        data: JSON.stringify(diagramData),
+      items.push({
+        drill: { ...drill, descriptionHtml: item.descriptionHtml },
+        trainingDrill,
+        diagram: null as any
       })
 
-      items.push({
-        drill,
-        trainingDrill,
-        diagram: { ...diagram, data: diagramData }
-      })
+      if (includeDiagrams) {
+        const diagramData = buildDefaultDiagramData(index, item)
+        const diagram = await diagramCreateForUser(tx, req.auth, {
+          drillId: drill.id,
+          title: `${drill.title} - Diagramme`,
+          data: JSON.stringify(diagramData),
+        })
+        items[items.length - 1].diagram = { ...diagram, data: diagramData }
+      }
     }
     return items
   })
@@ -3636,6 +3913,7 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
   res.status(201).json({
     objective: parsed.data.objective,
     ageBand,
+    includeDiagrams,
     count: created.length,
     items: created
   })
@@ -3648,7 +3926,7 @@ app.get('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   if (!training) return res.status(404).json({ error: 'Training not found' })
   const rows = await listTrainingDrillsInOrder(prisma, req.auth, trainingId)
   const catalog = await drillFindManyForUser(prisma, req.auth, { orderBy: { createdAt: 'asc' } })
-  const catalogById = new Map(catalog.map((drill: any) => [drill.id, drill]))
+  const catalogById = new Map(catalog.map((drill: any) => [drill.id, withDrillDescriptionHtml(drill)]))
   const items = rows.map(r => {
     const meta = catalogById.get(r.drillId) || null
     return { ...r, meta }
@@ -3793,6 +4071,142 @@ app.delete('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req:
 })
 
 // ---- Diagrams (exercices) ----
+app.post('/drills/:id/diagrams/generate-ai', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const drillId = req.params.id
+  const drill = await drillFindFirstForUser(prisma, req.auth, { where: { id: drillId } })
+  if (!drill) return res.status(404).json({ error: 'Drill not found' })
+
+  const schema = z.object({
+    objective: z.string().min(3).max(400).optional(),
+  })
+  const parsed = schema.safeParse(req.body || {})
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  let ageBand = 'U9-U11'
+  if (drill.teamId) {
+    const team = await prisma.team.findFirst({
+      where: { id: drill.teamId, ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}) },
+      select: { name: true }
+    })
+    if (team?.name) ageBand = inferAgeBandFromTeamName(team.name)
+  }
+
+  const requestId = randomUUID().slice(0, 8)
+  const startAt = Date.now()
+  try {
+    const visualPlan = await generateVisualPlanWithOpenAI({
+      title: drill.title,
+      category: drill.category,
+      description: drill.description,
+      tags: Array.isArray(drill.tags) ? drill.tags : [],
+      ageBand,
+      objective: parsed.data.objective,
+    })
+
+    const diagramData = buildDefaultDiagramData(0, {
+      title: drill.title,
+      category: drill.category,
+      tags: Array.isArray(drill.tags) ? drill.tags : [],
+      visualPlan
+    })
+    const created = await diagramCreateForUser(prisma, req.auth, {
+      drillId: drill.id,
+      title: `${drill.title} - Diagramme IA`,
+      data: JSON.stringify(diagramData),
+    })
+    console.log('[POST /drills/:id/diagrams/generate-ai] OpenAI success', {
+      requestId,
+      durationMs: Date.now() - startAt,
+      drillId: drill.id,
+    })
+    return res.status(201).json({ ...created, data: diagramData })
+  } catch (e: any) {
+    console.error('[POST /drills/:id/diagrams/generate-ai] OpenAI failed', {
+      requestId,
+      durationMs: Date.now() - startAt,
+      ...summarizeErrorForLog(e),
+    })
+    if (e?.code === 'OPENAI_API_KEY_MISSING') return res.status(503).json({ error: 'AI service unavailable (missing OPENAI_API_KEY)' })
+    if (e?.code === 'OPENAI_TIMEOUT') return res.status(504).json({ error: 'AI timeout', code: 'OPENAI_TIMEOUT' })
+    if (e?.code === 'OPENAI_NETWORK_ERROR') return res.status(503).json({ error: 'AI network error', code: 'OPENAI_NETWORK_ERROR' })
+    if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.openai?.code === 'insufficient_quota') return res.status(503).json({ error: 'AI quota exceeded', code: 'INSUFFICIENT_QUOTA' })
+    if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.status === 401) return res.status(503).json({ error: 'AI authentication failed', code: 'OPENAI_AUTH_FAILED' })
+    if (e?.code === 'OPENAI_INVALID_JSON') return res.status(502).json({ error: 'AI returned invalid JSON', code: 'OPENAI_INVALID_JSON' })
+    if (e?.code === 'OPENAI_SCHEMA_MISMATCH') return res.status(502).json({ error: 'AI response schema mismatch', code: 'OPENAI_SCHEMA_MISMATCH' })
+    return res.status(502).json({ error: 'Failed to generate diagram with AI' })
+  }
+})
+
+app.post('/training-drills/:id/diagrams/generate-ai', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const trainingDrillId = req.params.id
+  const trainingDrill = await trainingDrillFindFirstForUser(prisma, req.auth, { where: { id: trainingDrillId } })
+  if (!trainingDrill) return res.status(404).json({ error: 'Training drill not found' })
+  const drill = await drillFindFirstForUser(prisma, req.auth, { where: { id: trainingDrill.drillId } })
+  if (!drill) return res.status(404).json({ error: 'Drill not found' })
+
+  const schema = z.object({
+    objective: z.string().min(3).max(400).optional(),
+  })
+  const parsed = schema.safeParse(req.body || {})
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  let ageBand = 'U9-U11'
+  if (trainingDrill.teamId || drill.teamId) {
+    const team = await prisma.team.findFirst({
+      where: { id: trainingDrill.teamId || drill.teamId, ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}) },
+      select: { name: true }
+    })
+    if (team?.name) ageBand = inferAgeBandFromTeamName(team.name)
+  }
+
+  const requestId = randomUUID().slice(0, 8)
+  const startAt = Date.now()
+  try {
+    const visualPlan = await generateVisualPlanWithOpenAI({
+      title: drill.title,
+      category: drill.category,
+      description: drill.description,
+      tags: Array.isArray(drill.tags) ? drill.tags : [],
+      ageBand,
+      objective: parsed.data.objective,
+    })
+
+    const diagramData = buildDefaultDiagramData(0, {
+      title: drill.title,
+      category: drill.category,
+      tags: Array.isArray(drill.tags) ? drill.tags : [],
+      visualPlan
+    })
+    const created = await diagramCreateForUser(prisma, req.auth, {
+      trainingDrillId: trainingDrill.id,
+      title: `${drill.title} - Diagramme IA`,
+      data: JSON.stringify(diagramData),
+    })
+    console.log('[POST /training-drills/:id/diagrams/generate-ai] OpenAI success', {
+      requestId,
+      durationMs: Date.now() - startAt,
+      trainingDrillId: trainingDrill.id,
+    })
+    return res.status(201).json({ ...created, data: diagramData })
+  } catch (e: any) {
+    console.error('[POST /training-drills/:id/diagrams/generate-ai] OpenAI failed', {
+      requestId,
+      durationMs: Date.now() - startAt,
+      ...summarizeErrorForLog(e),
+    })
+    if (e?.code === 'OPENAI_API_KEY_MISSING') return res.status(503).json({ error: 'AI service unavailable (missing OPENAI_API_KEY)' })
+    if (e?.code === 'OPENAI_TIMEOUT') return res.status(504).json({ error: 'AI timeout', code: 'OPENAI_TIMEOUT' })
+    if (e?.code === 'OPENAI_NETWORK_ERROR') return res.status(503).json({ error: 'AI network error', code: 'OPENAI_NETWORK_ERROR' })
+    if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.openai?.code === 'insufficient_quota') return res.status(503).json({ error: 'AI quota exceeded', code: 'INSUFFICIENT_QUOTA' })
+    if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.status === 401) return res.status(503).json({ error: 'AI authentication failed', code: 'OPENAI_AUTH_FAILED' })
+    if (e?.code === 'OPENAI_INVALID_JSON') return res.status(502).json({ error: 'AI returned invalid JSON', code: 'OPENAI_INVALID_JSON' })
+    if (e?.code === 'OPENAI_SCHEMA_MISMATCH') return res.status(502).json({ error: 'AI response schema mismatch', code: 'OPENAI_SCHEMA_MISMATCH' })
+    return res.status(502).json({ error: 'Failed to generate diagram with AI' })
+  }
+})
+
 app.get('/drills/:id/diagrams', authMiddleware, async (req: any, res) => {
   const drillId = req.params.id
   const rows = await diagramFindManyForUser(prisma, req.auth, { where: { drillId }, orderBy: { updatedAt: 'desc' } })
