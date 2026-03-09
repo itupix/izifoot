@@ -771,6 +771,151 @@ function safeParseJSON(s) {
         return null;
     }
 }
+function slugifyDrillTitle(title) {
+    return title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
+async function buildUniqueDrillId(db, scopeOrUserId, title) {
+    const base = slugifyDrillTitle(title);
+    let id = `d_${base || 'new'}`;
+    let i = 1;
+    while (await drillFindFirstForUser(db, scopeOrUserId, { where: { id } })) {
+        id = `d_${base || 'new'}_${i++}`;
+    }
+    return id;
+}
+function inferAgeBandFromTeamName(teamName) {
+    const raw = String(teamName || '');
+    const m = raw.match(/\bU\s*([0-9]{1,2})\b/i);
+    if (!m)
+        return 'U9-U11';
+    const age = Number(m[1]);
+    if (!Number.isFinite(age))
+        return 'U9-U11';
+    return `U${age}`;
+}
+const aiGeneratedDrillSchema = zod_1.z.object({
+    t: zod_1.z.string().min(1).max(100),
+    c: zod_1.z.string().min(1).max(50),
+    m: zod_1.z.number().int().min(6).max(40),
+    p: zod_1.z.string().min(1).max(50),
+    s: zod_1.z.string().min(1).max(300),
+    g: zod_1.z.array(zod_1.z.string().min(1).max(24)).max(3)
+});
+const aiGeneratedBundleSchema = zod_1.z.object({
+    d: zod_1.z.array(aiGeneratedDrillSchema).length(5)
+});
+function normalizeAiDrillValue(value) {
+    const title = value.t.trim().slice(0, 100);
+    const category = value.c.trim().slice(0, 50);
+    const duration = Math.max(6, Math.min(40, Math.trunc(value.m)));
+    const players = value.p.trim().slice(0, 50);
+    const description = value.s.trim().replace(/\s+/g, ' ').slice(0, 300);
+    const tags = Array.from(new Set(value.g
+        .map((tag) => tag.trim().toLowerCase().slice(0, 24))
+        .filter(Boolean))).slice(0, 3);
+    return { title, category, duration, players, description, tags };
+}
+function shortNodeId() {
+    return (0, crypto_1.randomUUID)().replace(/-/g, '').slice(0, 8);
+}
+function buildDefaultDiagramData(index) {
+    const offset = (index % 5) * 14;
+    const startX = 88 + offset;
+    return {
+        items: [
+            { type: 'player', id: shortNodeId(), x: startX, y: 88, side: 'home', label: 'J1' },
+            { type: 'cone', id: shortNodeId(), x: startX + 28, y: 82 },
+            { type: 'cone', id: shortNodeId(), x: startX + 56, y: 62 },
+            { type: 'arrow', id: shortNodeId(), from: { x: startX + 4, y: 101 }, to: { x: startX + 30, y: 84 } },
+            { type: 'arrow', id: shortNodeId(), from: { x: startX + 30, y: 84 }, to: { x: startX + 58, y: 64 } },
+        ]
+    };
+}
+async function generateDrillsWithOpenAI(params) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+        const err = new Error('OPENAI_API_KEY is missing');
+        err.code = 'OPENAI_API_KEY_MISSING';
+        throw err;
+    }
+    const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
+    const objective = params.objective.trim();
+    const ageBand = params.ageBand.trim();
+    const teamName = params.teamName.trim();
+    const input = [
+        {
+            role: 'system',
+            content: [
+                {
+                    type: 'input_text',
+                    text: 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":["",""]}]} avec exactement 5 exercices.'
+                }
+            ]
+        },
+        {
+            role: 'user',
+            content: [
+                {
+                    type: 'input_text',
+                    text: `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression du plus simple au plus complexe; sécurité; descriptions actionnables; pas de doublons; m en minutes entières; g max 3 tags courts.`
+                }
+            ]
+        }
+    ];
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let response;
+    try {
+        response = await fetch('https://api.openai.com/v1/responses', {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                model,
+                input,
+                temperature: 0.4,
+                max_output_tokens: 900,
+                text: { format: { type: 'json_object' } }
+            }),
+            signal: controller.signal,
+        });
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+    if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        const err = new Error(`OpenAI request failed (${response.status})`);
+        err.code = 'OPENAI_REQUEST_FAILED';
+        err.status = response.status;
+        err.detail = detail.slice(0, 500);
+        throw err;
+    }
+    const payload = await response.json();
+    const rawText = typeof payload?.output_text === 'string'
+        ? payload.output_text
+        : Array.isArray(payload?.output)
+            ? payload.output
+                .flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+                .map((chunk) => chunk?.text || '')
+                .join('\n')
+            : '';
+    const parsedJson = safeParseJSON(rawText);
+    if (!parsedJson) {
+        const err = new Error('OpenAI response is not valid JSON');
+        err.code = 'OPENAI_INVALID_JSON';
+        throw err;
+    }
+    const parsed = aiGeneratedBundleSchema.safeParse(parsedJson);
+    if (!parsed.success) {
+        const err = new Error('OpenAI response does not match expected schema');
+        err.code = 'OPENAI_SCHEMA_MISMATCH';
+        throw err;
+    }
+    return parsed.data.d.map(normalizeAiDrillValue);
+}
 function normalizePublicTeamLabel(raw, fallback) {
     const normalized = String(raw || '').trim().toUpperCase();
     if (!normalized)
@@ -1643,13 +1788,7 @@ app.post('/drills', authMiddleware, async (req, res) => {
     catch (e) {
         return res.status(400).json({ error: e.message });
     }
-    // readable id, unique against built-in drills and persisted custom drills
-    const base = parsed.data.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-    let id = `d_${base || 'new'}`;
-    let i = 1;
-    while (await drillFindFirstForUser(prisma, req.auth, { where: { id } })) {
-        id = `d_${base}_${i++}`;
-    }
+    const id = await buildUniqueDrillId(prisma, req.auth, parsed.data.title);
     try {
         const drill = await drillCreateForUser(prisma, req.auth, {
             id,
@@ -2852,6 +2991,89 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
     res.json({ ok: true, createdCount: createdIds.length, matches });
 });
 // ---- Training drills (exercices attachés à une séance) ----
+app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const trainingId = req.params.id;
+    const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: trainingId } });
+    if (!training)
+        return res.status(404).json({ error: 'Training not found' });
+    const schema = zod_1.z.object({
+        objective: zod_1.z.string().min(10).max(400)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const team = await prisma.team.findFirst({
+        where: applyScopeWhere(req.auth, { id: training.teamId }, { includeLegacyOwner: false }),
+        select: { id: true, name: true }
+    });
+    if (!team)
+        return res.status(404).json({ error: 'Team not found' });
+    const ageBand = inferAgeBandFromTeamName(team.name);
+    let generated;
+    try {
+        generated = await generateDrillsWithOpenAI({
+            objective: parsed.data.objective,
+            ageBand,
+            teamName: team.name || 'Equipe',
+        });
+    }
+    catch (e) {
+        if (e?.code === 'OPENAI_API_KEY_MISSING') {
+            return res.status(503).json({ error: 'AI service unavailable (missing OPENAI_API_KEY)' });
+        }
+        console.error('[POST /trainings/:id/drills/generate-ai] OpenAI failed', e?.detail || e?.message || e);
+        return res.status(502).json({ error: 'Failed to generate drills with AI' });
+    }
+    const created = await prisma.$transaction(async (tx) => {
+        const existingRows = await trainingDrillFindManyForUser(tx, req.auth, {
+            where: { trainingId },
+            select: { order: true }
+        });
+        let nextOrder = existingRows.reduce((max, row) => Math.max(max, row.order ?? -1), -1) + 1;
+        const items = [];
+        for (const [index, item] of generated.entries()) {
+            const id = await buildUniqueDrillId(tx, req.auth, item.title);
+            const drill = await drillCreateForUser(tx, req.auth, {
+                id,
+                clubId: training.clubId,
+                teamId: training.teamId,
+                title: item.title,
+                category: item.category,
+                duration: item.duration,
+                players: item.players,
+                description: item.description,
+                tags: item.tags,
+            });
+            const trainingDrill = await trainingDrillCreateForUser(tx, req.auth, {
+                trainingId,
+                drillId: drill.id,
+                duration: item.duration,
+                notes: null,
+                order: nextOrder++,
+            });
+            const diagramData = buildDefaultDiagramData(index);
+            const diagram = await diagramCreateForUser(tx, req.auth, {
+                drillId: drill.id,
+                title: `${drill.title} - Diagramme`,
+                data: JSON.stringify(diagramData),
+            });
+            items.push({
+                drill,
+                trainingDrill,
+                diagram: { ...diagram, data: diagramData }
+            });
+        }
+        return items;
+    });
+    res.status(201).json({
+        objective: parsed.data.objective,
+        ageBand,
+        count: created.length,
+        items: created
+    });
+});
 // Lister les exercices d'une séance (avec enrichissement à partir du catalogue Drill)
 app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
