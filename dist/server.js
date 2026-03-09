@@ -804,6 +804,32 @@ const aiGeneratedDrillSchema = zod_1.z.object({
 const aiGeneratedBundleSchema = zod_1.z.object({
     d: zod_1.z.array(aiGeneratedDrillSchema).length(5)
 });
+function readFirstString(...values) {
+    for (const value of values) {
+        if (typeof value === 'string' && value.trim())
+            return value.trim();
+    }
+    return '';
+}
+function readFirstInt(...values) {
+    for (const value of values) {
+        if (typeof value === 'number' && Number.isFinite(value))
+            return Math.trunc(value);
+        if (typeof value === 'string' && value.trim()) {
+            const n = Number(value);
+            if (Number.isFinite(n))
+                return Math.trunc(n);
+        }
+    }
+    return 0;
+}
+function readTags(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value
+        .map((tag) => typeof tag === 'string' ? tag.trim() : '')
+        .filter(Boolean);
+}
 function normalizeAiDrillValue(value) {
     const title = value.t.trim().slice(0, 100);
     const category = value.c.trim().slice(0, 50);
@@ -814,6 +840,24 @@ function normalizeAiDrillValue(value) {
         .map((tag) => tag.trim().toLowerCase().slice(0, 24))
         .filter(Boolean))).slice(0, 3);
     return { title, category, duration, players, description, tags };
+}
+function coerceOpenAiBundle(raw) {
+    const root = raw && typeof raw === 'object' ? raw : {};
+    const list = (Array.isArray(root.d) && root.d) ||
+        (Array.isArray(root.drills) && root.drills) ||
+        (Array.isArray(root.exercises) && root.exercises) ||
+        (Array.isArray(root.items) && root.items) ||
+        (Array.isArray(raw) && raw) ||
+        [];
+    const mapped = list.slice(0, 5).map((item) => ({
+        t: readFirstString(item?.t, item?.title, item?.name),
+        c: readFirstString(item?.c, item?.category, item?.theme, item?.type),
+        m: readFirstInt(item?.m, item?.minutes, item?.duration),
+        p: readFirstString(item?.p, item?.players, item?.group, item?.format),
+        s: readFirstString(item?.s, item?.description, item?.consigne, item?.instructions),
+        g: readTags(item?.g ?? item?.tags ?? item?.keywords),
+    }));
+    return { d: mapped };
 }
 function shortNodeId() {
     return (0, crypto_1.randomUUID)().replace(/-/g, '').slice(0, 8);
@@ -910,7 +954,12 @@ async function generateDrillsWithOpenAI(params) {
         err.code = 'OPENAI_INVALID_JSON';
         throw err;
     }
-    const parsed = aiGeneratedBundleSchema.safeParse(parsedJson);
+    const strictParsed = aiGeneratedBundleSchema.safeParse(parsedJson);
+    if (strictParsed.success) {
+        return strictParsed.data.d.map(normalizeAiDrillValue);
+    }
+    const coerced = coerceOpenAiBundle(parsedJson);
+    const parsed = aiGeneratedBundleSchema.safeParse(coerced);
     if (!parsed.success) {
         const err = new Error('OpenAI response does not match expected schema');
         err.code = 'OPENAI_SCHEMA_MISMATCH';
