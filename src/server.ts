@@ -846,7 +846,26 @@ const aiGeneratedDrillSchema = z.object({
   m: z.number().int().min(6).max(40),
   p: z.string().min(1).max(500),
   s: z.string().min(1).max(2000),
-  g: z.array(z.string().min(1).max(64)).max(8)
+  g: z.array(z.string().min(1).max(64)).max(8),
+  a: z.object({
+    p: z.array(z.tuple([z.number(), z.number()])).max(5).optional(),
+    s: z.array(z.tuple([z.number(), z.number()])).max(5).optional(),
+    c: z.array(z.tuple([z.number(), z.number()])).max(4).optional(),
+  }).optional(),
+  k: z.object({
+    f: z.array(z.object({
+      a: z.string().min(1).max(24),
+      t: z.tuple([z.number(), z.number()]),
+    })).max(6)
+  }).optional(),
+  v: z.object({
+    c: z.array(z.tuple([z.number(), z.number()])).max(4).optional(),
+    f: z.array(z.object({
+      p1: z.tuple([z.number(), z.number()]),
+      p2: z.tuple([z.number(), z.number()]),
+      b: z.tuple([z.number(), z.number()]).optional(),
+    })).min(3).max(12).optional(),
+  }).optional(),
 })
 
 const aiGeneratedBundleSchema = z.object({
@@ -878,6 +897,59 @@ function readTags(value: any) {
     .filter(Boolean)
 }
 
+function readPointPairs(value: any) {
+  if (!Array.isArray(value)) return []
+  const points: Array<[number, number]> = []
+  for (const item of value) {
+    if (!Array.isArray(item) || item.length < 2) continue
+    const x = Number(item[0])
+    const y = Number(item[1])
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    points.push([x, y])
+  }
+  return points
+}
+
+function readPhases(value: any) {
+  if (!Array.isArray(value)) return []
+  return value.map((phase: any) => ({
+    a: readFirstString(phase?.a, phase?.action, phase?.type),
+    t: readPointPairs([phase?.t ?? phase?.target])[0]
+  })).filter((phase: any) => phase.a && Array.isArray(phase.t))
+}
+
+function readVisualFrames(value: any) {
+  if (!Array.isArray(value)) return []
+  return value.map((frame: any) => ({
+    p1: readPointPairs([frame?.p1 ?? frame?.a ?? frame?.attacker])[0],
+    p2: readPointPairs([frame?.p2 ?? frame?.s ?? frame?.support])[0],
+    b: readPointPairs([frame?.b ?? frame?.ball])[0],
+  })).filter((frame: any) => Array.isArray(frame.p1) && Array.isArray(frame.p2))
+}
+
+function normalizeFrameSeries(frames: Array<{ p1: [number, number], p2: [number, number], b?: [number, number] }>) {
+  if (!frames.length) return []
+  if (frames.length === 10) return frames
+  const out: Array<{ p1: [number, number], p2: [number, number], b?: [number, number] }> = []
+  for (let i = 0; i < 10; i += 1) {
+    const t = i / 9
+    const scaled = t * (frames.length - 1)
+    const fromIndex = Math.floor(scaled)
+    const toIndex = Math.min(frames.length - 1, fromIndex + 1)
+    const localT = scaled - fromIndex
+    const from = frames[fromIndex]
+    const to = frames[toIndex]
+    const lerp = (a: number, b: number) => a + (b - a) * localT
+    const p1: [number, number] = [lerp(from.p1[0], to.p1[0]), lerp(from.p1[1], to.p1[1])]
+    const p2: [number, number] = [lerp(from.p2[0], to.p2[0]), lerp(from.p2[1], to.p2[1])]
+    const b0 = from.b || from.p1
+    const b1 = to.b || to.p1
+    const b: [number, number] = [lerp(b0[0], b1[0]), lerp(b0[1], b1[1])]
+    out.push({ p1, p2, b })
+  }
+  return out
+}
+
 function buildDetailedDescription(raw: string, title: string, ageBand: string, objective: string) {
   const compact = raw.trim().replace(/\s+/g, ' ').slice(0, 1400)
   if (compact.length >= 260) return compact
@@ -907,7 +979,63 @@ function normalizeAiDrillValue(
         .filter(Boolean)
     )
   ).slice(0, 3)
-  return { title, category, duration, players, description, tags }
+  const clampPoint = ([x, y]: [number, number]): [number, number] => [
+    Math.max(0, Math.min(100, Math.round(x))),
+    Math.max(0, Math.min(100, Math.round(y))),
+  ]
+  const primaryPath = (value.a?.p || []).map(clampPoint).slice(0, 5)
+  const supportPath = (value.a?.s || []).map(clampPoint).slice(0, 5)
+  const cones = (value.a?.c || []).map(clampPoint).slice(0, 4)
+  const animation = {
+    p: primaryPath.length >= 2 ? primaryPath : undefined,
+    s: supportPath.length >= 2 ? supportPath : undefined,
+    c: cones.length >= 2 ? cones : undefined,
+  }
+  const phaseAction = (raw: string) => {
+    const s = raw.toUpperCase()
+    if (s.includes('PRESS')) return 'PRESS'
+    if (s.includes('INTERCEPT')) return 'INTERCEPT'
+    if (s.includes('DRIBBLE')) return 'DRIBBLE'
+    if (s.includes('FINISH') || s.includes('SHOT') || s.includes('TIR')) return 'FINISH'
+    if (s.includes('SUPPORT') || s.includes('APPU')) return 'SUPPORT'
+    if (s.includes('PASS') || s.includes('PASSE')) return 'PASS'
+    return 'MOVE'
+  }
+  const rawPhases = (value.k?.f || [])
+  const phases = rawPhases.map((phase) => ({
+    a: phaseAction(String(phase.a || '')),
+    t: clampPoint(phase.t)
+  })).slice(0, 6)
+
+  const tacticalPlan = { phases: phases.length ? phases : undefined }
+  const sequence = tacticalPlan.phases?.map((phase) => phase.a).join(' -> ')
+  const descriptionWithPlan = sequence
+    ? `${description} Séquence: ${sequence}.`
+    : description
+  const visualCones = (value.v?.c || []).map(clampPoint).slice(0, 4)
+  const visualFramesRaw = normalizeFrameSeries(
+    (value.v?.f || []).map((frame) => ({
+      p1: clampPoint(frame.p1),
+      p2: clampPoint(frame.p2),
+      b: frame.b ? clampPoint(frame.b) : clampPoint(frame.p1),
+    }))
+  )
+  const visualPlan = {
+    c: visualCones.length >= 2 ? visualCones : undefined,
+    f: visualFramesRaw.length === 10 ? visualFramesRaw : undefined,
+  }
+
+  return {
+    title,
+    category,
+    duration,
+    players,
+    description: descriptionWithPlan.slice(0, 1200),
+    tags,
+    animation,
+    tacticalPlan,
+    visualPlan
+  }
 }
 
 function coerceOpenAiBundle(raw: any) {
@@ -927,6 +1055,18 @@ function coerceOpenAiBundle(raw: any) {
     p: readFirstString(item?.p, item?.players, item?.group, item?.format),
     s: readFirstString(item?.s, item?.description, item?.consigne, item?.instructions),
     g: readTags(item?.g ?? item?.tags ?? item?.keywords),
+    a: {
+      p: readPointPairs(item?.a?.p ?? item?.animation?.p ?? item?.path ?? item?.primaryPath),
+      s: readPointPairs(item?.a?.s ?? item?.animation?.s ?? item?.supportPath),
+      c: readPointPairs(item?.a?.c ?? item?.animation?.c ?? item?.cones),
+    },
+    k: {
+      f: readPhases(item?.k?.f ?? item?.plan?.f ?? item?.phases ?? item?.sequence),
+    },
+    v: {
+      c: readPointPairs(item?.v?.c ?? item?.visual?.c ?? item?.visualPlan?.c ?? item?.cones),
+      f: readVisualFrames(item?.v?.f ?? item?.visual?.f ?? item?.visualPlan?.f ?? item?.frames),
+    },
   }))
 
   return { d: mapped }
@@ -944,7 +1084,134 @@ function hashText(input: string) {
   return Math.abs(hash)
 }
 
-function buildDefaultDiagramData(index: number, drill: { title: string, category: string, tags: string[] }) {
+function pointAtPath(points: Array<{ x: number, y: number }>, t: number) {
+  if (!points.length) return { x: 100, y: 80 }
+  if (points.length === 1) return points[0]
+  const scaled = t * (points.length - 1)
+  const i = Math.min(points.length - 2, Math.max(0, Math.floor(scaled)))
+  const localT = scaled - i
+  const from = points[i]
+  const to = points[i + 1]
+  return {
+    x: from.x + (to.x - from.x) * localT,
+    y: from.y + (to.y - from.y) * localT,
+  }
+}
+
+function normalizePathPoints(index: number, points?: Array<[number, number]>) {
+  if (!points || points.length < 2) return null
+  const offset = (index % 5) * 6
+  return points.map(([x, y]) => ({
+    x: 36 + x * 1.6 + offset,
+    y: 30 + y * 1.1,
+  }))
+}
+
+function warpPoint(x: number, y: number, t: number, seed: number, variant: number) {
+  const ampX = 4 + (seed % 6)
+  const ampY = 3 + ((seed >> 3) % 6)
+  const freq = 1 + (seed % 3)
+  const phase = (seed % 360) * (Math.PI / 180)
+  const wx = x + Math.sin((t * Math.PI * 2 * freq) + phase) * ampX * (variant === 1 ? 1.2 : 0.8)
+  const wy = y + Math.cos((t * Math.PI * freq) + phase / 2) * ampY * (variant === 2 ? 1.25 : 0.75)
+  return { x: wx, y: wy }
+}
+
+function maybeMirrorX(x: number, seed: number) {
+  // Keep coordinates in the same board space while inverting shape orientation for half the drills.
+  if (seed % 2 === 0) return x
+  return 300 - x
+}
+
+function scaleDiagramToViewport(data: any) {
+  const frames = Array.isArray(data?.frames) ? data.frames : []
+  if (!frames.length) return data
+
+  const points: Array<{ x: number, y: number }> = []
+  for (const frame of frames) {
+    const items = Array.isArray(frame?.items) ? frame.items : []
+    for (const item of items) {
+      if (typeof item?.x === 'number' && typeof item?.y === 'number') {
+        points.push({ x: item.x, y: item.y })
+      }
+      if (item?.from && typeof item.from.x === 'number' && typeof item.from.y === 'number') {
+        points.push({ x: item.from.x, y: item.from.y })
+      }
+      if (item?.to && typeof item.to.x === 'number' && typeof item.to.y === 'number') {
+        points.push({ x: item.to.x, y: item.to.y })
+      }
+    }
+  }
+  if (!points.length) return data
+
+  let minX = points[0].x
+  let maxX = points[0].x
+  let minY = points[0].y
+  let maxY = points[0].y
+  for (const point of points) {
+    if (point.x < minX) minX = point.x
+    if (point.x > maxX) maxX = point.x
+    if (point.y < minY) minY = point.y
+    if (point.y > maxY) maxY = point.y
+  }
+
+  const width = Math.max(1, maxX - minX)
+  const height = Math.max(1, maxY - minY)
+  const targetMinX = 16
+  const targetMaxX = 284
+  const targetMinY = 12
+  const targetMaxY = 168
+  const targetWidth = targetMaxX - targetMinX
+  const targetHeight = targetMaxY - targetMinY
+  const scale = Math.min(targetWidth / width, targetHeight / height)
+  const scaledWidth = width * scale
+  const scaledHeight = height * scale
+  const translateX = targetMinX + (targetWidth - scaledWidth) / 2 - minX * scale
+  const translateY = targetMinY + (targetHeight - scaledHeight) / 2 - minY * scale
+
+  const transform = (x: number, y: number) => ({ x: x * scale + translateX, y: y * scale + translateY })
+  const scaledFrames = frames.map((frame: any) => {
+    const items = Array.isArray(frame?.items) ? frame.items : []
+    return {
+      ...frame,
+      items: items.map((item: any) => {
+        const next: any = { ...item }
+        if (typeof next.x === 'number' && typeof next.y === 'number') {
+          const p = transform(next.x, next.y)
+          next.x = p.x
+          next.y = p.y
+        }
+        if (next.from && typeof next.from.x === 'number' && typeof next.from.y === 'number') {
+          const p = transform(next.from.x, next.from.y)
+          next.from = { ...next.from, x: p.x, y: p.y }
+        }
+        if (next.to && typeof next.to.x === 'number' && typeof next.to.y === 'number') {
+          const p = transform(next.to.x, next.to.y)
+          next.to = { ...next.to, x: p.x, y: p.y }
+        }
+        return next
+      })
+    }
+  })
+
+  return {
+    ...data,
+    items: scaledFrames[0]?.items || [],
+    frames: scaledFrames
+  }
+}
+
+function buildDefaultDiagramData(
+  index: number,
+  drill: {
+    title: string,
+    category: string,
+    tags: string[],
+    animation?: { p?: Array<[number, number]>, s?: Array<[number, number]>, c?: Array<[number, number]> },
+    tacticalPlan?: { phases?: Array<{ a: string, t: [number, number] }> },
+    visualPlan?: { c?: Array<[number, number]>, f?: Array<{ p1: [number, number], p2: [number, number], b?: [number, number] }> }
+  }
+) {
   const offset = (index % 5) * 14
   const startX = 88 + offset
   const frameCount = 10
@@ -957,9 +1224,39 @@ function buildDefaultDiagramData(index: number, drill: { title: string, category
   const coneBId = shortNodeId()
   const coneCId = shortNodeId()
 
+  const toBoardPoint = ([x, y]: [number, number]) => ({ x: 18 + (x * 2.64), y: 12 + (y * 1.56) })
+  const hasVisualFrames = Array.isArray(drill.visualPlan?.f) && drill.visualPlan!.f!.length === 10
+  const visualCones = Array.isArray(drill.visualPlan?.c) ? drill.visualPlan!.c!.slice(0, 3).map(toBoardPoint) : []
+
+  if (hasVisualFrames) {
+    const frames = drill.visualPlan!.f!.map((frame, frameIndex) => {
+      const p1 = toBoardPoint(frame.p1)
+      const p2 = toBoardPoint(frame.p2)
+      const b = toBoardPoint(frame.b || frame.p1)
+      const prev = frameIndex > 0 ? drill.visualPlan!.f![frameIndex - 1] : null
+      const prevP1 = prev ? toBoardPoint(prev.p1) : p1
+      const prevP2 = prev ? toBoardPoint(prev.p2) : p2
+      return {
+        items: [
+          { type: 'player', id: playerId, x: p1.x, y: p1.y, side: 'home', label: 'J1' },
+          { type: 'player', id: supportId, x: p2.x, y: p2.y, side: 'home', label: 'J2' },
+          { type: 'ball', id: shortNodeId(), x: b.x, y: b.y },
+          { type: 'cone', id: coneAId, x: visualCones[0]?.x ?? 72, y: visualCones[0]?.y ?? 86 },
+          { type: 'cone', id: coneBId, x: visualCones[1]?.x ?? 144, y: visualCones[1]?.y ?? 66 },
+          { type: 'cone', id: coneCId, x: visualCones[2]?.x ?? 204, y: visualCones[2]?.y ?? 96 },
+          { type: 'arrow', id: shortNodeId(), from: { x: prevP1.x, y: prevP1.y }, to: { x: p1.x, y: p1.y } },
+          { type: 'arrow', id: shortNodeId(), from: { x: prevP2.x, y: prevP2.y }, to: { x: p2.x, y: p2.y } },
+        ]
+      }
+    })
+    return scaleDiagramToViewport({ items: frames[0].items, frames })
+  }
+
+  const tacticalPath = normalizePathPoints(index, (drill.tacticalPlan?.phases || []).map((phase) => phase.t))
+  const primaryPath = tacticalPath && tacticalPath.length >= 2 ? tacticalPath : normalizePathPoints(index, drill.animation?.p)
+  const supportPath = normalizePathPoints(index, drill.animation?.s)
+  const conePoints = normalizePathPoints(index, drill.animation?.c)
   const startY = 98
-  const endX = startX + 58
-  const endY = 60
 
   const frames = Array.from({ length: frameCount }, (_unused, frameIndex) => {
     const t = frameIndex / (frameCount - 1)
@@ -968,45 +1265,64 @@ function buildDefaultDiagramData(index: number, drill: { title: string, category
     let supportX = startX + 10
     let supportY = startY + 18
 
-    if (variant === 0) {
-      px = startX + (endX - startX) * t
-      py = startY + (endY - startY) * t
-      supportX = startX + 6 + (endX - startX) * t * 0.55
-      supportY = startY + 20 - (startY - endY) * t * 0.45
+    if (primaryPath) {
+      const p = pointAtPath(primaryPath, t)
+      px = p.x
+      py = p.y
+      const s = supportPath ? pointAtPath(supportPath, t) : pointAtPath(primaryPath, Math.max(0, t - 0.22))
+      supportX = s.x
+      supportY = s.y + 18
+    } else if (variant === 0) {
+      px = startX + 58 * t
+      py = 98 - 38 * t
+      supportX = startX + 6 + 32 * t
+      supportY = 118 - 18 * t
     } else if (variant === 1) {
-      px = startX + (endX - startX) * t
+      px = startX + 58 * t
       py = 84 + Math.sin(t * Math.PI * 2) * 16
-      supportX = startX + 18 + (endX - startX) * t * 0.7
+      supportX = startX + 18 + 42 * t
       supportY = 106 - Math.sin(t * Math.PI * 2) * 10
     } else if (variant === 2) {
-      px = startX + (endX - startX) * t * 0.75
-      py = startY - 8 - t * 24
+      px = startX + 44 * t
+      py = 90 - t * 24
       supportX = startX + 60 - t * 42
       supportY = 62 + t * 30
     } else {
       px = startX + 10 + Math.sin(t * Math.PI) * 18
-      py = startY - t * 26
+      py = 98 - t * 26
       supportX = startX + 56 - Math.sin(t * Math.PI) * 18
-      supportY = startY - 18 + t * 18
+      supportY = 80 + t * 18
     }
+
+    const wp = warpPoint(px, py, t, seed, variant)
+    px = maybeMirrorX(wp.x, seed)
+    py = wp.y
+    const ws = warpPoint(supportX, supportY, t, seed + 17, (variant + 1) % 4)
+    supportX = maybeMirrorX(ws.x, seed)
+    supportY = ws.y
+
+    const c0 = conePoints?.[0]
+    const c1 = conePoints?.[1]
+    const c2 = conePoints?.[2]
 
     return {
       items: [
         { type: 'player', id: playerId, x: px, y: py, side: 'home', label: 'J1' },
         { type: 'player', id: supportId, x: supportX, y: supportY, side: 'home', label: 'J2' },
-        { type: 'cone', id: coneAId, x: startX + (variant === 3 ? 14 : 26), y: 84 },
-        { type: 'cone', id: coneBId, x: startX + 56, y: variant === 1 ? 72 : 64 },
-        { type: 'cone', id: coneCId, x: startX + 36, y: variant === 2 ? 52 : 102 },
+        { type: 'cone', id: coneAId, x: c0?.x ?? startX + (variant === 3 ? 14 : 26), y: c0?.y ?? 84 },
+        { type: 'cone', id: coneBId, x: c1?.x ?? startX + 56, y: c1?.y ?? (variant === 1 ? 72 : 64) },
+        { type: 'cone', id: coneCId, x: c2?.x ?? startX + 36, y: c2?.y ?? (variant === 2 ? 52 : 102) },
         { type: 'arrow', id: shortNodeId(), from: { x: px, y: py }, to: { x: px + (variant === 2 ? 5 : 8), y: py - 6 } },
         { type: 'arrow', id: shortNodeId(), from: { x: supportX, y: supportY }, to: { x: px, y: py } },
       ]
     }
   })
 
-  return {
+  const raw = {
     items: frames[0].items,
     frames
   }
+  return scaleDiagramToViewport(raw)
 }
 
 async function generateDrillsWithOpenAI(params: { objective: string, ageBand: string, teamName: string }) {
@@ -1027,7 +1343,7 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
       content: [
         {
           type: 'input_text',
-          text: 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":["",""]}]} avec exactement 5 exercices.'
+          text: 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":[""],"v":{"c":[[20,30],[80,50],[45,80]],"f":[{"p1":[10,70],"p2":[30,80],"b":[10,70]}]},"k":{"f":[{"a":"PASS","t":[30,60]},{"a":"DRIBBLE","t":[60,45]},{"a":"FINISH","t":[85,35]}]},"a":{"p":[[0,0],[100,100]],"s":[[0,0],[100,100]],"c":[[20,30],[80,60],[40,80]]}}]} avec exactement 5 exercices.'
         }
       ]
     },
@@ -1036,7 +1352,7 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
       content: [
         {
           type: 'input_text',
-          text: `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s détaillée et opérationnelle (organisation, consignes, rotation, critères de réussite, vigilance), entre 320 et 900 caractères.`
+          text: `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s détaillée et opérationnelle (organisation, consignes, rotation, critères de réussite, vigilance), entre 320 et 900 caractères; k obligatoire: 3 à 5 phases ordonnées (a+t) cohérentes avec la description; v obligatoire: 10 frames (f) avec p1/p2/b en 0..100 + 2-3 cônes (c); les 5 exercices doivent avoir des schémas visuels nettement différents (zones, trajectoires et orientation).`
         }
       ]
     }
@@ -1047,21 +1363,28 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
 
   let response: Response
   try {
-    response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        input,
-        temperature: 0.4,
-        max_output_tokens: 1400,
-        text: { format: { type: 'json_object' } }
-      }),
-      signal: controller.signal,
-    })
+    try {
+      response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          input,
+          temperature: 0.4,
+          max_output_tokens: 2800,
+          text: { format: { type: 'json_object' } }
+        }),
+        signal: controller.signal,
+      })
+    } catch (e: any) {
+      const err: any = new Error('OpenAI network request failed')
+      err.code = e?.name === 'AbortError' ? 'OPENAI_TIMEOUT' : 'OPENAI_NETWORK_ERROR'
+      err.detail = e?.message || String(e)
+      throw err
+    }
   } finally {
     clearTimeout(timeout)
   }
@@ -1091,6 +1414,7 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
   if (!parsedJson) {
     const err: any = new Error('OpenAI response is not valid JSON')
     err.code = 'OPENAI_INVALID_JSON'
+    err.raw = String(rawText || '').slice(0, 2000)
     throw err
   }
 
@@ -1111,6 +1435,19 @@ async function generateDrillsWithOpenAI(params: { objective: string, ageBand: st
   }
 
   return parsed.data.d.map((drill) => normalizeAiDrillValue(drill, { ageBand: params.ageBand, objective: params.objective }))
+}
+
+function summarizeErrorForLog(error: any) {
+  return {
+    code: error?.code || null,
+    status: error?.status || null,
+    message: error?.message || String(error),
+    detail: error?.detail || null,
+    openai: error?.openai || null,
+    issues: error?.issues || null,
+    raw: error?.raw || null,
+    stack: typeof error?.stack === 'string' ? error.stack.split('\n').slice(0, 4).join('\n') : null,
+  }
 }
 
 function normalizePublicTeamLabel(raw: string | null | undefined, fallback: string) {
@@ -3195,16 +3532,45 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
   if (!team) return res.status(404).json({ error: 'Team not found' })
 
   const ageBand = inferAgeBandFromTeamName(team.name)
-  let generated: Array<{ title: string, category: string, duration: number, players: string, description: string, tags: string[] }>
+  const aiRequestId = randomUUID().slice(0, 8)
+  const aiStartAt = Date.now()
+  let generated: Array<{
+    title: string,
+    category: string,
+    duration: number,
+    players: string,
+    description: string,
+    tags: string[],
+    animation?: { p?: Array<[number, number]>, s?: Array<[number, number]>, c?: Array<[number, number]> },
+    tacticalPlan?: { phases?: Array<{ a: string, t: [number, number] }> },
+    visualPlan?: { c?: Array<[number, number]>, f?: Array<{ p1: [number, number], p2: [number, number], b?: [number, number] }> },
+  }>
   try {
     generated = await generateDrillsWithOpenAI({
       objective: parsed.data.objective,
       ageBand,
       teamName: team.name || 'Equipe',
     })
+    console.log('[POST /trainings/:id/drills/generate-ai] OpenAI success', {
+      requestId: aiRequestId,
+      durationMs: Date.now() - aiStartAt,
+      count: generated.length,
+    })
   } catch (e: any) {
+    const logError = summarizeErrorForLog(e)
+    console.error('[POST /trainings/:id/drills/generate-ai] OpenAI failed', {
+      requestId: aiRequestId,
+      durationMs: Date.now() - aiStartAt,
+      ...logError,
+    })
     if (e?.code === 'OPENAI_API_KEY_MISSING') {
       return res.status(503).json({ error: 'AI service unavailable (missing OPENAI_API_KEY)' })
+    }
+    if (e?.code === 'OPENAI_TIMEOUT') {
+      return res.status(504).json({ error: 'AI timeout', code: 'OPENAI_TIMEOUT' })
+    }
+    if (e?.code === 'OPENAI_NETWORK_ERROR') {
+      return res.status(503).json({ error: 'AI network error', code: 'OPENAI_NETWORK_ERROR' })
     }
     if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.openai?.code === 'insufficient_quota') {
       return res.status(503).json({ error: 'AI quota exceeded', code: 'INSUFFICIENT_QUOTA' })
@@ -3212,14 +3578,12 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
     if (e?.code === 'OPENAI_REQUEST_FAILED' && e?.status === 401) {
       return res.status(503).json({ error: 'AI authentication failed', code: 'OPENAI_AUTH_FAILED' })
     }
-    if (e?.code === 'OPENAI_SCHEMA_MISMATCH') {
-      console.error('[POST /trainings/:id/drills/generate-ai] OpenAI schema mismatch', {
-        issues: e?.issues,
-        raw: e?.raw,
-        coerced: e?.coerced
-      })
+    if (e?.code === 'OPENAI_INVALID_JSON') {
+      return res.status(502).json({ error: 'AI returned invalid JSON', code: 'OPENAI_INVALID_JSON' })
     }
-    console.error('[POST /trainings/:id/drills/generate-ai] OpenAI failed', e?.detail || e?.message || e)
+    if (e?.code === 'OPENAI_SCHEMA_MISMATCH') {
+      return res.status(502).json({ error: 'AI response schema mismatch', code: 'OPENAI_SCHEMA_MISMATCH' })
+    }
     return res.status(502).json({ error: 'Failed to generate drills with AI' })
   }
 
