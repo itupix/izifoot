@@ -19,6 +19,7 @@ const nodemailer_1 = __importDefault(require("nodemailer"));
 const date_fns_1 = require("date-fns");
 const crypto_1 = require("crypto");
 const plateau_metadata_1 = require("./plateau-metadata");
+const training_role_assignments_1 = require("./training-role-assignments");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -565,6 +566,31 @@ async function trainingDrillCreateForUser(db, scopeOrUserId, data) {
             ...(auth?.teamId ? { teamId: auth.teamId } : {}),
         }
     });
+}
+async function trainingRoleAssignmentFindManyForUser(db, scopeOrUserId, args = {}) {
+    try {
+        return await db.trainingRoleAssignment.findMany({
+            ...args,
+            where: scopedWhereOrLegacy(scopeOrUserId, args.where || {}),
+        });
+    }
+    catch (e) {
+        if (e?.code === 'P2021') {
+            const err = new Error('Training role storage unavailable');
+            err.code = 'TRAINING_ROLE_STORAGE_UNAVAILABLE';
+            throw err;
+        }
+        throw e;
+    }
+}
+function toTrainingRoleAssignmentResponseItem(row) {
+    return {
+        id: row.id,
+        trainingId: row.trainingId,
+        role: row.role,
+        playerId: row.playerId,
+        player: row.player ? { id: row.player.id, name: row.player.name } : null,
+    };
 }
 function getDrillDelegate(db) {
     const delegate = db?.drill;
@@ -2919,6 +2945,109 @@ app.delete('/trainings/:id', authMiddleware, async (req, res) => {
         }
         console.error('[DELETE /trainings/:id] delete failed', e);
         return res.status(500).json({ error: 'Failed to delete training' });
+    }
+});
+app.get('/trainings/:id/roles', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const trainingId = req.params.id;
+    try {
+        const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: trainingId } });
+        if (!training)
+            return res.status(404).json({ error: 'Training not found' });
+        const rows = await trainingRoleAssignmentFindManyForUser(prisma, req.auth, {
+            where: { trainingId },
+            include: { player: { select: { id: true, name: true } } },
+            orderBy: [{ role: 'asc' }, { id: 'asc' }],
+        });
+        return res.json({ items: rows.map(toTrainingRoleAssignmentResponseItem) });
+    }
+    catch (e) {
+        if (e?.code === 'TRAINING_ROLE_STORAGE_UNAVAILABLE') {
+            return res.status(503).json({ error: 'Training role storage unavailable' });
+        }
+        console.error('[GET /trainings/:id/roles] failed', {
+            trainingId,
+            error: e,
+        });
+        return res.status(500).json({ error: 'Failed to fetch training roles' });
+    }
+});
+app.put('/trainings/:id/roles', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const trainingId = req.params.id;
+    const parsed = training_role_assignments_1.trainingRolesPutBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+        return res.status(400).json({ error: parsed.error.flatten() });
+    }
+    const items = (0, training_role_assignments_1.normalizeTrainingRoleItems)(parsed.data.items);
+    try {
+        (0, training_role_assignments_1.validateNoDuplicatePlayers)(items);
+    }
+    catch (e) {
+        return res.status(400).json({ error: e?.message || 'Invalid role assignments payload' });
+    }
+    try {
+        const training = await trainingFindFirstForUser(prisma, req.auth, {
+            where: { id: trainingId },
+            select: { id: true, clubId: true, teamId: true },
+        });
+        if (!training)
+            return res.status(404).json({ error: 'Training not found' });
+        const playerIds = Array.from(new Set(items.map((item) => item.playerId)));
+        if (playerIds.length > 0) {
+            const players = await playerFindManyForUser(prisma, req.auth, {
+                where: {
+                    id: { in: playerIds },
+                    teamId: training.teamId,
+                },
+                select: { id: true },
+            });
+            if (players.length !== playerIds.length) {
+                return res.status(400).json({ error: 'One or more players do not belong to the training team' });
+            }
+        }
+        const savedRows = await prisma.$transaction(async (tx) => {
+            await tx.trainingRoleAssignment.deleteMany({
+                where: applyScopeWhere(req.auth, { trainingId }, { includeLegacyOwner: true }),
+            });
+            if (items.length > 0) {
+                await tx.trainingRoleAssignment.createMany({
+                    data: items.map((item) => ({
+                        userId: req.auth?.id ?? null,
+                        clubId: training.clubId ?? null,
+                        teamId: training.teamId ?? null,
+                        trainingId,
+                        role: item.role,
+                        playerId: item.playerId,
+                    })),
+                });
+            }
+            return trainingRoleAssignmentFindManyForUser(tx, req.auth, {
+                where: { trainingId },
+                include: { player: { select: { id: true, name: true } } },
+                orderBy: [{ role: 'asc' }, { id: 'asc' }],
+            });
+        });
+        return res.json({ items: savedRows.map(toTrainingRoleAssignmentResponseItem) });
+    }
+    catch (e) {
+        if (e?.code === 'P2021' || e?.code === 'TRAINING_ROLE_STORAGE_UNAVAILABLE') {
+            return res.status(503).json({ error: 'Training role storage unavailable' });
+        }
+        if (e?.code === 'P2002') {
+            return res.status(409).json({ error: 'Role assignments conflict with uniqueness constraints' });
+        }
+        if (e?.code === 'P2003') {
+            return res.status(409).json({ error: 'Invalid player reference in role assignments' });
+        }
+        console.error('[PUT /trainings/:id/roles] failed', {
+            trainingId,
+            body: req.body,
+            error: e,
+        });
+        return res.status(500).json({ error: 'Failed to save training roles' });
     }
 });
 // ---- Plateaus ----

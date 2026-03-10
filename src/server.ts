@@ -14,6 +14,11 @@ import nodemailer from 'nodemailer'
 import { addDays } from 'date-fns'
 import { randomUUID } from 'crypto'
 import { buildPlateauMetadataPatch, plateauMetadataSchema, toPublicPlateau } from './plateau-metadata'
+import {
+  normalizeTrainingRoleItems,
+  trainingRolesPutBodySchema,
+  validateNoDuplicatePlayers,
+} from './training-role-assignments'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -600,6 +605,32 @@ async function trainingDrillCreateForUser(db: any, scopeOrUserId: any, data: any
       ...(auth?.teamId ? { teamId: auth.teamId } : {}),
     }
   })
+}
+
+async function trainingRoleAssignmentFindManyForUser(db: any, scopeOrUserId: any, args: any = {}): Promise<any[]> {
+  try {
+    return await db.trainingRoleAssignment.findMany({
+      ...args,
+      where: scopedWhereOrLegacy(scopeOrUserId, args.where || {}),
+    })
+  } catch (e: any) {
+    if (e?.code === 'P2021') {
+      const err: any = new Error('Training role storage unavailable')
+      err.code = 'TRAINING_ROLE_STORAGE_UNAVAILABLE'
+      throw err
+    }
+    throw e
+  }
+}
+
+function toTrainingRoleAssignmentResponseItem(row: any) {
+  return {
+    id: row.id,
+    trainingId: row.trainingId,
+    role: row.role,
+    playerId: row.playerId,
+    player: row.player ? { id: row.player.id, name: row.player.name } : null,
+  }
 }
 
 function getDrillDelegate(db: any) {
@@ -3017,6 +3048,113 @@ app.delete('/trainings/:id', authMiddleware, async (req: any, res) => {
     }
     console.error('[DELETE /trainings/:id] delete failed', e)
     return res.status(500).json({ error: 'Failed to delete training' })
+  }
+})
+
+app.get('/trainings/:id/roles', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const trainingId = req.params.id
+  try {
+    const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: trainingId } })
+    if (!training) return res.status(404).json({ error: 'Training not found' })
+
+    const rows = await trainingRoleAssignmentFindManyForUser(prisma, req.auth, {
+      where: { trainingId },
+      include: { player: { select: { id: true, name: true } } },
+      orderBy: [{ role: 'asc' }, { id: 'asc' }],
+    })
+    return res.json({ items: rows.map(toTrainingRoleAssignmentResponseItem) })
+  } catch (e) {
+    if ((e as any)?.code === 'TRAINING_ROLE_STORAGE_UNAVAILABLE') {
+      return res.status(503).json({ error: 'Training role storage unavailable' })
+    }
+    console.error('[GET /trainings/:id/roles] failed', {
+      trainingId,
+      error: e,
+    })
+    return res.status(500).json({ error: 'Failed to fetch training roles' })
+  }
+})
+
+app.put('/trainings/:id/roles', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const trainingId = req.params.id
+
+  const parsed = trainingRolesPutBodySchema.safeParse(req.body)
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() })
+  }
+
+  const items = normalizeTrainingRoleItems(parsed.data.items)
+  try {
+    validateNoDuplicatePlayers(items)
+  } catch (e: any) {
+    return res.status(400).json({ error: e?.message || 'Invalid role assignments payload' })
+  }
+
+  try {
+    const training = await trainingFindFirstForUser(prisma, req.auth, {
+      where: { id: trainingId },
+      select: { id: true, clubId: true, teamId: true },
+    })
+    if (!training) return res.status(404).json({ error: 'Training not found' })
+
+    const playerIds = Array.from(new Set(items.map((item) => item.playerId)))
+    if (playerIds.length > 0) {
+      const players = await playerFindManyForUser(prisma, req.auth, {
+        where: {
+          id: { in: playerIds },
+          teamId: training.teamId,
+        },
+        select: { id: true },
+      })
+      if (players.length !== playerIds.length) {
+        return res.status(400).json({ error: 'One or more players do not belong to the training team' })
+      }
+    }
+
+    const savedRows = await prisma.$transaction(async (tx) => {
+      await tx.trainingRoleAssignment.deleteMany({
+        where: applyScopeWhere(req.auth, { trainingId }, { includeLegacyOwner: true }),
+      })
+
+      if (items.length > 0) {
+        await tx.trainingRoleAssignment.createMany({
+          data: items.map((item) => ({
+            userId: req.auth?.id ?? null,
+            clubId: training.clubId ?? null,
+            teamId: training.teamId ?? null,
+            trainingId,
+            role: item.role,
+            playerId: item.playerId,
+          })),
+        })
+      }
+
+      return trainingRoleAssignmentFindManyForUser(tx, req.auth, {
+        where: { trainingId },
+        include: { player: { select: { id: true, name: true } } },
+        orderBy: [{ role: 'asc' }, { id: 'asc' }],
+      })
+    })
+
+    return res.json({ items: savedRows.map(toTrainingRoleAssignmentResponseItem) })
+  } catch (e: any) {
+    if (e?.code === 'P2021' || e?.code === 'TRAINING_ROLE_STORAGE_UNAVAILABLE') {
+      return res.status(503).json({ error: 'Training role storage unavailable' })
+    }
+    if (e?.code === 'P2002') {
+      return res.status(409).json({ error: 'Role assignments conflict with uniqueness constraints' })
+    }
+    if (e?.code === 'P2003') {
+      return res.status(409).json({ error: 'Invalid player reference in role assignments' })
+    }
+    console.error('[PUT /trainings/:id/roles] failed', {
+      trainingId,
+      body: req.body,
+      error: e,
+    })
+    return res.status(500).json({ error: 'Failed to save training roles' })
   }
 })
 

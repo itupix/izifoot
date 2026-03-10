@@ -31,6 +31,7 @@ model User {
   matches      Match[]
   trainingDrills TrainingDrill[]
   diagrams     Diagram[]
+  trainingRoleAssignments TrainingRoleAssignment[]
 }
 
 enum UserRole {
@@ -128,6 +129,7 @@ model Player {
   scorers            Scorer[]
   Attendance         Attendance[]
   MatchTeamPlayer    MatchTeamPlayer[]
+  trainingRoleAssignments TrainingRoleAssignment[]
   email              String?
   phone              String?
 
@@ -146,6 +148,7 @@ model Training {
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
   TrainingDrill TrainingDrill[]
+  trainingRoleAssignments TrainingRoleAssignment[]
 }
 
 model Plateau {
@@ -255,6 +258,26 @@ model TrainingDrill {
   notes      String?
 
   @@index([trainingId])
+  @@index([userId, trainingId])
+}
+
+model TrainingRoleAssignment {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  clubId     String?
+  teamId     String?
+  trainingId String
+  training   Training @relation(fields: [trainingId], references: [id], onDelete: Cascade)
+  role       String
+  playerId   String
+  player     Player   @relation(fields: [playerId], references: [id], onDelete: Restrict)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([trainingId, playerId])
+  @@index([trainingId])
+  @@index([trainingId, role])
   @@index([userId, trainingId])
 }
 
