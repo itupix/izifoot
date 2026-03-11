@@ -15,6 +15,11 @@ import { addDays } from 'date-fns'
 import { randomUUID } from 'crypto'
 import { buildPlateauMetadataPatch, plateauMetadataSchema, toPublicPlateau } from './plateau-metadata'
 import {
+  attendanceSessionTypeVariants,
+  normalizeAttendanceRow,
+  persistAttendancePresence,
+} from './attendance'
+import {
   normalizeTrainingRoleItems,
   trainingRolesPutBodySchema,
   validateNoDuplicatePlayers,
@@ -408,27 +413,6 @@ async function attendanceDeleteManyForUser(db: any, scopeOrUserId: any, where: a
   return db.attendance.deleteMany({ where: scopedWhereOrLegacy(scopeOrUserId, where) })
 }
 
-function attendanceStoredSessionType(sessionType: string, present: boolean) {
-  return present ? sessionType : `${sessionType}_ABSENT`
-}
-
-function attendanceSessionTypeVariants(sessionType: string) {
-  return [sessionType, `${sessionType}_ABSENT`]
-}
-
-function normalizeAttendanceRow(row: any) {
-  if (row.session_type === 'TRAINING_ABSENT') {
-    return { ...row, session_type: 'TRAINING', present: false }
-  }
-  if (row.session_type === 'PLATEAU_ABSENT') {
-    return { ...row, session_type: 'PLATEAU', present: false }
-  }
-  if (row.session_type === 'TRAINING' || row.session_type === 'PLATEAU') {
-    return { ...row, present: true }
-  }
-  return row
-}
-
 async function attendanceUpsertMarkerForUser(db: any, scopeOrUserId: any, params: { session_type: string, session_id: string, playerId: string }) {
   const auth = normalizeScopeInput(scopeOrUserId)
   const { session_type, session_id, playerId } = params
@@ -447,22 +431,16 @@ async function attendanceUpsertMarkerForUser(db: any, scopeOrUserId: any, params
 
 async function attendanceSetPresenceForUser(db: any, scopeOrUserId: any, params: { session_type: string, session_id: string, playerId: string, present: boolean }) {
   const auth = normalizeScopeInput(scopeOrUserId)
-  const { session_type, session_id, playerId, present } = params
-  const storedSessionType = attendanceStoredSessionType(session_type, present)
-  await attendanceDeleteManyForUser(db, scopeOrUserId, {
-    session_type: { in: attendanceSessionTypeVariants(session_type) } as any,
-    session_id,
-    playerId,
-  })
-  return db.attendance.create({
-    data: {
-      ...(auth?.id ? { userId: auth.id } : {}),
-      ...(auth?.clubId ? { clubId: auth.clubId } : {}),
-      ...(auth?.teamId ? { teamId: auth.teamId } : {}),
-      session_type: storedSessionType,
-      session_id,
-      playerId
-    },
+  return persistAttendancePresence(params as any, {
+    deleteMany: (where) => attendanceDeleteManyForUser(db, scopeOrUserId, where),
+    create: (data) => db.attendance.create({
+      data: {
+        ...(auth?.id ? { userId: auth.id } : {}),
+        ...(auth?.clubId ? { clubId: auth.clubId } : {}),
+        ...(auth?.teamId ? { teamId: auth.teamId } : {}),
+        ...data
+      },
+    })
   })
 }
 
@@ -473,6 +451,32 @@ async function attendanceSetPlateauRsvpForUser(db: any, scopeOrUserId: any, plat
     playerId,
     present,
   })
+}
+
+async function resolveAttendanceScopeFromSession(auth: any, session_type: 'TRAINING' | 'PLATEAU', session_id: string) {
+  if (session_type === 'TRAINING') {
+    const training = await trainingFindFirstForUser(prisma, auth, {
+      where: { id: session_id },
+      select: { id: true, clubId: true, teamId: true },
+    })
+    if (!training) return null
+    return {
+      ...auth,
+      clubId: training.clubId ?? auth?.clubId ?? null,
+      teamId: training.teamId ?? auth?.teamId ?? null,
+    }
+  }
+
+  const plateau = await plateauFindFirstForUser(prisma, auth, {
+    where: { id: session_id },
+    select: { id: true, clubId: true, teamId: true },
+  })
+  if (!plateau) return null
+  return {
+    ...auth,
+    clubId: plateau.clubId ?? auth?.clubId ?? null,
+    teamId: plateau.teamId ?? auth?.teamId ?? null,
+  }
 }
 
 async function playerFindManyForUser(db: any, scopeOrUserId: any, args: any = {}): Promise<any[]> {
@@ -3486,11 +3490,17 @@ app.get('/attendance', authMiddleware, async (req: any, res) => {
   const parsed = schema.safeParse(req.query)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { session_type, session_id } = parsed.data
+  let scopeAuth = req.auth
+  if (session_type && session_id) {
+    const resolved = await resolveAttendanceScopeFromSession(req.auth, session_type, session_id)
+    if (!resolved) return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Plateau'} not found` })
+    scopeAuth = resolved
+  }
   const where: any = {}
   if (session_type) where.session_type = { in: attendanceSessionTypeVariants(session_type) } as any
   else where.session_type = { in: ['TRAINING', 'TRAINING_ABSENT', 'PLATEAU', 'PLATEAU_ABSENT'] } as any
   if (session_id) where.session_id = session_id
-  const rows = await attendanceFindManyForUser(prisma, req.auth, { where })
+  const rows = await attendanceFindManyForUser(prisma, scopeAuth, { where })
   res.json(rows.map(normalizeAttendanceRow))
 })
 app.post('/attendance', authMiddleware, async (req: any, res) => {
@@ -3505,7 +3515,9 @@ app.post('/attendance', authMiddleware, async (req: any, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const { session_type, session_id, playerId } = parsed.data
   const present = parsed.data.present ?? false
-  await attendanceSetPresenceForUser(prisma, req.auth, { session_type, session_id, playerId, present })
+  const scopeAuth = await resolveAttendanceScopeFromSession(req.auth, session_type, session_id)
+  if (!scopeAuth) return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Plateau'} not found` })
+  await attendanceSetPresenceForUser(prisma, scopeAuth, { session_type, session_id, playerId, present })
   res.json({ ok: true })
 })
 

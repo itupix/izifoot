@@ -19,6 +19,7 @@ const nodemailer_1 = __importDefault(require("nodemailer"));
 const date_fns_1 = require("date-fns");
 const crypto_1 = require("crypto");
 const plateau_metadata_1 = require("./plateau-metadata");
+const attendance_1 = require("./attendance");
 const training_role_assignments_1 = require("./training-role-assignments");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
@@ -391,24 +392,6 @@ async function attendanceFindFirstForUser(db, scopeOrUserId, args = {}) {
 async function attendanceDeleteManyForUser(db, scopeOrUserId, where = {}) {
     return db.attendance.deleteMany({ where: scopedWhereOrLegacy(scopeOrUserId, where) });
 }
-function attendanceStoredSessionType(sessionType, present) {
-    return present ? sessionType : `${sessionType}_ABSENT`;
-}
-function attendanceSessionTypeVariants(sessionType) {
-    return [sessionType, `${sessionType}_ABSENT`];
-}
-function normalizeAttendanceRow(row) {
-    if (row.session_type === 'TRAINING_ABSENT') {
-        return { ...row, session_type: 'TRAINING', present: false };
-    }
-    if (row.session_type === 'PLATEAU_ABSENT') {
-        return { ...row, session_type: 'PLATEAU', present: false };
-    }
-    if (row.session_type === 'TRAINING' || row.session_type === 'PLATEAU') {
-        return { ...row, present: true };
-    }
-    return row;
-}
 async function attendanceUpsertMarkerForUser(db, scopeOrUserId, params) {
     const auth = normalizeScopeInput(scopeOrUserId);
     const { session_type, session_id, playerId } = params;
@@ -426,22 +409,16 @@ async function attendanceUpsertMarkerForUser(db, scopeOrUserId, params) {
 }
 async function attendanceSetPresenceForUser(db, scopeOrUserId, params) {
     const auth = normalizeScopeInput(scopeOrUserId);
-    const { session_type, session_id, playerId, present } = params;
-    const storedSessionType = attendanceStoredSessionType(session_type, present);
-    await attendanceDeleteManyForUser(db, scopeOrUserId, {
-        session_type: { in: attendanceSessionTypeVariants(session_type) },
-        session_id,
-        playerId,
-    });
-    return db.attendance.create({
-        data: {
-            ...(auth?.id ? { userId: auth.id } : {}),
-            ...(auth?.clubId ? { clubId: auth.clubId } : {}),
-            ...(auth?.teamId ? { teamId: auth.teamId } : {}),
-            session_type: storedSessionType,
-            session_id,
-            playerId
-        },
+    return (0, attendance_1.persistAttendancePresence)(params, {
+        deleteMany: (where) => attendanceDeleteManyForUser(db, scopeOrUserId, where),
+        create: (data) => db.attendance.create({
+            data: {
+                ...(auth?.id ? { userId: auth.id } : {}),
+                ...(auth?.clubId ? { clubId: auth.clubId } : {}),
+                ...(auth?.teamId ? { teamId: auth.teamId } : {}),
+                ...data
+            },
+        })
     });
 }
 async function attendanceSetPlateauRsvpForUser(db, scopeOrUserId, plateauId, playerId, present) {
@@ -451,6 +428,32 @@ async function attendanceSetPlateauRsvpForUser(db, scopeOrUserId, plateauId, pla
         playerId,
         present,
     });
+}
+async function resolveAttendanceScopeFromSession(auth, session_type, session_id) {
+    if (session_type === 'TRAINING') {
+        const training = await trainingFindFirstForUser(prisma, auth, {
+            where: { id: session_id },
+            select: { id: true, clubId: true, teamId: true },
+        });
+        if (!training)
+            return null;
+        return {
+            ...auth,
+            clubId: training.clubId ?? auth?.clubId ?? null,
+            teamId: training.teamId ?? auth?.teamId ?? null,
+        };
+    }
+    const plateau = await plateauFindFirstForUser(prisma, auth, {
+        where: { id: session_id },
+        select: { id: true, clubId: true, teamId: true },
+    });
+    if (!plateau)
+        return null;
+    return {
+        ...auth,
+        clubId: plateau.clubId ?? auth?.clubId ?? null,
+        teamId: plateau.teamId ?? auth?.teamId ?? null,
+    };
 }
 async function playerFindManyForUser(db, scopeOrUserId, args = {}) {
     return db.player.findMany({
@@ -3394,15 +3397,22 @@ app.get('/attendance', authMiddleware, async (req, res) => {
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const { session_type, session_id } = parsed.data;
+    let scopeAuth = req.auth;
+    if (session_type && session_id) {
+        const resolved = await resolveAttendanceScopeFromSession(req.auth, session_type, session_id);
+        if (!resolved)
+            return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Plateau'} not found` });
+        scopeAuth = resolved;
+    }
     const where = {};
     if (session_type)
-        where.session_type = { in: attendanceSessionTypeVariants(session_type) };
+        where.session_type = { in: (0, attendance_1.attendanceSessionTypeVariants)(session_type) };
     else
         where.session_type = { in: ['TRAINING', 'TRAINING_ABSENT', 'PLATEAU', 'PLATEAU_ABSENT'] };
     if (session_id)
         where.session_id = session_id;
-    const rows = await attendanceFindManyForUser(prisma, req.auth, { where });
-    res.json(rows.map(normalizeAttendanceRow));
+    const rows = await attendanceFindManyForUser(prisma, scopeAuth, { where });
+    res.json(rows.map(attendance_1.normalizeAttendanceRow));
 });
 app.post('/attendance', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
@@ -3417,7 +3427,10 @@ app.post('/attendance', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: parsed.error.flatten() });
     const { session_type, session_id, playerId } = parsed.data;
     const present = parsed.data.present ?? false;
-    await attendanceSetPresenceForUser(prisma, req.auth, { session_type, session_id, playerId, present });
+    const scopeAuth = await resolveAttendanceScopeFromSession(req.auth, session_type, session_id);
+    if (!scopeAuth)
+        return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Plateau'} not found` });
+    await attendanceSetPresenceForUser(prisma, scopeAuth, { session_type, session_id, playerId, present });
     res.json({ ok: true });
 });
 // ---- Matches ----
