@@ -3498,11 +3498,13 @@ app.post('/attendance', authMiddleware, async (req: any, res) => {
     session_type: z.enum(['TRAINING', 'PLATEAU']),
     session_id: z.string(),
     playerId: z.string(),
-    present: z.boolean().default(true)
+    // Some clients omit `present` when unchecking; treat missing as absent.
+    present: z.boolean().optional()
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const { session_type, session_id, playerId, present } = parsed.data
+  const { session_type, session_id, playerId } = parsed.data
+  const present = parsed.data.present ?? false
   await attendanceSetPresenceForUser(prisma, req.auth, { session_type, session_id, playerId, present })
   res.json({ ok: true })
 })

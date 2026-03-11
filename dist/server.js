@@ -3409,12 +3409,14 @@ app.post('/attendance', authMiddleware, async (req, res) => {
         session_type: zod_1.z.enum(['TRAINING', 'PLATEAU']),
         session_id: zod_1.z.string(),
         playerId: zod_1.z.string(),
-        present: zod_1.z.boolean().default(true)
+        // Some clients omit `present` when unchecking; treat missing as absent.
+        present: zod_1.z.boolean().optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const { session_type, session_id, playerId, present } = parsed.data;
+    const { session_type, session_id, playerId } = parsed.data;
+    const present = parsed.data.present ?? false;
     await attendanceSetPresenceForUser(prisma, req.auth, { session_type, session_id, playerId, present });
     res.json({ ok: true });
 });
