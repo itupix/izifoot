@@ -3563,7 +3563,6 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
       select: {
         playerId: true,
         session_type: true,
-        present: true,
       },
     })
     eligiblePlayerIds = buildEligiblePlayerIdsFromPlateauAttendance(attendanceRows)

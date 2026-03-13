@@ -3466,7 +3466,6 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
             select: {
                 playerId: true,
                 session_type: true,
-                present: true,
             },
         });
         eligiblePlayerIds = (0, match_eligibility_1.buildEligiblePlayerIdsFromPlateauAttendance)(attendanceRows);
