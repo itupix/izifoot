@@ -30,6 +30,7 @@ import {
   upsertTacticByTeamAndName,
 } from './tactics'
 import { matchTacticSchema } from './match-tactic'
+import { buildEligiblePlayerIdsFromPlateauAttendance } from './match-eligibility'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -3552,6 +3553,22 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
   })
   if (!match) return null
 
+  let eligiblePlayerIds: Set<string> | null = null
+  if (match.plateauId) {
+    const attendanceRows = await attendanceFindManyForUser(db, scopeOrUserId, {
+      where: {
+        session_id: match.plateauId,
+        session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] as any },
+      },
+      select: {
+        playerId: true,
+        session_type: true,
+        present: true,
+      },
+    })
+    eligiblePlayerIds = buildEligiblePlayerIdsFromPlateauAttendance(attendanceRows)
+  }
+
   const teamIds = (match.teams || []).map((t: any) => t.id)
   const teamPlayers = teamIds.length ? await db.matchTeamPlayer.findMany({
     where: { matchTeamId: { in: teamIds } },
@@ -3564,12 +3581,26 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     byTeam[row.matchTeamId].push(row)
   }
 
+  const allPlayersById: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null }> = {}
+  for (const row of teamPlayers) {
+    const pl = row.player
+    if (!pl) continue
+    allPlayersById[pl.id] = allPlayersById[pl.id] || {
+      id: pl.id,
+      name: pl.name,
+      primary_position: pl.primary_position ?? null,
+      secondary_position: pl.secondary_position ?? null
+    }
+  }
+
   const playersById: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null }> = {}
   const teams = (match.teams || []).map((team: any) => ({
     id: team.id,
     side: team.side,
     score: team.score,
-    players: (byTeam[team.id] || []).map((row: any) => {
+    players: (byTeam[team.id] || []).filter((row: any) => {
+      return !eligiblePlayerIds || eligiblePlayerIds.has(row.playerId)
+    }).map((row: any) => {
       const pl = row.player
       if (pl) {
         playersById[pl.id] = playersById[pl.id] || {
@@ -3582,7 +3613,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
       return {
         playerId: row.playerId,
         role: row.role,
-        player: pl ? playersById[pl.id] : null
+        player: pl ? allPlayersById[pl.id] : null
       }
     })
   }))
@@ -3591,7 +3622,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     id: s.id,
     playerId: s.playerId,
     side: s.side,
-    playerName: playersById[s.playerId]?.name || null
+    playerName: allPlayersById[s.playerId]?.name || playersById[s.playerId]?.name || null
   }))
 
   return {

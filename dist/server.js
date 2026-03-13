@@ -23,6 +23,7 @@ const attendance_1 = require("./attendance");
 const training_role_assignments_1 = require("./training-role-assignments");
 const tactics_1 = require("./tactics");
 const match_tactic_1 = require("./match-tactic");
+const match_eligibility_1 = require("./match-eligibility");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -3455,6 +3456,21 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
     });
     if (!match)
         return null;
+    let eligiblePlayerIds = null;
+    if (match.plateauId) {
+        const attendanceRows = await attendanceFindManyForUser(db, scopeOrUserId, {
+            where: {
+                session_id: match.plateauId,
+                session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] },
+            },
+            select: {
+                playerId: true,
+                session_type: true,
+                present: true,
+            },
+        });
+        eligiblePlayerIds = (0, match_eligibility_1.buildEligiblePlayerIdsFromPlateauAttendance)(attendanceRows);
+    }
     const teamIds = (match.teams || []).map((t) => t.id);
     const teamPlayers = teamIds.length ? await db.matchTeamPlayer.findMany({
         where: { matchTeamId: { in: teamIds } },
@@ -3466,12 +3482,26 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
             byTeam[row.matchTeamId] = [];
         byTeam[row.matchTeamId].push(row);
     }
+    const allPlayersById = {};
+    for (const row of teamPlayers) {
+        const pl = row.player;
+        if (!pl)
+            continue;
+        allPlayersById[pl.id] = allPlayersById[pl.id] || {
+            id: pl.id,
+            name: pl.name,
+            primary_position: pl.primary_position ?? null,
+            secondary_position: pl.secondary_position ?? null
+        };
+    }
     const playersById = {};
     const teams = (match.teams || []).map((team) => ({
         id: team.id,
         side: team.side,
         score: team.score,
-        players: (byTeam[team.id] || []).map((row) => {
+        players: (byTeam[team.id] || []).filter((row) => {
+            return !eligiblePlayerIds || eligiblePlayerIds.has(row.playerId);
+        }).map((row) => {
             const pl = row.player;
             if (pl) {
                 playersById[pl.id] = playersById[pl.id] || {
@@ -3484,7 +3514,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
             return {
                 playerId: row.playerId,
                 role: row.role,
-                player: pl ? playersById[pl.id] : null
+                player: pl ? allPlayersById[pl.id] : null
             };
         })
     }));
@@ -3492,7 +3522,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         id: s.id,
         playerId: s.playerId,
         side: s.side,
-        playerName: playersById[s.playerId]?.name || null
+        playerName: allPlayersById[s.playerId]?.name || playersById[s.playerId]?.name || null
     }));
     return {
         id: match.id,
