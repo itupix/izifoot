@@ -63,6 +63,7 @@ model Team {
   club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   users     User[]
+  tactics   Tactic[]
 
   @@unique([clubId, name])
 }
@@ -316,4 +317,18 @@ model Diagram {
   @@index([trainingDrillId])
   @@index([userId, drillId])
   @@index([userId, trainingDrillId])
+}
+
+model Tactic {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  name      String
+  formation String
+  points    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([teamId])
+  @@index([teamId, updatedAt(sort: Desc)])
 }

@@ -21,6 +21,7 @@ const crypto_1 = require("crypto");
 const plateau_metadata_1 = require("./plateau-metadata");
 const attendance_1 = require("./attendance");
 const training_role_assignments_1 = require("./training-role-assignments");
+const tactics_1 = require("./tactics");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -2268,6 +2269,7 @@ app.use(async (req, res, next) => {
         '/drills',
         '/training-drills',
         '/diagrams',
+        '/tactics',
     ];
     const isGuarded = guardedPrefixes.some((prefix) => pathStartsWith(req.path, prefix));
     if (!isGuarded)
@@ -4341,6 +4343,141 @@ app.delete('/diagrams/:id', authMiddleware, async (req, res) => {
         console.error('[DELETE /diagrams/:id] failed', e);
         return res.status(500).json({ error: 'Failed to delete diagram' });
     }
+});
+app.get('/tactics', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const parsed = zod_1.z.object({ teamId: zod_1.z.string().min(1) }).safeParse(req.query);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const { teamId } = parsed.data;
+    if (!(0, tactics_1.canWriteTacticForTeam)(req.auth, teamId)) {
+        return res.status(403).json({ error: 'Forbidden team scope for tactics' });
+    }
+    const rows = await prisma.tactic.findMany({
+        where: { teamId },
+        orderBy: { updatedAt: 'desc' },
+    });
+    return res.json(rows);
+});
+app.get('/tactics/:id', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const activeTeamId = getActiveTeamIdForAuth(req.auth);
+    if (!activeTeamId)
+        return res.status(400).json({ error: 'Active team selection is required' });
+    const row = await prisma.tactic.findFirst({
+        where: { id: req.params.id, teamId: activeTeamId },
+    });
+    if (!row)
+        return res.status(404).json({ error: 'Tactic not found' });
+    return res.json(row);
+});
+app.post('/tactics', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const parsed = tactics_1.tacticPayloadSchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    let team;
+    try {
+        team = await resolveTeamForWrite(req.auth);
+    }
+    catch (e) {
+        return res.status(400).json({ error: e.message });
+    }
+    if (parsed.data.teamId !== team.id || !(0, tactics_1.canWriteTacticForTeam)(req.auth, parsed.data.teamId)) {
+        return res.status(403).json({ error: 'Forbidden team scope for tactics' });
+    }
+    try {
+        const saved = await (0, tactics_1.upsertTacticByTeamAndName)(prisma.tactic, parsed.data);
+        return res.json(saved);
+    }
+    catch (e) {
+        if (e?.code === 'P2002') {
+            const existing = await prisma.tactic.findFirst({
+                where: {
+                    teamId: parsed.data.teamId,
+                    name: {
+                        equals: parsed.data.name,
+                        mode: 'insensitive',
+                    },
+                },
+            });
+            if (existing) {
+                const updated = await prisma.tactic.update({
+                    where: { id: existing.id },
+                    data: {
+                        name: parsed.data.name,
+                        formation: parsed.data.formation,
+                        points: parsed.data.points,
+                    },
+                });
+                return res.json(updated);
+            }
+            return res.status(409).json({ error: 'Tactic name conflict for this team' });
+        }
+        console.error('[POST /tactics] failed', e);
+        return res.status(500).json({ error: 'Failed to save tactic' });
+    }
+});
+app.put('/tactics/:id', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const parsed = tactics_1.tacticPayloadSchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    let team;
+    try {
+        team = await resolveTeamForWrite(req.auth);
+    }
+    catch (e) {
+        return res.status(400).json({ error: e.message });
+    }
+    if (parsed.data.teamId !== team.id || !(0, tactics_1.canWriteTacticForTeam)(req.auth, parsed.data.teamId)) {
+        return res.status(403).json({ error: 'Forbidden team scope for tactics' });
+    }
+    const existing = await prisma.tactic.findFirst({
+        where: { id: req.params.id, teamId: parsed.data.teamId },
+    });
+    if (!existing)
+        return res.status(404).json({ error: 'Tactic not found' });
+    try {
+        const updated = await prisma.tactic.update({
+            where: { id: existing.id },
+            data: {
+                name: parsed.data.name,
+                formation: parsed.data.formation,
+                points: parsed.data.points,
+            },
+        });
+        return res.json(updated);
+    }
+    catch (e) {
+        if (e?.code === 'P2002')
+            return res.status(409).json({ error: 'Tactic name conflict for this team' });
+        if (e?.code === 'P2025')
+            return res.status(404).json({ error: 'Tactic not found' });
+        console.error('[PUT /tactics/:id] failed', e);
+        return res.status(500).json({ error: 'Failed to update tactic' });
+    }
+});
+app.delete('/tactics/:id', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    let team;
+    try {
+        team = await resolveTeamForWrite(req.auth);
+    }
+    catch (e) {
+        return res.status(400).json({ error: e.message });
+    }
+    const deleted = await prisma.tactic.deleteMany({
+        where: { id: req.params.id, teamId: team.id },
+    });
+    if (!deleted.count)
+        return res.status(404).json({ error: 'Tactic not found' });
+    return res.json({ ok: true });
 });
 // === END FOOT DOMAIN API ===
 app.get('/health', (_req, res) => res.json({ ok: true }));
