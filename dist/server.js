@@ -22,6 +22,7 @@ const plateau_metadata_1 = require("./plateau-metadata");
 const attendance_1 = require("./attendance");
 const training_role_assignments_1 = require("./training-role-assignments");
 const tactics_1 = require("./tactics");
+const match_tactic_1 = require("./match-tactic");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -3500,6 +3501,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         played: Boolean(match.played),
         plateauId: match.plateauId ?? null,
         opponentName: match.opponentName ?? null,
+        tactic: match.tactic ?? null,
         teams,
         scorers,
         playersById
@@ -3614,7 +3616,8 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
         }),
         score: zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) }),
         buteurs: zod_1.z.array(zod_1.z.object({ playerId: zod_1.z.string(), side: zod_1.z.enum(['home', 'away']) })).default([]),
-        opponentName: zod_1.z.string().max(100).optional()
+        opponentName: zod_1.z.string().max(100).optional(),
+        tactic: match_tactic_1.matchTacticSchema.nullable().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -3665,6 +3668,8 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
             }
             if (payload.opponentName !== undefined)
                 matchPatch.opponentName = payload.opponentName;
+            if (payload.tactic !== undefined)
+                matchPatch.tactic = payload.tactic;
             if (Object.keys(matchPatch).length > 0) {
                 await tx.match.update({ where: { id: matchId }, data: matchPatch });
             }

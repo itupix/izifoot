@@ -29,6 +29,7 @@ import {
   tacticPayloadSchema,
   upsertTacticByTeamAndName,
 } from './tactics'
+import { matchTacticSchema } from './match-tactic'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -3600,6 +3601,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     played: Boolean(match.played),
     plateauId: match.plateauId ?? null,
     opponentName: match.opponentName ?? null,
+    tactic: match.tactic ?? null,
     teams,
     scorers,
     playersById
@@ -3717,7 +3719,8 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
     }),
     score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }),
     buteurs: z.array(z.object({ playerId: z.string(), side: z.enum(['home', 'away']) })).default([]),
-    opponentName: z.string().max(100).optional()
+    opponentName: z.string().max(100).optional(),
+    tactic: matchTacticSchema.nullable().optional(),
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
@@ -3769,6 +3772,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
           : { disconnect: true }
       }
       if (payload.opponentName !== undefined) matchPatch.opponentName = payload.opponentName
+      if (payload.tactic !== undefined) matchPatch.tactic = payload.tactic
       if (Object.keys(matchPatch).length > 0) {
         await tx.match.update({ where: { id: matchId }, data: matchPatch })
       }

@@ -212,6 +212,7 @@ model Match {
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   opponentName String?
+  tactic       Json?
 }
 
 model MatchTeam {
