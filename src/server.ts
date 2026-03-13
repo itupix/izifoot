@@ -31,6 +31,7 @@ import {
 } from './tactics'
 import { matchTacticSchema } from './match-tactic'
 import { buildEligiblePlayerIdsFromPlateauAttendance } from './match-eligibility'
+import { matchEventCreateSchema } from './match-events'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -3478,7 +3479,8 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req: any, res) => {
       ...m,
       scorersDetailed: m.scorers.map((s: any) => ({
         ...s,
-        playerName: playersById[s.playerId]?.name || null
+        playerName: playersById[s.playerId]?.name || null,
+        assistName: s.assistId ? (playersById[s.assistId]?.name || null) : null
       }))
     }))
 
@@ -3534,7 +3536,7 @@ function rowsForMatchTeam(matchTeamId: string, ids: string[], role: 'starter' | 
   return ids.map((playerId) => ({ matchTeamId, playerId, role }))
 }
 
-function normalizeMatchState<T extends { score?: { home: number; away: number }; buteurs?: Array<{ playerId: string; side: 'home' | 'away' }>; played?: boolean }>(
+function normalizeMatchState<T extends { score?: { home: number; away: number }; buteurs?: Array<{ playerId: string; side: 'home' | 'away'; assistId?: string | null }>; played?: boolean }>(
   payload: T,
   fallbackPlayed = false
 ) {
@@ -3544,6 +3546,122 @@ function normalizeMatchState<T extends { score?: { home: number; away: number };
     score: played ? (payload.score ?? { home: 0, away: 0 }) : { home: 0, away: 0 },
     buteurs: played ? (payload.buteurs ?? []) : []
   }
+}
+
+const matchScorerPayloadSchema = z.object({
+  playerId: z.string(),
+  side: z.enum(['home', 'away']),
+  assistId: z.string().nullable().optional(),
+}).superRefine((value, ctx) => {
+  if (value.assistId && value.assistId === value.playerId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['assistId'],
+      message: 'assistId must be different from playerId',
+    })
+  }
+})
+
+function toMatchEventResponse(row: any) {
+  return {
+    id: row.id,
+    matchId: row.matchId,
+    minute: row.minute,
+    type: row.type,
+    scorerId: row.scorerId ?? null,
+    assistId: row.assistId ?? null,
+    slotId: row.slotId ?? null,
+    inPlayerId: row.inPlayerId ?? null,
+    outPlayerId: row.outPlayerId ?? null,
+    createdAt: row.createdAt,
+  }
+}
+
+async function listMatchEventsByMatchId(db: any, matchId: string) {
+  try {
+    const rows = await db.matchEvent.findMany({
+      where: { matchId },
+      orderBy: [{ minute: 'asc' }, { createdAt: 'asc' }],
+    })
+    return rows.map(toMatchEventResponse)
+  } catch (e: any) {
+    if (e?.code === 'P2021') return []
+    throw e
+  }
+}
+
+async function listMatchEventsForUser(db: any, scopeOrUserId: any, matchId: string) {
+  const match = await matchFindFirstForUser(db, scopeOrUserId, {
+    where: { id: matchId },
+    select: { id: true },
+  })
+  if (!match) return null
+  return listMatchEventsByMatchId(db, matchId)
+}
+
+async function assertEventPlayerIdsInMatchScope(db: any, scopeOrUserId: any, matchId: string, playerIds: string[]) {
+  const uniqueIds = Array.from(new Set(playerIds.filter(Boolean)))
+  if (!uniqueIds.length) return
+
+  const matchTeams = await db.matchTeam.findMany({
+    where: { matchId },
+    select: { id: true },
+  })
+  const matchTeamIds = matchTeams.map((row: any) => row.id)
+  const rows = matchTeamIds.length
+    ? await db.matchTeamPlayer.findMany({
+      where: {
+        matchTeamId: { in: matchTeamIds },
+        playerId: { in: uniqueIds },
+      },
+      select: { playerId: true },
+    })
+    : []
+
+  const foundIds = new Set(rows.map((row: any) => row.playerId))
+  const missingInMatchTeams = uniqueIds.filter((id) => !foundIds.has(id))
+
+  if (!missingInMatchTeams.length) return
+
+  for (const playerId of missingInMatchTeams) {
+    const player = await playerFindFirstForUser(db, scopeOrUserId, {
+      where: { id: playerId },
+      select: { id: true },
+    })
+    if (!player) {
+      const err: any = new Error(`Player ${playerId} is outside match scope`)
+      err.code = 'PLAYER_SCOPE_FORBIDDEN'
+      throw err
+    }
+  }
+}
+
+async function assertPlayerIdsInMatchTeams(db: any, matchId: string, playerIds: string[]) {
+  const uniqueIds = Array.from(new Set(playerIds.filter(Boolean)))
+  if (!uniqueIds.length) return
+
+  const matchTeams = await db.matchTeam.findMany({
+    where: { matchId },
+    select: { id: true },
+  })
+  const matchTeamIds = matchTeams.map((row: any) => row.id)
+  const rows = matchTeamIds.length
+    ? await db.matchTeamPlayer.findMany({
+      where: {
+        matchTeamId: { in: matchTeamIds },
+        playerId: { in: uniqueIds },
+      },
+      select: { playerId: true },
+    })
+    : []
+
+  const foundIds = new Set(rows.map((row: any) => row.playerId))
+  const missing = uniqueIds.filter((id) => !foundIds.has(id))
+  if (!missing.length) return
+
+  const err: any = new Error(`Players not in match teams: ${missing.join(', ')}`)
+  err.code = 'PLAYER_NOT_IN_MATCH_TEAMS'
+  throw err
 }
 
 async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
@@ -3621,8 +3739,11 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     id: s.id,
     playerId: s.playerId,
     side: s.side,
-    playerName: allPlayersById[s.playerId]?.name || playersById[s.playerId]?.name || null
+    assistId: s.assistId ?? null,
+    playerName: allPlayersById[s.playerId]?.name || playersById[s.playerId]?.name || null,
+    assistName: s.assistId ? (allPlayersById[s.assistId]?.name || playersById[s.assistId]?.name || null) : null
   }))
+  const events = await listMatchEventsByMatchId(db, id)
 
   return {
     id: match.id,
@@ -3634,6 +3755,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     tactic: match.tactic ?? null,
     teams,
     scorers,
+    events,
     playersById
   }
 }
@@ -3661,6 +3783,79 @@ app.get('/matches/:id', authMiddleware, async (req: any, res) => {
   }
 })
 
+app.get('/matches/:id/events', authMiddleware, async (req: any, res) => {
+  const { id: matchId } = req.params
+  try {
+    const events = await listMatchEventsForUser(prisma, req.auth, matchId)
+    if (!events) return res.status(404).json({ error: 'Match not found' })
+    return res.json(events)
+  } catch (e) {
+    console.error('[GET /matches/:id/events] failed', e)
+    return res.status(500).json({ error: 'Failed to fetch match events' })
+  }
+})
+
+app.post('/matches/:id/events', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const { id: matchId } = req.params
+  const parsed = matchEventCreateSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  try {
+    const match = await matchFindFirstForUser(prisma, req.auth, {
+      where: { id: matchId },
+      select: { id: true },
+    })
+    if (!match) return res.status(404).json({ error: 'Match not found' })
+
+    const payload = parsed.data
+    const playerIds = [payload.scorerId, payload.assistId, payload.inPlayerId, payload.outPlayerId].filter(Boolean) as string[]
+    await assertEventPlayerIdsInMatchScope(prisma, req.auth, matchId, playerIds)
+
+    const created = await prisma.matchEvent.create({
+      data: {
+        matchId,
+        minute: payload.minute,
+        type: payload.type,
+        scorerId: payload.scorerId ?? null,
+        assistId: payload.assistId ?? null,
+        slotId: payload.slotId ?? null,
+        inPlayerId: payload.inPlayerId ?? null,
+        outPlayerId: payload.outPlayerId ?? null,
+      },
+    })
+    return res.status(201).json(toMatchEventResponse(created))
+  } catch (e: any) {
+    if (e?.code === 'PLAYER_SCOPE_FORBIDDEN') return res.status(400).json({ error: e.message })
+    if (e?.code === 'P2003') return res.status(400).json({ error: 'Invalid foreign key reference in event payload' })
+    if (e?.code === 'P2021') return res.status(503).json({ error: 'Match event storage unavailable' })
+    console.error('[POST /matches/:id/events] failed', e)
+    return res.status(500).json({ error: 'Failed to create match event' })
+  }
+})
+
+app.delete('/matches/:id/events/:eventId', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const { id: matchId, eventId } = req.params
+  try {
+    const match = await matchFindFirstForUser(prisma, req.auth, {
+      where: { id: matchId },
+      select: { id: true },
+    })
+    if (!match) return res.status(404).json({ error: 'Match not found' })
+
+    const deleted = await prisma.matchEvent.deleteMany({
+      where: { id: eventId, matchId },
+    })
+    if (deleted.count === 0) return res.status(404).json({ error: 'Match event not found' })
+    return res.json({ ok: true })
+  } catch (e) {
+    if ((e as any)?.code === 'P2021') return res.status(503).json({ error: 'Match event storage unavailable' })
+    console.error('[DELETE /matches/:id/events/:eventId] failed', e)
+    return res.status(500).json({ error: 'Failed to delete match event' })
+  }
+})
+
 app.post('/matches', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
   const schema = z.object({
@@ -3678,7 +3873,7 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
       }).default({ starters: [], subs: [] })
     }),
     score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }).optional(),
-    buteurs: z.array(z.object({ playerId: z.string(), side: z.enum(['home', 'away']) })).optional(),
+    buteurs: z.array(matchScorerPayloadSchema).optional(),
     opponentName: z.string().min(1).max(100).optional()
   })
   const parsed = schema.safeParse(req.body)
@@ -3699,35 +3894,51 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
     }
   }
 
-  const match = await matchCreateForUser(prisma, req.auth, {
-    type, plateauId, opponentName, played: normalized.played,
-    clubId: team?.clubId ?? req.auth.clubId ?? null,
-    teamId: team?.id ?? null
-  })
-  const home = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'home', score: normalized.score.home } })
-  const away = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'away', score: normalized.score.away } })
+  try {
+    const match = await matchCreateForUser(prisma, req.auth, {
+      type, plateauId, opponentName, played: normalized.played,
+      clubId: team?.clubId ?? req.auth.clubId ?? null,
+      teamId: team?.id ?? null
+    })
+    const home = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'home', score: normalized.score.home } })
+    const away = await prisma.matchTeam.create({ data: { matchId: match.id, side: 'away', score: normalized.score.away } })
 
-  const toMTP = (matchTeamId: string, ids: string[], role: 'starter' | 'sub') => ids.map(playerId => ({ matchTeamId, playerId, role }))
-  const mtps = [
-    ...toMTP(home.id, sides.home.starters, 'starter'),
-    ...toMTP(home.id, sides.home.subs, 'sub'),
-    ...toMTP(away.id, sides.away.starters, 'starter'),
-    ...toMTP(away.id, sides.away.subs, 'sub'),
-  ]
-  const uniqueMtps = Array.from(
-    new Map(mtps.map((r) => [`${r.matchTeamId}:${r.playerId}:${r.role}`, r])).values()
-  )
-  if (uniqueMtps.length) await prisma.matchTeamPlayer.createMany({ data: uniqueMtps })
+    const toMTP = (matchTeamId: string, ids: string[], role: 'starter' | 'sub') => ids.map(playerId => ({ matchTeamId, playerId, role }))
+    const mtps = [
+      ...toMTP(home.id, sides.home.starters, 'starter'),
+      ...toMTP(home.id, sides.home.subs, 'sub'),
+      ...toMTP(away.id, sides.away.starters, 'starter'),
+      ...toMTP(away.id, sides.away.subs, 'sub'),
+    ]
+    const uniqueMtps = Array.from(
+      new Map(mtps.map((r) => [`${r.matchTeamId}:${r.playerId}:${r.role}`, r])).values()
+    )
+    if (uniqueMtps.length) await prisma.matchTeamPlayer.createMany({ data: uniqueMtps })
 
-  if (normalized.buteurs.length) {
-    await prisma.scorer.createMany({ data: normalized.buteurs.map(b => ({ matchId: match.id, playerId: b.playerId, side: b.side })) })
+    if (normalized.buteurs.length) {
+      const scorerPlayerIds = normalized.buteurs.flatMap((b) => [b.playerId, b.assistId ?? null].filter(Boolean) as string[])
+      await assertPlayerIdsInMatchTeams(prisma, match.id, scorerPlayerIds)
+      await prisma.scorer.createMany({
+        data: normalized.buteurs.map((b) => ({
+          matchId: match.id,
+          playerId: b.playerId,
+          assistId: b.assistId ?? null,
+          side: b.side,
+        }))
+      })
+    }
+
+    const full = await matchFindUniqueCompat(prisma, {
+      where: { id: match.id },
+      include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
+    })
+    res.json(full)
+  } catch (e: any) {
+    if (e?.code === 'PLAYER_NOT_IN_MATCH_TEAMS') return res.status(400).json({ error: e.message })
+    if (e?.code === 'P2003') return res.status(400).json({ error: 'Invalid scorer reference in payload' })
+    console.error('[POST /matches] failed', e)
+    return res.status(500).json({ error: 'Failed to create match' })
   }
-
-  const full = await matchFindUniqueCompat(prisma, {
-    where: { id: match.id },
-    include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
-  })
-  res.json(full)
 })
 
 // Update a match: score, opponentName, and (optionally) scorers (replace all)
@@ -3748,7 +3959,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
       })
     }),
     score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }),
-    buteurs: z.array(z.object({ playerId: z.string(), side: z.enum(['home', 'away']) })).default([]),
+    buteurs: z.array(matchScorerPayloadSchema).default([]),
     opponentName: z.string().max(100).optional(),
     tactic: matchTacticSchema.nullable().optional(),
   })
@@ -3826,7 +4037,32 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
 
       await tx.scorer.deleteMany({ where: { matchId } })
       if (normalized.buteurs.length) {
-        await tx.scorer.createMany({ data: normalized.buteurs.map((b) => ({ matchId, playerId: b.playerId, side: b.side })) })
+        const scorerPlayerIds = normalized.buteurs.flatMap((b) => [b.playerId, b.assistId ?? null].filter(Boolean) as string[])
+        await assertPlayerIdsInMatchTeams(tx, matchId, scorerPlayerIds)
+        await tx.scorer.createMany({
+          data: normalized.buteurs.map((b) => ({
+            matchId,
+            playerId: b.playerId,
+            assistId: b.assistId ?? null,
+            side: b.side,
+          }))
+        })
+      }
+
+      try {
+        const [goalForCount, goalAgainstCount] = await Promise.all([
+          tx.matchEvent.count({ where: { matchId, type: 'GOAL_FOR' } }),
+          tx.matchEvent.count({ where: { matchId, type: 'GOAL_AGAINST' } }),
+        ])
+        if (goalForCount !== normalized.score.home || goalAgainstCount !== normalized.score.away) {
+          console.warn('[PUT /matches/:id] score/events mismatch', {
+            matchId,
+            expected: normalized.score,
+            eventsCount: { GOAL_FOR: goalForCount, GOAL_AGAINST: goalAgainstCount },
+          })
+        }
+      } catch (e: any) {
+        if (e?.code !== 'P2021') throw e
       }
 
       return existing.id
@@ -3838,6 +4074,8 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
   } catch (e) {
     if ((e as any)?.code === 'MATCH_NOT_FOUND') return res.status(404).json({ error: 'Match not found' })
     if ((e as any)?.code === 'PLATEAU_NOT_FOUND') return res.status(404).json({ error: 'Plateau not found' })
+    if ((e as any)?.code === 'PLAYER_NOT_IN_MATCH_TEAMS') return res.status(400).json({ error: (e as any).message })
+    if ((e as any)?.code === 'P2003') return res.status(400).json({ error: 'Invalid scorer reference in payload' })
     console.error('[PUT /matches/:id] failed', e)
     return res.status(500).json({ error: 'Failed to update match' })
   }
