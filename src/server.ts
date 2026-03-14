@@ -30,6 +30,8 @@ import {
   upsertTacticByTeamAndName,
 } from './tactics'
 import { normalizeTeamCategory } from './team-category'
+import { normalizeTeamFormat } from './team-format'
+import { computeAutoTeamName } from './team-name'
 import { matchTacticSchema } from './match-tactic'
 import { buildEligiblePlayerIdsFromPlateauAttendance } from './match-eligibility'
 import { matchEventCreateSchema } from './match-events'
@@ -293,44 +295,48 @@ function isWriteMethod(method: string) {
   return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE'
 }
 
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 async function generateAutoTeamName(clubId: string, baseName: string, opts: { excludeTeamId?: string } = {}) {
   const existingTeams = await prisma.team.findMany({
     where: {
       clubId,
       ...(opts.excludeTeamId ? { id: { not: opts.excludeTeamId } } : {}),
-      name: { startsWith: baseName },
     },
     select: { name: true },
   })
-
-  const exactBaseRegex = new RegExp(`^${escapeRegExp(baseName)}$`)
-  const suffixedRegex = new RegExp(`^${escapeRegExp(baseName)}\\s+(\\d+)$`)
-  let hasBaseName = false
-  let maxSuffix = 1
-
-  for (const row of existingTeams) {
-    if (exactBaseRegex.test(row.name)) {
-      hasBaseName = true
-      continue
-    }
-    const m = row.name.match(suffixedRegex)
-    if (!m) continue
-    const suffix = Number(m[1])
-    if (Number.isInteger(suffix) && suffix > maxSuffix) maxSuffix = suffix
-  }
-
-  if (!hasBaseName) return baseName
-  return `${baseName} ${maxSuffix + 1}`
+  return computeAutoTeamName(baseName, existingTeams.map((row) => row.name))
 }
 
-const teamUpsertPayloadSchema = z.object({
-  name: z.string({ invalid_type_error: 'Name must be a string' }).max(80, 'Name must be at most 80 characters').optional().nullable(),
-  category: z.string({ required_error: 'Category is required', invalid_type_error: 'Category must be a string' }).min(1, 'Category is required'),
-})
+const teamUpsertPayloadSchema = z.preprocess(
+  (raw) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
+    const payload = raw as Record<string, unknown>
+    return {
+      name: payload.name ?? payload.teamName ?? null,
+      category: payload.category,
+      format: payload.format ?? payload.gameFormat ?? payload.game_format,
+    }
+  },
+  z.object({
+    name: z.string({ invalid_type_error: 'Name must be a string' }).max(80, 'Name must be at most 80 characters').optional().nullable(),
+    category: z.string({ required_error: 'Category is required', invalid_type_error: 'Category must be a string' }).min(1, 'Category is required'),
+    format: z.string({ required_error: 'Format is required', invalid_type_error: 'Format must be a string' }).min(1, 'Format is required'),
+  })
+)
+
+function normalizeTeamResponse(team: any) {
+  return {
+    id: team.id,
+    name: team.name,
+    category: team.category,
+    format: team.format,
+    clubId: team.clubId,
+    createdAt: team.createdAt,
+  }
+}
+
+function logTeamValidationFailure(endpoint: string, reason: string, details: Record<string, unknown> = {}) {
+  console.warn(`[${endpoint}] team validation failed: ${reason}`, details)
+}
 
 function pathStartsWith(pathname: string, prefix: string) {
   return pathname === prefix || pathname.startsWith(`${prefix}/`)
@@ -2212,28 +2218,63 @@ app.get('/teams', authMiddleware, async (req: any, res) => {
   if (!req.auth?.clubId) return res.json([])
   const teams = await prisma.team.findMany({
     where: { clubId: req.auth.clubId },
-    orderBy: { name: 'asc' }
+    orderBy: { name: 'asc' },
+    select: {
+      id: true,
+      name: true,
+      category: true,
+      format: true,
+      clubId: true,
+      createdAt: true,
+    },
   })
-  res.json(teams)
+  res.json(teams.map(normalizeTeamResponse))
 })
 
 app.post('/teams', authMiddleware, async (req: any, res) => {
   if (!ensureDirection(req, res)) return
   if (!req.auth?.clubId) return res.status(400).json({ error: 'Direction account must be attached to a club' })
   const parsed = teamUpsertPayloadSchema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid team payload' })
+  if (!parsed.success) {
+    const message = parsed.error.issues[0]?.message || 'Invalid team payload'
+    logTeamValidationFailure('POST /teams', message, { clubId: req.auth.clubId })
+    return res.status(400).json({ error: message })
+  }
 
   const categoryResult = normalizeTeamCategory(parsed.data.category)
-  if (!categoryResult.ok) return res.status(400).json({ error: categoryResult.error })
+  if (!categoryResult.ok) {
+    logTeamValidationFailure('POST /teams', categoryResult.error, {
+      clubId: req.auth.clubId,
+      category: parsed.data.category,
+    })
+    return res.status(400).json({ error: categoryResult.error })
+  }
+
+  const formatResult = normalizeTeamFormat(parsed.data.format)
+  if (!formatResult.ok) {
+    logTeamValidationFailure('POST /teams', formatResult.error, {
+      clubId: req.auth.clubId,
+      format: parsed.data.format,
+    })
+    return res.status(400).json({ error: formatResult.error })
+  }
 
   const providedName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : ''
   const finalName = providedName || await generateAutoTeamName(req.auth.clubId, categoryResult.category)
 
   try {
     const team = await prisma.team.create({
-      data: { name: finalName, category: categoryResult.category, clubId: req.auth.clubId }
+      data: { name: finalName, category: categoryResult.category, format: formatResult.format, clubId: req.auth.clubId },
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        format: true,
+        clubId: true,
+        createdAt: true,
+      },
     })
-    return res.status(201).json(team)
+    return res.status(201).json(normalizeTeamResponse(team))
   } catch (e: any) {
     if (e?.code === 'P2002') {
       return res.status(409).json({ error: 'Team name already exists in this club' })
@@ -2247,10 +2288,34 @@ app.put('/teams/:id', authMiddleware, async (req: any, res) => {
   if (!req.auth?.clubId) return res.status(400).json({ error: 'Direction account must be attached to a club' })
 
   const parsed = teamUpsertPayloadSchema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid team payload' })
+  if (!parsed.success) {
+    const message = parsed.error.issues[0]?.message || 'Invalid team payload'
+    logTeamValidationFailure('PUT /teams/:id', message, {
+      clubId: req.auth.clubId,
+      teamId: req.params.id,
+    })
+    return res.status(400).json({ error: message })
+  }
 
   const categoryResult = normalizeTeamCategory(parsed.data.category)
-  if (!categoryResult.ok) return res.status(400).json({ error: categoryResult.error })
+  if (!categoryResult.ok) {
+    logTeamValidationFailure('PUT /teams/:id', categoryResult.error, {
+      clubId: req.auth.clubId,
+      teamId: req.params.id,
+      category: parsed.data.category,
+    })
+    return res.status(400).json({ error: categoryResult.error })
+  }
+
+  const formatResult = normalizeTeamFormat(parsed.data.format)
+  if (!formatResult.ok) {
+    logTeamValidationFailure('PUT /teams/:id', formatResult.error, {
+      clubId: req.auth.clubId,
+      teamId: req.params.id,
+      format: parsed.data.format,
+    })
+    return res.status(400).json({ error: formatResult.error })
+  }
 
   const existingTeam = await prisma.team.findFirst({
     where: { id: req.params.id, clubId: req.auth.clubId },
@@ -2267,9 +2332,18 @@ app.put('/teams/:id', authMiddleware, async (req: any, res) => {
       data: {
         name: finalName,
         category: categoryResult.category,
+        format: formatResult.format,
+      },
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        format: true,
+        clubId: true,
+        createdAt: true,
       },
     })
-    return res.json(updated)
+    return res.json(normalizeTeamResponse(updated))
   } catch (e: any) {
     if (e?.code === 'P2002') {
       return res.status(409).json({ error: 'Team name already exists in this club' })
@@ -2292,7 +2366,7 @@ app.delete('/teams/:id', authMiddleware, async (req: any, res) => {
     await prisma.team.delete({ where: { id: team.id } })
     return res.json({ ok: true })
   } catch (e: any) {
-    if (e?.code === 'P2003') {
+    if (e?.code === 'P2003' || e?.code === 'P2014') {
       return res.status(409).json({ error: 'Cannot delete team because it is still referenced by related data' })
     }
     throw e

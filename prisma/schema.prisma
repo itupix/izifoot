@@ -60,6 +60,7 @@ model Team {
   id        String   @id @default(cuid())
   name      String
   category  String
+  format    String
   clubId    String
   club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())

@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client'
 const prisma = new PrismaClient()
 async function main() {
   const club = await prisma.club.create({ data: { name: 'Seed Club' } })
-  const team = await prisma.team.create({ data: { name: 'U9 A', category: 'U9', clubId: club.id } })
+  const team = await prisma.team.create({ data: { name: 'U9 A', category: 'U9', format: '5v5', clubId: club.id } })
   const user = await prisma.user.create({
     data: {
       email: 'seed-direction@example.com',
