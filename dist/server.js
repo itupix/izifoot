@@ -22,6 +22,7 @@ const plateau_metadata_1 = require("./plateau-metadata");
 const attendance_1 = require("./attendance");
 const training_role_assignments_1 = require("./training-role-assignments");
 const tactics_1 = require("./tactics");
+const team_category_1 = require("./team-category");
 const match_tactic_1 = require("./match-tactic");
 const match_eligibility_1 = require("./match-eligibility");
 const match_events_1 = require("./match-events");
@@ -270,6 +271,42 @@ function ensureStaff(req, res) {
 function isWriteMethod(method) {
     return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
 }
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+async function generateAutoTeamName(clubId, baseName, opts = {}) {
+    const existingTeams = await prisma.team.findMany({
+        where: {
+            clubId,
+            ...(opts.excludeTeamId ? { id: { not: opts.excludeTeamId } } : {}),
+            name: { startsWith: baseName },
+        },
+        select: { name: true },
+    });
+    const exactBaseRegex = new RegExp(`^${escapeRegExp(baseName)}$`);
+    const suffixedRegex = new RegExp(`^${escapeRegExp(baseName)}\\s+(\\d+)$`);
+    let hasBaseName = false;
+    let maxSuffix = 1;
+    for (const row of existingTeams) {
+        if (exactBaseRegex.test(row.name)) {
+            hasBaseName = true;
+            continue;
+        }
+        const m = row.name.match(suffixedRegex);
+        if (!m)
+            continue;
+        const suffix = Number(m[1]);
+        if (Number.isInteger(suffix) && suffix > maxSuffix)
+            maxSuffix = suffix;
+    }
+    if (!hasBaseName)
+        return baseName;
+    return `${baseName} ${maxSuffix + 1}`;
+}
+const teamUpsertPayloadSchema = zod_1.z.object({
+    name: zod_1.z.string({ invalid_type_error: 'Name must be a string' }).max(80, 'Name must be at most 80 characters').optional().nullable(),
+    category: zod_1.z.string({ required_error: 'Category is required', invalid_type_error: 'Category must be a string' }).min(1, 'Category is required'),
+});
 function pathStartsWith(pathname, prefix) {
     return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
@@ -2051,14 +2088,84 @@ app.post('/teams', authMiddleware, async (req, res) => {
         return;
     if (!req.auth?.clubId)
         return res.status(400).json({ error: 'Direction account must be attached to a club' });
-    const schema = zod_1.z.object({ name: zod_1.z.string().min(2).max(80) });
-    const parsed = schema.safeParse(req.body);
+    const parsed = teamUpsertPayloadSchema.safeParse(req.body);
     if (!parsed.success)
-        return res.status(400).json({ error: parsed.error.flatten() });
-    const team = await prisma.team.create({
-        data: { name: parsed.data.name, clubId: req.auth.clubId }
+        return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid team payload' });
+    const categoryResult = (0, team_category_1.normalizeTeamCategory)(parsed.data.category);
+    if (!categoryResult.ok)
+        return res.status(400).json({ error: categoryResult.error });
+    const providedName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : '';
+    const finalName = providedName || await generateAutoTeamName(req.auth.clubId, categoryResult.category);
+    try {
+        const team = await prisma.team.create({
+            data: { name: finalName, category: categoryResult.category, clubId: req.auth.clubId }
+        });
+        return res.status(201).json(team);
+    }
+    catch (e) {
+        if (e?.code === 'P2002') {
+            return res.status(409).json({ error: 'Team name already exists in this club' });
+        }
+        throw e;
+    }
+});
+app.put('/teams/:id', authMiddleware, async (req, res) => {
+    if (!ensureDirection(req, res))
+        return;
+    if (!req.auth?.clubId)
+        return res.status(400).json({ error: 'Direction account must be attached to a club' });
+    const parsed = teamUpsertPayloadSchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid team payload' });
+    const categoryResult = (0, team_category_1.normalizeTeamCategory)(parsed.data.category);
+    if (!categoryResult.ok)
+        return res.status(400).json({ error: categoryResult.error });
+    const existingTeam = await prisma.team.findFirst({
+        where: { id: req.params.id, clubId: req.auth.clubId },
+        select: { id: true },
     });
-    res.status(201).json(team);
+    if (!existingTeam)
+        return res.status(404).json({ error: 'Team not found' });
+    const providedName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : '';
+    const finalName = providedName || await generateAutoTeamName(req.auth.clubId, categoryResult.category, { excludeTeamId: existingTeam.id });
+    try {
+        const updated = await prisma.team.update({
+            where: { id: existingTeam.id },
+            data: {
+                name: finalName,
+                category: categoryResult.category,
+            },
+        });
+        return res.json(updated);
+    }
+    catch (e) {
+        if (e?.code === 'P2002') {
+            return res.status(409).json({ error: 'Team name already exists in this club' });
+        }
+        throw e;
+    }
+});
+app.delete('/teams/:id', authMiddleware, async (req, res) => {
+    if (!ensureDirection(req, res))
+        return;
+    if (!req.auth?.clubId)
+        return res.status(400).json({ error: 'Direction account must be attached to a club' });
+    const team = await prisma.team.findFirst({
+        where: { id: req.params.id, clubId: req.auth.clubId },
+        select: { id: true },
+    });
+    if (!team)
+        return res.status(404).json({ error: 'Team not found' });
+    try {
+        await prisma.team.delete({ where: { id: team.id } });
+        return res.json({ ok: true });
+    }
+    catch (e) {
+        if (e?.code === 'P2003') {
+            return res.status(409).json({ error: 'Cannot delete team because it is still referenced by related data' });
+        }
+        throw e;
+    }
 });
 app.post('/accounts', authMiddleware, async (req, res) => {
     if (!ensureDirection(req, res))
