@@ -11,6 +11,9 @@ model User {
   id           String     @id @default(cuid())
   email        String     @unique
   passwordHash String
+  firstName    String?
+  lastName     String?
+  phone        String?
   isPremium    Boolean    @default(false)
   role         UserRole   @default(DIRECTION)
   clubId       String?
@@ -74,6 +77,9 @@ model AccountInvite {
   id                 String            @id @default(cuid())
   token              String            @unique
   email              String
+  firstName          String?
+  lastName           String?
+  phone              String?
   role               UserRole
   status             AccountInviteStatus @default(PENDING)
   clubId             String

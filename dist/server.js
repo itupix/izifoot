@@ -833,6 +833,65 @@ catch (e) {
 const waitlistSeen = new Map(); // email -> timestamp
 const WAITLIST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
 function normEmail(e) { return e.trim().toLowerCase(); }
+function asOptionalTrimmedString(value) {
+    if (typeof value !== 'string')
+        return null;
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : null;
+}
+function asStringArray(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter((item) => item.length > 0);
+}
+function firstPresentString(...values) {
+    for (const value of values) {
+        const normalized = asOptionalTrimmedString(value);
+        if (normalized)
+            return normalized;
+    }
+    return null;
+}
+function normalizeCoachPayload(raw) {
+    const managedTeamIds = asStringArray(raw?.managedTeamIds ?? raw?.managed_team_ids);
+    const teamIdFromLegacyManaged = managedTeamIds[0] ?? null;
+    return {
+        role: firstPresentString(raw?.role) ?? 'COACH',
+        firstName: firstPresentString(raw?.firstName, raw?.first_name, raw?.prenom),
+        lastName: firstPresentString(raw?.lastName, raw?.last_name, raw?.nom),
+        email: firstPresentString(raw?.email),
+        phone: firstPresentString(raw?.phone, raw?.telephone),
+        teamId: firstPresentString(raw?.teamId, raw?.team_id, teamIdFromLegacyManaged),
+        managedTeamIds,
+        expiresInDays: raw?.expiresInDays ?? raw?.expires_in_days,
+    };
+}
+function toCoachSummaryFromUser(user) {
+    return {
+        id: user.id,
+        firstName: user.firstName ?? null,
+        lastName: user.lastName ?? null,
+        email: user.email,
+        phone: user.phone ?? null,
+        teamId: user.teamId ?? null,
+        teamName: user.team?.name ?? null,
+        invitationStatus: 'ACCEPTED',
+    };
+}
+function toCoachSummaryFromInvite(invite) {
+    return {
+        id: invite.id,
+        firstName: invite.firstName ?? null,
+        lastName: invite.lastName ?? null,
+        email: invite.email,
+        phone: invite.phone ?? null,
+        teamId: invite.teamId ?? null,
+        teamName: invite.teamName ?? invite.team?.name ?? null,
+        invitationStatus: invite.status,
+    };
+}
 // --- Routes ---
 function safeParseJSON(s) {
     if (!s)
@@ -1871,6 +1930,9 @@ app.get('/auth/invitations/:token', async (req, res) => {
         select: {
             id: true,
             email: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
             role: true,
             status: true,
             expiresAt: true,
@@ -1921,6 +1983,9 @@ app.post('/auth/invitations/accept', async (req, res) => {
             data: {
                 email: invite.email,
                 passwordHash,
+                firstName: invite.firstName,
+                lastName: invite.lastName,
+                phone: invite.phone,
                 role: invite.role,
                 clubId: invite.clubId,
                 teamId: invite.teamId,
@@ -2046,6 +2111,9 @@ app.get('/clubs/me', authMiddleware, async (req, res) => {
                 select: {
                     id: true,
                     email: true,
+                    firstName: true,
+                    lastName: true,
+                    phone: true,
                     role: true,
                     teamId: true,
                     managedTeamIds: true,
@@ -2059,6 +2127,166 @@ app.get('/clubs/me', authMiddleware, async (req, res) => {
     if (!club)
         return res.status(404).json({ error: 'Club not found' });
     res.json(club);
+});
+app.get('/clubs/me/coaches', authMiddleware, async (req, res) => {
+    if (!ensureDirection(req, res))
+        return;
+    if (!req.auth?.clubId)
+        return res.status(404).json({ error: 'Club not found' });
+    await prisma.accountInvite.updateMany({
+        where: {
+            clubId: req.auth.clubId,
+            role: 'COACH',
+            status: 'PENDING',
+            expiresAt: { lt: new Date() }
+        },
+        data: { status: 'EXPIRED' }
+    });
+    const [coaches, invites] = await Promise.all([
+        prisma.user.findMany({
+            where: { clubId: req.auth.clubId, role: 'COACH' },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                phone: true,
+                teamId: true,
+                managedTeamIds: true,
+                createdAt: true,
+                team: { select: { name: true } },
+            },
+            orderBy: [{ createdAt: 'desc' }, { email: 'asc' }]
+        }),
+        prisma.accountInvite.findMany({
+            where: { clubId: req.auth.clubId, role: 'COACH' },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                phone: true,
+                teamId: true,
+                status: true,
+                managedTeamIds: true,
+                createdAt: true,
+            },
+            orderBy: [{ createdAt: 'desc' }]
+        })
+    ]);
+    const teamIds = new Set();
+    for (const coach of coaches)
+        if (coach.teamId)
+            teamIds.add(coach.teamId);
+    for (const invite of invites)
+        if (invite.teamId)
+            teamIds.add(invite.teamId);
+    const teams = teamIds.size
+        ? await prisma.team.findMany({
+            where: { id: { in: Array.from(teamIds) }, clubId: req.auth.clubId },
+            select: { id: true, name: true }
+        })
+        : [];
+    const teamNameById = new Map(teams.map((team) => [team.id, team.name]));
+    const acceptedEmails = new Set(coaches.map((coach) => normEmail(coach.email)));
+    const seenInviteEmails = new Set();
+    const pendingItems = invites.filter((invite) => {
+        const email = normEmail(invite.email);
+        if (acceptedEmails.has(email))
+            return false;
+        if (seenInviteEmails.has(email))
+            return false;
+        seenInviteEmails.add(email);
+        return true;
+    });
+    res.json([
+        ...coaches.map(toCoachSummaryFromUser),
+        ...pendingItems.map((invite) => toCoachSummaryFromInvite({
+            ...invite,
+            teamName: invite.teamId ? (teamNameById.get(invite.teamId) ?? null) : null
+        })),
+    ]);
+});
+app.get('/coaches/:id', authMiddleware, async (req, res) => {
+    if (!ensureDirection(req, res))
+        return;
+    if (!req.auth?.clubId)
+        return res.status(404).json({ error: 'Club not found' });
+    await prisma.accountInvite.updateMany({
+        where: {
+            clubId: req.auth.clubId,
+            role: 'COACH',
+            status: 'PENDING',
+            expiresAt: { lt: new Date() }
+        },
+        data: { status: 'EXPIRED' }
+    });
+    const coach = await prisma.user.findFirst({
+        where: {
+            id: req.params.id,
+            clubId: req.auth.clubId,
+            role: 'COACH'
+        },
+        select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            teamId: true,
+            managedTeamIds: true,
+            createdAt: true,
+            team: { select: { name: true } },
+        }
+    });
+    if (coach) {
+        return res.json({
+            ...toCoachSummaryFromUser(coach),
+            role: 'COACH',
+            managedTeamIds: coach.managedTeamIds,
+            createdAt: coach.createdAt,
+        });
+    }
+    const invite = await prisma.accountInvite.findFirst({
+        where: {
+            id: req.params.id,
+            clubId: req.auth.clubId,
+            role: 'COACH'
+        },
+        select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            status: true,
+            teamId: true,
+            managedTeamIds: true,
+            invitedByUserId: true,
+            expiresAt: true,
+            acceptedAt: true,
+            createdAt: true,
+            updatedAt: true,
+        }
+    });
+    if (!invite)
+        return res.status(404).json({ error: 'Coach not found' });
+    const teamName = invite.teamId
+        ? await prisma.team.findFirst({
+            where: { id: invite.teamId, clubId: req.auth.clubId },
+            select: { name: true }
+        }).then((team) => team?.name ?? null)
+        : null;
+    return res.json({
+        ...toCoachSummaryFromInvite({ ...invite, teamName }),
+        role: 'COACH',
+        managedTeamIds: invite.managedTeamIds,
+        invitedByUserId: invite.invitedByUserId,
+        expiresAt: invite.expiresAt,
+        acceptedAt: invite.acceptedAt,
+        createdAt: invite.createdAt,
+        updatedAt: invite.updatedAt,
+    });
 });
 app.put('/clubs/me', authMiddleware, async (req, res) => {
     if (!ensureDirection(req, res))
@@ -2237,64 +2465,46 @@ app.post('/accounts', authMiddleware, async (req, res) => {
         return;
     if (!req.auth?.clubId)
         return res.status(400).json({ error: 'Direction account must be attached to a club' });
+    const normalized = normalizeCoachPayload(req.body);
     const schema = zod_1.z.object({
-        email: zod_1.z.string().email(),
-        role: zod_1.z.enum(['DIRECTION', 'COACH', 'PLAYER', 'PARENT']),
-        teamId: zod_1.z.string().optional(),
-        managedTeamIds: zod_1.z.array(zod_1.z.string()).optional(),
-        linkedPlayerUserId: zod_1.z.string().optional(),
-        expiresInDays: zod_1.z.number().int().min(1).max(30).optional()
+        role: zod_1.z.enum(['COACH']),
+        firstName: zod_1.z.string().min(1, 'firstName is required').max(80),
+        lastName: zod_1.z.string().min(1, 'lastName is required').max(80),
+        email: zod_1.z.string().email('Invalid email format'),
+        phone: zod_1.z.string().min(3).max(32).nullable().optional(),
+        teamId: zod_1.z.string().min(1, 'teamId is required'),
+        managedTeamIds: zod_1.z.array(zod_1.z.string().min(1)).optional(),
+        expiresInDays: zod_1.z.coerce.number().int().min(1).max(30).optional()
     });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success)
-        return res.status(400).json({ error: parsed.error.flatten() });
+    const parsed = schema.safeParse(normalized);
+    if (!parsed.success) {
+        const firstIssue = parsed.error.issues[0];
+        return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() });
+    }
     const email = normEmail(parsed.data.email);
-    const { role } = parsed.data;
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing)
         return res.status(409).json({ error: 'Email already in use' });
-    const clubTeams = await prisma.team.findMany({
-        where: { clubId: req.auth.clubId },
-        select: { id: true }
+    const selectedTeam = await prisma.team.findFirst({
+        where: {
+            id: parsed.data.teamId,
+            clubId: req.auth.clubId
+        },
+        select: { id: true, name: true }
     });
-    const clubTeamIds = new Set(clubTeams.map((t) => t.id));
-    let teamId = null;
-    let managedTeamIds = [];
-    let linkedPlayerUserId = null;
-    if (role === 'COACH') {
-        managedTeamIds = (parsed.data.managedTeamIds || []).filter((id) => clubTeamIds.has(id));
-        if (!managedTeamIds.length) {
-            return res.status(400).json({ error: 'Coach account needs at least one managed team in the club' });
-        }
-        teamId = parsed.data.teamId && clubTeamIds.has(parsed.data.teamId) ? parsed.data.teamId : managedTeamIds[0];
-    }
-    else if (role === 'PLAYER') {
-        if (!parsed.data.teamId || !clubTeamIds.has(parsed.data.teamId)) {
-            return res.status(400).json({ error: 'Player account requires a valid teamId in the club' });
-        }
-        teamId = parsed.data.teamId;
-    }
-    else if (role === 'PARENT') {
-        if (!parsed.data.linkedPlayerUserId) {
-            return res.status(400).json({ error: 'Parent account requires linkedPlayerUserId' });
-        }
-        const linkedPlayer = await prisma.user.findFirst({
+    if (!selectedTeam)
+        return res.status(404).json({ error: 'Team not found in club' });
+    const requestedManagedTeamIds = parsed.data.managedTeamIds || [];
+    const filteredManagedTeamIds = requestedManagedTeamIds.length
+        ? await prisma.team.findMany({
             where: {
-                id: parsed.data.linkedPlayerUserId,
-                role: 'PLAYER',
+                id: { in: requestedManagedTeamIds },
                 clubId: req.auth.clubId
             },
-            select: { id: true, teamId: true }
-        });
-        if (!linkedPlayer) {
-            return res.status(404).json({ error: 'Linked player account not found in this club' });
-        }
-        linkedPlayerUserId = linkedPlayer.id;
-        teamId = linkedPlayer.teamId;
-    }
-    else if (role === 'DIRECTION') {
-        teamId = null;
-    }
+            select: { id: true }
+        }).then((rows) => rows.map((row) => row.id))
+        : [];
+    const managedTeamIds = Array.from(new Set([selectedTeam.id, ...filteredManagedTeamIds]));
     await prisma.accountInvite.updateMany({
         where: {
             clubId: req.auth.clubId,
@@ -2308,18 +2518,23 @@ app.post('/accounts', authMiddleware, async (req, res) => {
     const created = await prisma.accountInvite.create({
         data: {
             email,
+            firstName: parsed.data.firstName,
+            lastName: parsed.data.lastName,
+            phone: parsed.data.phone ?? null,
             token: inviteToken,
-            role,
+            role: 'COACH',
             clubId: req.auth.clubId,
             invitedByUserId: req.auth.id,
-            teamId,
+            teamId: selectedTeam.id,
             managedTeamIds,
-            linkedPlayerUserId,
             expiresAt
         },
         select: {
             id: true,
             email: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
             token: true,
             role: true,
             clubId: true,
@@ -2369,6 +2584,9 @@ app.get('/accounts/invitations', authMiddleware, async (req, res) => {
         select: {
             id: true,
             email: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
             role: true,
             status: true,
             teamId: true,
