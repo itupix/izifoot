@@ -30,11 +30,12 @@ import {
   upsertTacticByTeamAndName,
 } from './tactics'
 import { normalizeTeamCategory } from './team-category'
-import { normalizeTeamFormat } from './team-format'
+import { normalizeTeamFormat, resolveTeamFormat } from './team-format'
 import { computeAutoTeamName } from './team-name'
 import { matchTacticSchema } from './match-tactic'
 import { buildEligiblePlayerIdsFromPlateauAttendance } from './match-eligibility'
 import { matchEventCreateSchema } from './match-events'
+import { validateMatchUpdatePayloadForTeamFormat } from './match-update-validation'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -324,13 +325,24 @@ const teamUpsertPayloadSchema = z.preprocess(
 )
 
 function normalizeTeamResponse(team: any) {
-  return {
+  const resolvedFormat = resolveTeamFormat(team?.format)
+  return withTeamFormatAliases({
     id: team.id,
     name: team.name,
     category: team.category,
-    format: team.format,
+    format: resolvedFormat.format,
     clubId: team.clubId,
     createdAt: team.createdAt,
+  })
+}
+
+function withTeamFormatAliases(team: any) {
+  const resolvedFormat = resolveTeamFormat(team?.format)
+  return {
+    ...team,
+    format: resolvedFormat.format,
+    gameFormat: resolvedFormat.format,
+    game_format: resolvedFormat.format,
   }
 }
 
@@ -389,7 +401,7 @@ function applyScopeWhere(auth: any, where: any = {}, opts: { includeLegacyOwner?
   }
 }
 
-async function resolveTeamForWrite(auth: any) {
+async function resolveTeamForWrite(auth: any, requestedTeamId?: string | null) {
   if (!auth?.clubId) {
     const err: any = new Error('No club attached to account')
     err.code = 'NO_CLUB'
@@ -398,21 +410,22 @@ async function resolveTeamForWrite(auth: any) {
 
   if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
     const activeTeamId = getActiveTeamIdForAuth(auth)
-    if (!activeTeamId) {
+    const teamId = requestedTeamId || activeTeamId
+    if (!teamId) {
       const err: any = new Error('Active team selection is required')
       err.code = 'TEAM_REQUIRED'
       throw err
     }
     if (auth.role === 'COACH') {
       const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : []
-      if (!managedIds.includes(activeTeamId)) {
+      if (!managedIds.includes(teamId)) {
         const err: any = new Error('Coach cannot write outside managed teams')
         err.code = 'TEAM_FORBIDDEN'
         throw err
       }
     }
     const team = await prisma.team.findFirst({
-      where: { id: activeTeamId, clubId: auth.clubId },
+      where: { id: teamId, clubId: auth.clubId },
       select: { id: true, clubId: true }
     })
     if (!team) {
@@ -2266,7 +2279,10 @@ app.get('/clubs/me', authMiddleware, async (req: any, res) => {
     }
   })
   if (!club) return res.status(404).json({ error: 'Club not found' })
-  res.json(club)
+  res.json({
+    ...club,
+    teams: (club.teams || []).map(withTeamFormatAliases),
+  })
 })
 
 app.get('/clubs/me/coaches', authMiddleware, async (req: any, res) => {
@@ -2832,7 +2848,12 @@ app.use(async (req: any, res: any, next: any) => {
     if (isReadOnlyRole(auth)) {
       return res.status(403).json({ error: 'Read-only account: write access is not allowed' })
     }
-    if ((auth.role === 'DIRECTION' || auth.role === 'COACH') && !getActiveTeamIdForAuth(auth)) {
+    const allowsExplicitTeamOnPlayersCreate =
+      req.method === 'POST' &&
+      req.path === '/players' &&
+      typeof req.body?.teamId === 'string' &&
+      req.body.teamId.trim().length > 0
+    if ((auth.role === 'DIRECTION' || auth.role === 'COACH') && !getActiveTeamIdForAuth(auth) && !allowsExplicitTeamOnPlayersCreate) {
       return res.status(400).json({ error: 'Select an active team before making changes' })
     }
   } catch {
@@ -3094,6 +3115,7 @@ app.post('/players', authMiddleware, async (req: any, res) => {
     name: z.string().min(1),
     primary_position: z.string().min(1),
     secondary_position: z.string().optional(),
+    teamId: z.string().min(1).optional(),
     email: z.string().email().optional(),
     phone: z.string().min(5).max(32).optional()
   })
@@ -3101,7 +3123,7 @@ app.post('/players', authMiddleware, async (req: any, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
   try {
-    team = await resolveTeamForWrite(req.auth)
+    team = await resolveTeamForWrite(req.auth, parsed.data.teamId)
   } catch (e: any) {
     return res.status(400).json({ error: e.message })
   }
@@ -4390,6 +4412,30 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
         err.code = 'MATCH_NOT_FOUND'
         throw err
       }
+
+      const owningTeam = existing.teamId
+        ? await tx.team.findFirst({
+          where: { id: existing.teamId, clubId: req.auth.clubId },
+          select: { format: true },
+        })
+        : null
+      const payloadValidation = validateMatchUpdatePayloadForTeamFormat({
+        teamFormat: owningTeam?.format,
+        sides: payload.sides,
+        tactic: payload.tactic,
+      })
+      if (!payloadValidation.ok) {
+        const err: any = new Error(payloadValidation.error)
+        err.code = 'MATCH_PAYLOAD_INVALID'
+        throw err
+      }
+      if (payloadValidation.usedFallback) {
+        console.warn('[PUT /matches/:id] invalid or missing team format, fallback applied', {
+          matchId,
+          fallbackFormat: payloadValidation.format,
+        })
+      }
+
       const normalized = normalizeMatchState(payload, Boolean(existing.played))
 
       if (payload.plateauId !== undefined && payload.plateauId) {
@@ -4486,6 +4532,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
   } catch (e) {
     if ((e as any)?.code === 'MATCH_NOT_FOUND') return res.status(404).json({ error: 'Match not found' })
     if ((e as any)?.code === 'PLATEAU_NOT_FOUND') return res.status(404).json({ error: 'Plateau not found' })
+    if ((e as any)?.code === 'MATCH_PAYLOAD_INVALID') return res.status(400).json({ error: (e as any).message })
     if ((e as any)?.code === 'PLAYER_NOT_IN_MATCH_TEAMS') return res.status(400).json({ error: (e as any).message })
     if ((e as any)?.code === 'P2003') return res.status(400).json({ error: 'Invalid scorer reference in payload' })
     console.error('[PUT /matches/:id] failed', e)

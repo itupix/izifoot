@@ -26,3 +26,15 @@ const team_format_1 = require("../team-format");
     const parsed = (0, team_format_1.normalizeTeamFormat)('');
     strict_1.default.equal(parsed.ok, false);
 });
+(0, node_test_1.default)('resolveTeamFormat maps format to playersOnField', () => {
+    const resolved = (0, team_format_1.resolveTeamFormat)('8v8');
+    strict_1.default.equal(resolved.format, '8v8');
+    strict_1.default.equal(resolved.playersOnField, 8);
+    strict_1.default.equal(resolved.usedFallback, false);
+});
+(0, node_test_1.default)('resolveTeamFormat falls back to 5v5 when format is missing/invalid', () => {
+    const resolved = (0, team_format_1.resolveTeamFormat)('not-a-format');
+    strict_1.default.equal(resolved.format, '5v5');
+    strict_1.default.equal(resolved.playersOnField, 5);
+    strict_1.default.equal(resolved.usedFallback, true);
+});

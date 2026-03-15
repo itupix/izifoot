@@ -28,6 +28,7 @@ const team_name_1 = require("./team-name");
 const match_tactic_1 = require("./match-tactic");
 const match_eligibility_1 = require("./match-eligibility");
 const match_events_1 = require("./match-events");
+const match_update_validation_1 = require("./match-update-validation");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -298,13 +299,23 @@ const teamUpsertPayloadSchema = zod_1.z.preprocess((raw) => {
     format: zod_1.z.string({ required_error: 'Format is required', invalid_type_error: 'Format must be a string' }).min(1, 'Format is required'),
 }));
 function normalizeTeamResponse(team) {
-    return {
+    const resolvedFormat = (0, team_format_1.resolveTeamFormat)(team?.format);
+    return withTeamFormatAliases({
         id: team.id,
         name: team.name,
         category: team.category,
-        format: team.format,
+        format: resolvedFormat.format,
         clubId: team.clubId,
         createdAt: team.createdAt,
+    });
+}
+function withTeamFormatAliases(team) {
+    const resolvedFormat = (0, team_format_1.resolveTeamFormat)(team?.format);
+    return {
+        ...team,
+        format: resolvedFormat.format,
+        gameFormat: resolvedFormat.format,
+        game_format: resolvedFormat.format,
     };
 }
 function logTeamValidationFailure(endpoint, reason, details = {}) {
@@ -364,7 +375,7 @@ function applyScopeWhere(auth, where = {}, opts = {}) {
         ]
     };
 }
-async function resolveTeamForWrite(auth) {
+async function resolveTeamForWrite(auth, requestedTeamId) {
     if (!auth?.clubId) {
         const err = new Error('No club attached to account');
         err.code = 'NO_CLUB';
@@ -372,21 +383,22 @@ async function resolveTeamForWrite(auth) {
     }
     if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
         const activeTeamId = getActiveTeamIdForAuth(auth);
-        if (!activeTeamId) {
+        const teamId = requestedTeamId || activeTeamId;
+        if (!teamId) {
             const err = new Error('Active team selection is required');
             err.code = 'TEAM_REQUIRED';
             throw err;
         }
         if (auth.role === 'COACH') {
             const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds : [];
-            if (!managedIds.includes(activeTeamId)) {
+            if (!managedIds.includes(teamId)) {
                 const err = new Error('Coach cannot write outside managed teams');
                 err.code = 'TEAM_FORBIDDEN';
                 throw err;
             }
         }
         const team = await prisma.team.findFirst({
-            where: { id: activeTeamId, clubId: auth.clubId },
+            where: { id: teamId, clubId: auth.clubId },
             select: { id: true, clubId: true }
         });
         if (!team) {
@@ -2126,7 +2138,10 @@ app.get('/clubs/me', authMiddleware, async (req, res) => {
     });
     if (!club)
         return res.status(404).json({ error: 'Club not found' });
-    res.json(club);
+    res.json({
+        ...club,
+        teams: (club.teams || []).map(withTeamFormatAliases),
+    });
 });
 app.get('/clubs/me/coaches', authMiddleware, async (req, res) => {
     if (!ensureDirection(req, res))
@@ -2678,7 +2693,11 @@ app.use(async (req, res, next) => {
         if (isReadOnlyRole(auth)) {
             return res.status(403).json({ error: 'Read-only account: write access is not allowed' });
         }
-        if ((auth.role === 'DIRECTION' || auth.role === 'COACH') && !getActiveTeamIdForAuth(auth)) {
+        const allowsExplicitTeamOnPlayersCreate = req.method === 'POST' &&
+            req.path === '/players' &&
+            typeof req.body?.teamId === 'string' &&
+            req.body.teamId.trim().length > 0;
+        if ((auth.role === 'DIRECTION' || auth.role === 'COACH') && !getActiveTeamIdForAuth(auth) && !allowsExplicitTeamOnPlayersCreate) {
             return res.status(400).json({ error: 'Select an active team before making changes' });
         }
     }
@@ -2940,6 +2959,7 @@ app.post('/players', authMiddleware, async (req, res) => {
         name: zod_1.z.string().min(1),
         primary_position: zod_1.z.string().min(1),
         secondary_position: zod_1.z.string().optional(),
+        teamId: zod_1.z.string().min(1).optional(),
         email: zod_1.z.string().email().optional(),
         phone: zod_1.z.string().min(5).max(32).optional()
     });
@@ -2948,7 +2968,7 @@ app.post('/players', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: parsed.error.flatten() });
     let team;
     try {
-        team = await resolveTeamForWrite(req.auth);
+        team = await resolveTeamForWrite(req.auth, parsed.data.teamId);
     }
     catch (e) {
         return res.status(400).json({ error: e.message });
@@ -4268,6 +4288,28 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                 err.code = 'MATCH_NOT_FOUND';
                 throw err;
             }
+            const owningTeam = existing.teamId
+                ? await tx.team.findFirst({
+                    where: { id: existing.teamId, clubId: req.auth.clubId },
+                    select: { format: true },
+                })
+                : null;
+            const payloadValidation = (0, match_update_validation_1.validateMatchUpdatePayloadForTeamFormat)({
+                teamFormat: owningTeam?.format,
+                sides: payload.sides,
+                tactic: payload.tactic,
+            });
+            if (!payloadValidation.ok) {
+                const err = new Error(payloadValidation.error);
+                err.code = 'MATCH_PAYLOAD_INVALID';
+                throw err;
+            }
+            if (payloadValidation.usedFallback) {
+                console.warn('[PUT /matches/:id] invalid or missing team format, fallback applied', {
+                    matchId,
+                    fallbackFormat: payloadValidation.format,
+                });
+            }
             const normalized = normalizeMatchState(payload, Boolean(existing.played));
             if (payload.plateauId !== undefined && payload.plateauId) {
                 const plateau = await plateauFindFirstForUser(tx, req.auth, { where: { id: payload.plateauId }, select: { id: true } });
@@ -4364,6 +4406,8 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
             return res.status(404).json({ error: 'Match not found' });
         if (e?.code === 'PLATEAU_NOT_FOUND')
             return res.status(404).json({ error: 'Plateau not found' });
+        if (e?.code === 'MATCH_PAYLOAD_INVALID')
+            return res.status(400).json({ error: e.message });
         if (e?.code === 'PLAYER_NOT_IN_MATCH_TEAMS')
             return res.status(400).json({ error: e.message });
         if (e?.code === 'P2003')
