@@ -36,6 +36,7 @@ import { matchTacticSchema } from './match-tactic'
 import { buildEligiblePlayerIdsFromPlateauAttendance } from './match-eligibility'
 import { matchEventCreateSchema } from './match-events'
 import { validateMatchUpdatePayloadForTeamFormat } from './match-update-validation'
+import { normalizePlayerForApi, parsePlayerCreatePayload, parsePlayerUpdatePayload } from './player-payload'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -368,9 +369,15 @@ function getActiveTeamIdForAuth(auth: any): string | null {
 
 function getReadableTeamIds(auth: any): string[] {
   if (!auth) return []
-  if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
+  if (auth.role === 'DIRECTION') {
     const activeTeamId = getActiveTeamIdForAuth(auth)
     return activeTeamId ? [activeTeamId] : []
+  }
+  if (auth.role === 'COACH') {
+    const managedIds = Array.isArray(auth.managedTeamIds) ? auth.managedTeamIds.filter(Boolean) : []
+    if (auth.teamId && managedIds.includes(auth.teamId)) return [auth.teamId]
+    if (managedIds.length) return managedIds
+    return auth.teamId ? [auth.teamId] : []
   }
   if (auth.role === 'PARENT') {
     const linkedTeamId = auth.parentLinkedPlayer?.teamId || auth.teamId
@@ -384,7 +391,9 @@ function applyScopeWhere(auth: any, where: any = {}, opts: { includeLegacyOwner?
   if (auth?.clubId) scopedWhere.clubId = auth.clubId
   const teamIds = getReadableTeamIds(auth)
 
-  if (teamIds.length === 1) {
+  if (auth?.role === 'DIRECTION' && auth?.clubId && !auth?.teamId) {
+    // Direction accounts without an active team can read all club data.
+  } else if (teamIds.length === 1) {
     scopedWhere.teamId = teamIds[0]
   } else if (teamIds.length > 1) {
     scopedWhere.teamId = { in: teamIds }
@@ -3105,63 +3114,89 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
 // ---- Players ----
 app.get('/players', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const players = await playerFindManyForUser(prisma, req.auth, { orderBy: { name: 'asc' } })
-  res.json(players)
+  const players = await playerFindManyForUser(prisma, req.auth, { orderBy: [{ first_name: 'asc' }, { last_name: 'asc' }, { name: 'asc' }] })
+  res.json(players.map((player: any) => normalizePlayerForApi(player)))
 })
+
+const getPlayerByIdHandler = async (req: any, res: any) => {
+  if (!ensureStaff(req, res)) return
+  const { id } = req.params
+  const player = await playerFindFirstForUser(prisma, req.auth, { where: { id } })
+  if (!player) return res.status(404).json({ error: 'Player not found' })
+  res.json(normalizePlayerForApi(player))
+}
+
+app.get('/players/:id', authMiddleware, getPlayerByIdHandler)
+app.get('/effectif/:id', authMiddleware, getPlayerByIdHandler)
+app.get('/api/players/:id', authMiddleware, getPlayerByIdHandler)
+app.get('/api/effectif/:id', authMiddleware, getPlayerByIdHandler)
 
 app.post('/players', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const schema = z.object({
-    name: z.string().min(1),
-    primary_position: z.string().min(1),
-    secondary_position: z.string().optional(),
-    teamId: z.string().min(1).optional(),
-    email: z.string().email().optional(),
-    phone: z.string().min(5).max(32).optional()
-  })
-  const parsed = schema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  let payload: ReturnType<typeof parsePlayerCreatePayload>
+  try {
+    payload = parsePlayerCreatePayload(req.body)
+  } catch (e: any) {
+    if (e instanceof z.ZodError) return res.status(400).json({ error: e.flatten() })
+    throw e
+  }
   let team: any
   try {
-    team = await resolveTeamForWrite(req.auth, parsed.data.teamId)
+    team = await resolveTeamForWrite(req.auth, payload.teamId || undefined)
   } catch (e: any) {
     return res.status(400).json({ error: e.message })
   }
   const baseData: any = {
     clubId: team.clubId,
     teamId: team.id,
-    name: parsed.data.name,
-    primary_position: parsed.data.primary_position,
-    secondary_position: parsed.data.secondary_position
+    name: `${payload.firstName} ${payload.lastName}`.trim(),
+    first_name: payload.firstName,
+    last_name: payload.lastName,
+    primary_position: payload.primary_position,
+    secondary_position: payload.secondary_position,
+    email: payload.email,
+    phone: payload.phone,
+    is_child: payload.isChild,
+    parent_first_name: payload.parentFirstName,
+    parent_last_name: payload.parentLastName,
+    licence: payload.licence,
   }
-  if ('email' in parsed.data) baseData.email = parsed.data.email
-  if ('phone' in parsed.data) baseData.phone = parsed.data.phone
   const p = await playerCreateForUser(prisma, req.auth, baseData)
-  res.json(p)
+  res.json(normalizePlayerForApi(p))
 })
 
-app.put('/players/:id', authMiddleware, async (req: any, res) => {
-  const schema = z.object({
-    name: z.string().min(1).optional(),
-    primary_position: z.string().optional(),
-    secondary_position: z.string().nullable().optional(),
-    email: z.string().email().nullable().optional(),
-    phone: z.string().min(5).max(32).nullable().optional()
-  })
-  const parsed = schema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+const updatePlayerByIdHandler = async (req: any, res: any) => {
+  if (!ensureStaff(req, res)) return
   const { id } = req.params
   const existing = await playerFindFirstForUser(prisma, req.auth, { where: { id } })
   if (!existing) return res.status(404).json({ error: 'Player not found' })
+  let payload: ReturnType<typeof parsePlayerUpdatePayload>
+  try {
+    payload = parsePlayerUpdatePayload(req.body, existing)
+  } catch (e: any) {
+    if (e instanceof z.ZodError) return res.status(400).json({ error: e.flatten() })
+    throw e
+  }
   const patch: any = {}
-  if (parsed.data.name !== undefined) patch.name = parsed.data.name
-  if (parsed.data.primary_position !== undefined) patch.primary_position = parsed.data.primary_position
-  if (parsed.data.secondary_position !== undefined) patch.secondary_position = parsed.data.secondary_position
-  if ('email' in parsed.data) patch.email = parsed.data.email ?? null
-  if ('phone' in parsed.data) patch.phone = parsed.data.phone ?? null
+  patch.first_name = payload.firstName
+  patch.last_name = payload.lastName
+  patch.name = `${payload.firstName} ${payload.lastName}`.trim()
+  patch.primary_position = payload.primary_position
+  patch.secondary_position = payload.secondary_position
+  patch.email = payload.email
+  patch.phone = payload.phone
+  patch.is_child = payload.isChild
+  patch.parent_first_name = payload.parentFirstName
+  patch.parent_last_name = payload.parentLastName
+  patch.licence = payload.licence
   const updated = await prisma.player.update({ where: { id: existing.id }, data: patch })
-  res.json(updated)
-})
+  res.json(normalizePlayerForApi(updated))
+}
+
+app.put('/players/:id', authMiddleware, updatePlayerByIdHandler)
+app.put('/effectif/:id', authMiddleware, updatePlayerByIdHandler)
+app.put('/api/players/:id', authMiddleware, updatePlayerByIdHandler)
+app.put('/api/effectif/:id', authMiddleware, updatePlayerByIdHandler)
 // --- Player invite JWT and playerAuth ---
 function signPlayerInvite(playerId: string, plateauId?: string | null, email?: string | null) {
   return jwt.sign({ aud: 'player_invite', pid: playerId, plid: plateauId || null, em: email || null }, JWT_SECRET, { expiresIn: '30d' })
@@ -3388,7 +3423,8 @@ app.get('/player/plateaus/:id/summary', playerAuth, async (req: any, res) => {
   res.json(filtered)
 })
 
-app.delete('/players/:id', authMiddleware, async (req: any, res) => {
+const deletePlayerByIdHandler = async (req: any, res: any) => {
+  if (!ensureStaff(req, res)) return
   const { id } = req.params
   try {
     // Ensure the player exists first
@@ -3407,7 +3443,12 @@ app.delete('/players/:id', authMiddleware, async (req: any, res) => {
     // If it still fails due to referential integrity, surface 409
     return res.status(409).json({ error: 'Cannot delete player due to related data' })
   }
-})
+}
+
+app.delete('/players/:id', authMiddleware, deletePlayerByIdHandler)
+app.delete('/effectif/:id', authMiddleware, deletePlayerByIdHandler)
+app.delete('/api/players/:id', authMiddleware, deletePlayerByIdHandler)
+app.delete('/api/effectif/:id', authMiddleware, deletePlayerByIdHandler)
 
 // ---- Trainings ----
 app.get('/trainings', authMiddleware, async (req: any, res) => {
