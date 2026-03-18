@@ -30,6 +30,7 @@ const match_eligibility_1 = require("./match-eligibility");
 const match_events_1 = require("./match-events");
 const match_update_validation_1 = require("./match-update-validation");
 const player_payload_1 = require("./player-payload");
+const player_invitation_status_1 = require("./player-invitation-status");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -39,6 +40,8 @@ const DEFAULT_DEV_APP_BASE_URL = 'http://localhost:5173';
 const APP_BASE_URL = process.env.APP_BASE_URL || DEFAULT_DEV_APP_BASE_URL;
 const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`;
 const AUTH_COOKIE_NAME = 'token';
+const ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID = Boolean(prisma?._runtimeDataModel?.models?.AccountInvite?.fields?.some((field) => field?.name === 'linkedPlayerId'));
+let hasLoggedLegacyPlayerInviteLinkFallback = false;
 // Railway/Reverse proxy support so secure cookies can be set correctly.
 app.set('trust proxy', 1);
 function wrapExpressHandler(handler) {
@@ -915,6 +918,126 @@ function toCoachSummaryFromInvite(invite) {
         teamName: invite.teamName ?? invite.team?.name ?? null,
         invitationStatus: invite.status,
     };
+}
+function getPlayerInviteLinkWhere(player, opts = {}) {
+    if (ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID)
+        return { linkedPlayerId: player.id };
+    if (player?.userId)
+        return { linkedPlayerUserId: player.userId };
+    if (opts.allowEmailFallback) {
+        const email = asOptionalTrimmedString(player?.email);
+        if (email) {
+            if (!hasLoggedLegacyPlayerInviteLinkFallback) {
+                hasLoggedLegacyPlayerInviteLinkFallback = true;
+                console.warn('[players invite] linkedPlayerId is unavailable in Prisma client; using legacy email fallback until migration is applied');
+            }
+            return { email: normEmail(email) };
+        }
+    }
+    return null;
+}
+function getPlayerInviteLinkSelect() {
+    const base = {
+        linkedPlayerUserId: true,
+    };
+    if (ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID)
+        base.linkedPlayerId = true;
+    return base;
+}
+async function getPlayerInvitationStatusSnapshot(auth, player) {
+    const now = new Date();
+    const clubId = player.clubId || auth?.clubId || null;
+    const linkWhere = getPlayerInviteLinkWhere(player, { allowEmailFallback: true });
+    if (!linkWhere) {
+        return (0, player_invitation_status_1.resolvePlayerInvitationStatus)({
+            hasActiveAccount: !!player.userId,
+            latestPendingInvite: null,
+            latestAcceptedInvite: null,
+        });
+    }
+    if (clubId) {
+        await prisma.accountInvite.updateMany({
+            where: {
+                clubId,
+                role: 'PLAYER',
+                ...linkWhere,
+                status: 'PENDING',
+                expiresAt: { lt: now }
+            },
+            data: { status: 'EXPIRED' }
+        });
+    }
+    const [latestPendingInvite, latestAcceptedInvite] = await Promise.all([
+        prisma.accountInvite.findFirst({
+            where: {
+                ...(clubId ? { clubId } : {}),
+                role: 'PLAYER',
+                ...linkWhere,
+                status: 'PENDING',
+                expiresAt: { gte: now }
+            },
+            select: {
+                id: true,
+                createdAt: true,
+                updatedAt: true,
+            },
+            orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
+        }),
+        prisma.accountInvite.findFirst({
+            where: {
+                ...(clubId ? { clubId } : {}),
+                role: 'PLAYER',
+                ...linkWhere,
+                status: 'ACCEPTED'
+            },
+            select: {
+                id: true,
+                createdAt: true,
+                updatedAt: true,
+                acceptedAt: true,
+            },
+            orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }]
+        })
+    ]);
+    return (0, player_invitation_status_1.resolvePlayerInvitationStatus)({
+        hasActiveAccount: !!player.userId,
+        latestPendingInvite,
+        latestAcceptedInvite,
+    });
+}
+async function getPlayerInvitationStatusForRequest(req, playerId) {
+    const player = await playerFindFirstForUser(prisma, req.auth, {
+        where: { id: playerId },
+    });
+    if (!player)
+        return null;
+    const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player);
+    return {
+        player,
+        snapshot,
+    };
+}
+async function sendPlayerAccountInviteEmail(params) {
+    if (!transporter)
+        return;
+    const acceptPath = process.env.INVITE_ACCEPT_PATH || '/invite/accept';
+    const inviteUrl = `${APP_BASE_URL.replace(/\/+$/, '')}${acceptPath}?token=${encodeURIComponent(params.token)}`;
+    const displayName = (params.playerName || '').trim();
+    const greeting = displayName ? `Bonjour ${displayName},` : 'Bonjour,';
+    try {
+        await transporter.sendMail({
+            from: process.env.SMTP_FROM || 'no-reply@example.com',
+            to: params.inviteEmail,
+            subject: 'Activation de votre compte joueur Izifoot',
+            html: `<p>${greeting}</p>
+<p>Votre compte joueur Izifoot est pret. Cliquez sur le lien ci-dessous pour activer votre compte et definir votre mot de passe.</p>
+<p><a href="${inviteUrl}">${inviteUrl}</a></p>
+<p>Ce lien expire le ${params.expiresAt.toISOString()}.</p>`
+        });
+    }
+    catch (e) {
+        console.warn('[players invite] email failed:', e);
+    }
 }
 // --- Routes ---
 function safeParseJSON(s) {
@@ -1962,7 +2085,7 @@ app.get('/auth/invitations/:token', async (req, res) => {
             expiresAt: true,
             teamId: true,
             managedTeamIds: true,
-            linkedPlayerUserId: true
+            ...getPlayerInviteLinkSelect()
         }
     });
     if (!invite)
@@ -1998,6 +2121,7 @@ app.post('/auth/invitations/accept', async (req, res) => {
         });
         return res.status(410).json({ error: 'Invitation expired' });
     }
+    const inviteLinkedPlayerId = ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? invite?.linkedPlayerId ?? null : null;
     const existing = await prisma.user.findUnique({ where: { email: invite.email } });
     if (existing)
         return res.status(409).json({ error: 'Email already in use' });
@@ -2017,6 +2141,15 @@ app.post('/auth/invitations/accept', async (req, res) => {
                 linkedPlayerUserId: invite.linkedPlayerUserId
             }
         });
+        if (inviteLinkedPlayerId) {
+            await tx.player.updateMany({
+                where: {
+                    id: inviteLinkedPlayerId,
+                    ...(invite.clubId ? { clubId: invite.clubId } : {}),
+                },
+                data: { userId: createdUser.id }
+            });
+        }
         await tx.accountInvite.update({
             where: { id: invite.id },
             data: {
@@ -2593,6 +2726,48 @@ app.post('/accounts', authMiddleware, async (req, res) => {
     }
     res.status(201).json({ ...created, inviteUrl });
 });
+app.get('/accounts', authMiddleware, async (req, res) => {
+    if (!ensureDirection(req, res))
+        return;
+    if (!req.auth?.clubId)
+        return res.json([]);
+    const users = await prisma.user.findMany({
+        where: { clubId: req.auth.clubId },
+        select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            role: true,
+            teamId: true,
+            managedTeamIds: true,
+            linkedPlayerUserId: true,
+            createdAt: true,
+        },
+        orderBy: [{ createdAt: 'desc' }, { email: 'asc' }]
+    });
+    const userIds = users.map((user) => user.id);
+    const linkedPlayers = userIds.length
+        ? await prisma.player.findMany({
+            where: {
+                userId: { in: userIds },
+                ...(req.auth.clubId ? { clubId: req.auth.clubId } : {}),
+            },
+            select: { id: true, userId: true }
+        })
+        : [];
+    const playerIdByUserId = new Map();
+    for (const linkedPlayer of linkedPlayers) {
+        if (linkedPlayer.userId)
+            playerIdByUserId.set(linkedPlayer.userId, linkedPlayer.id);
+    }
+    res.json(users.map((user) => ({
+        ...user,
+        linkedPlayerId: playerIdByUserId.get(user.id) ?? null,
+        playerId: playerIdByUserId.get(user.id) ?? null,
+    })));
+});
 app.get('/accounts/invitations', authMiddleware, async (req, res) => {
     if (!ensureDirection(req, res))
         return;
@@ -2618,7 +2793,7 @@ app.get('/accounts/invitations', authMiddleware, async (req, res) => {
             status: true,
             teamId: true,
             managedTeamIds: true,
-            linkedPlayerUserId: true,
+            ...getPlayerInviteLinkSelect(),
             expiresAt: true,
             acceptedAt: true,
             createdAt: true,
@@ -2632,7 +2807,10 @@ app.get('/accounts/invitations', authMiddleware, async (req, res) => {
         },
         orderBy: { createdAt: 'desc' }
     });
-    res.json(invites);
+    res.json(invites.map((invite) => ({
+        ...invite,
+        playerId: ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? invite.linkedPlayerId ?? null : null,
+    })));
 });
 // Collect waitlist emails
 app.post('/waitlist', async (req, res) => {
@@ -2968,15 +3146,52 @@ const getPlayerByIdHandler = async (req, res) => {
     if (!ensureStaff(req, res))
         return;
     const { id } = req.params;
-    const player = await playerFindFirstForUser(prisma, req.auth, { where: { id } });
-    if (!player)
+    const scopedPlayer = await getPlayerInvitationStatusForRequest(req, id);
+    if (!scopedPlayer)
         return res.status(404).json({ error: 'Player not found' });
-    res.json((0, player_payload_1.normalizePlayerForApi)(player));
+    const normalizedPlayer = (0, player_payload_1.normalizePlayerForApi)(scopedPlayer.player);
+    res.json({
+        ...normalizedPlayer,
+        invitationStatus: scopedPlayer.snapshot.status,
+        invitation: {
+            status: scopedPlayer.snapshot.status,
+            invitationId: scopedPlayer.snapshot.invitationId,
+            lastInvitationAt: scopedPlayer.snapshot.lastInvitationAt ? scopedPlayer.snapshot.lastInvitationAt.toISOString() : null,
+        }
+    });
 };
 app.get('/players/:id', authMiddleware, getPlayerByIdHandler);
 app.get('/effectif/:id', authMiddleware, getPlayerByIdHandler);
 app.get('/api/players/:id', authMiddleware, getPlayerByIdHandler);
 app.get('/api/effectif/:id', authMiddleware, getPlayerByIdHandler);
+app.get('/players/:id/invitation-status', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const { id } = req.params;
+    const scopedPlayer = await getPlayerInvitationStatusForRequest(req, id);
+    if (!scopedPlayer)
+        return res.status(404).json({ error: 'Player not found' });
+    res.json({
+        playerId: scopedPlayer.player.id,
+        status: scopedPlayer.snapshot.status,
+        lastInvitationAt: scopedPlayer.snapshot.lastInvitationAt ? scopedPlayer.snapshot.lastInvitationAt.toISOString() : null,
+        invitationId: scopedPlayer.snapshot.invitationId,
+    });
+});
+app.get('/api/players/:id/invitation-status', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const { id } = req.params;
+    const scopedPlayer = await getPlayerInvitationStatusForRequest(req, id);
+    if (!scopedPlayer)
+        return res.status(404).json({ error: 'Player not found' });
+    res.json({
+        playerId: scopedPlayer.player.id,
+        status: scopedPlayer.snapshot.status,
+        lastInvitationAt: scopedPlayer.snapshot.lastInvitationAt ? scopedPlayer.snapshot.lastInvitationAt.toISOString() : null,
+        invitationId: scopedPlayer.snapshot.invitationId,
+    });
+});
 app.post('/players', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
@@ -3078,52 +3293,145 @@ async function playerAuth(req, res, next) {
 }
 // --- Player invite endpoint ---
 app.post('/players/:id/invite', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
     const { id } = req.params;
-    const schema = zod_1.z.object({ plateauId: zod_1.z.string().optional(), email: zod_1.z.string().email().optional() });
+    const schema = zod_1.z.object({
+        plateauId: zod_1.z.string().optional(),
+        email: zod_1.z.string().email().optional(),
+        expiresInDays: zod_1.z.coerce.number().int().min(1).max(30).optional()
+    });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const player = await playerFindFirstForUser(prisma, req.auth, { where: { id } });
+    const player = await playerFindFirstForUser(prisma, req.auth, {
+        where: { id },
+        select: {
+            id: true,
+            userId: true,
+            clubId: true,
+            teamId: true,
+            email: true,
+            first_name: true,
+            last_name: true,
+            name: true,
+        }
+    });
     if (!player)
         return res.status(404).json({ error: 'Player not found' });
-    const base = `${req.protocol}://${req.get('host')}`;
     const inviteEmail = parsed.data.email || player.email || null;
-    if (!parsed.data.plateauId) {
-        return res.status(400).json({ error: 'plateauId is required to generate RSVP links' });
-    }
-    const presentToken = signRsvpToken(id, parsed.data.plateauId, 'present');
-    const absentToken = signRsvpToken(id, parsed.data.plateauId, 'absent');
-    const presentUrl = `${base}/rsvp/p?token=${encodeURIComponent(presentToken)}`;
-    const absentUrl = `${base}/rsvp/a?token=${encodeURIComponent(absentToken)}`;
-    // Mark player as convoked for this plateau
-    try {
-        await attendanceUpsertMarkerForUser(prisma, req.auth, {
-            session_type: 'PLATEAU_CONVOKE',
-            session_id: parsed.data.plateauId,
-            playerId: id,
-        });
-    }
-    catch (e) {
-        console.warn('[invite] failed to upsert convocation marker', e);
-    }
-    // Try email if requested and SMTP is configured
-    if (inviteEmail && transporter) {
+    if (parsed.data.plateauId) {
+        const base = `${req.protocol}://${req.get('host')}`;
+        const presentToken = signRsvpToken(id, parsed.data.plateauId, 'present');
+        const absentToken = signRsvpToken(id, parsed.data.plateauId, 'absent');
+        const presentUrl = `${base}/rsvp/p?token=${encodeURIComponent(presentToken)}`;
+        const absentUrl = `${base}/rsvp/a?token=${encodeURIComponent(absentToken)}`;
+        // Mark player as convoked for this plateau
         try {
-            await transporter.sendMail({
-                from: process.env.SMTP_FROM || 'no-reply@example.com',
-                to: inviteEmail,
-                subject: 'Confirmation de présence – Izifoot',
-                html: `<p>Bonjour${player.name ? ' ' + player.name : ''},</p>
-<p>Merci d'indiquer votre présence pour le plateau.</p>
-<p><a href="${presentUrl}">Je serai présent</a> &nbsp;|&nbsp; <a href="${absentUrl}">Je serai absent</a></p>
-<p>(Ces liens sont valables 60 jours)</p>`
+            await attendanceUpsertMarkerForUser(prisma, req.auth, {
+                session_type: 'PLATEAU_CONVOKE',
+                session_id: parsed.data.plateauId,
+                playerId: id,
             });
         }
         catch (e) {
-            console.warn('[invite] email failed:', e);
+            console.warn('[invite] failed to upsert convocation marker', e);
         }
+        if (inviteEmail && transporter) {
+            try {
+                await transporter.sendMail({
+                    from: process.env.SMTP_FROM || 'no-reply@example.com',
+                    to: inviteEmail,
+                    subject: 'Confirmation de présence – Izifoot',
+                    html: `<p>Bonjour${player.name ? ' ' + player.name : ''},</p>
+<p>Merci d'indiquer votre présence pour le plateau.</p>
+<p><a href="${presentUrl}">Je serai présent</a> &nbsp;|&nbsp; <a href="${absentUrl}">Je serai absent</a></p>
+<p>(Ces liens sont valables 60 jours)</p>`
+                });
+            }
+            catch (e) {
+                console.warn('[invite] email failed:', e);
+            }
+        }
+        return res.json({ ok: true, presentUrl, absentUrl });
     }
-    res.json({ ok: true, presentUrl, absentUrl });
+    const playerEmail = inviteEmail ? normEmail(inviteEmail) : null;
+    if (!playerEmail) {
+        return res.status(400).json({ error: 'Player email is required to send account invitation' });
+    }
+    if (!req.auth?.clubId) {
+        return res.status(400).json({ error: 'Staff account must be attached to a club' });
+    }
+    const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player);
+    if (snapshot.status === 'ACCEPTED') {
+        return res.status(409).json({ error: 'Compte déjà activé' });
+    }
+    const existingUser = await prisma.user.findUnique({
+        where: { email: playerEmail },
+        select: { id: true }
+    });
+    if (existingUser && existingUser.id !== player.userId) {
+        return res.status(409).json({ error: 'Email already in use by another account' });
+    }
+    const expiresAt = (0, date_fns_1.addDays)(new Date(), parsed.data.expiresInDays ?? 7);
+    const inviteToken = (0, nanoid_1.nanoid)(48);
+    const playerFullName = [player.first_name, player.last_name].filter(Boolean).join(' ').trim() || player.name || null;
+    const invitation = snapshot.status === 'PENDING' && snapshot.invitationId
+        ? await prisma.accountInvite.update({
+            where: { id: snapshot.invitationId },
+            data: {
+                email: playerEmail,
+                firstName: player.first_name,
+                lastName: player.last_name,
+                token: inviteToken,
+                role: 'PLAYER',
+                teamId: player.teamId ?? null,
+                ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
+                invitedByUserId: req.auth.id,
+                status: 'PENDING',
+                expiresAt,
+            },
+            select: {
+                id: true,
+                token: true,
+                updatedAt: true,
+                expiresAt: true,
+            }
+        })
+        : await prisma.accountInvite.create({
+            data: {
+                email: playerEmail,
+                firstName: player.first_name,
+                lastName: player.last_name,
+                token: inviteToken,
+                role: 'PLAYER',
+                clubId: req.auth.clubId,
+                invitedByUserId: req.auth.id,
+                teamId: player.teamId ?? null,
+                managedTeamIds: [],
+                ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
+                linkedPlayerUserId: player.userId ?? null,
+                expiresAt,
+            },
+            select: {
+                id: true,
+                token: true,
+                updatedAt: true,
+                expiresAt: true,
+            }
+        });
+    await sendPlayerAccountInviteEmail({
+        playerName: playerFullName,
+        inviteEmail: playerEmail,
+        token: invitation.token,
+        expiresAt: invitation.expiresAt,
+    });
+    return res.json({
+        status: 'PENDING',
+        invitationId: invitation.id,
+        sentAt: invitation.updatedAt.toISOString(),
+        expiresAt: invitation.expiresAt ? invitation.expiresAt.toISOString() : null,
+    });
 });
 // --- Public endpoint to accept invite and set player_token cookie ---
 app.get('/player/accept', async (req, res) => {

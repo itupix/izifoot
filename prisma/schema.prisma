@@ -86,6 +86,7 @@ model AccountInvite {
   invitedByUserId    String
   teamId             String?
   managedTeamIds     String[]          @default([])
+  linkedPlayerId     String?
   linkedPlayerUserId String?
   userId             String?           @unique
   expiresAt          DateTime
@@ -98,6 +99,7 @@ model AccountInvite {
 
   @@index([clubId, status])
   @@index([email, status])
+  @@index([clubId, linkedPlayerId, status])
 }
 
 model Planning {
