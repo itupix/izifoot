@@ -51,7 +51,6 @@ const AUTH_COOKIE_NAME = 'token'
 const ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID = Boolean(
   (prisma as any)?._runtimeDataModel?.models?.AccountInvite?.fields?.some((field: any) => field?.name === 'linkedPlayerId')
 )
-let hasLoggedLegacyPlayerInviteLinkFallback = false
 
 // Railway/Reverse proxy support so secure cookies can be set correctly.
 app.set('trust proxy', 1)
@@ -467,11 +466,9 @@ function scopedWhereOrLegacy(scopeOrUserId: any, where: any = {}) {
 }
 
 async function playerCreateForUser(db: any, scopeOrUserId: any, data: any) {
-  const auth = normalizeScopeInput(scopeOrUserId)
   return db.player.create({
     data: {
       ...data,
-      ...(auth?.id ? { userId: auth.id } : {})
     }
   })
 }
@@ -990,21 +987,9 @@ function toCoachSummaryFromInvite(invite: any) {
   }
 }
 
-function getPlayerInviteLinkWhere(player: any, opts: { allowEmailFallback?: boolean } = {}) {
+function getPlayerInviteLinkWhere(player: any, linkedPlayerAccountUserId?: string | null) {
   if (ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID) return { linkedPlayerId: player.id }
-  if (player?.userId) return { linkedPlayerUserId: player.userId }
-
-  if (opts.allowEmailFallback) {
-    const email = asOptionalTrimmedString(player?.email)
-    if (email) {
-      if (!hasLoggedLegacyPlayerInviteLinkFallback) {
-        hasLoggedLegacyPlayerInviteLinkFallback = true
-        console.warn('[players invite] linkedPlayerId is unavailable in Prisma client; using legacy email fallback until migration is applied')
-      }
-      return { email: normEmail(email) }
-    }
-  }
-
+  if (linkedPlayerAccountUserId) return { linkedPlayerUserId: linkedPlayerAccountUserId }
   return null
 }
 
@@ -1016,14 +1001,28 @@ function getPlayerInviteLinkSelect() {
   return base
 }
 
+async function resolveLinkedPlayerAccountUser(player: any, clubId: string | null) {
+  if (!player?.userId) return null
+  const linkedUser = await prisma.user.findUnique({
+    where: { id: player.userId },
+    select: { id: true, role: true, clubId: true }
+  })
+  if (!linkedUser) return null
+  if (linkedUser.role !== 'PLAYER') return null
+  if (clubId && linkedUser.clubId && linkedUser.clubId !== clubId) return null
+  return linkedUser
+}
+
 async function getPlayerInvitationStatusSnapshot(auth: any, player: any) {
   const now = new Date()
   const clubId = player.clubId || auth?.clubId || null
-  const linkWhere = getPlayerInviteLinkWhere(player, { allowEmailFallback: true })
+  const linkedUser = await resolveLinkedPlayerAccountUser(player, clubId)
+  const hasActiveAccount = Boolean(linkedUser)
+  const linkWhere = getPlayerInviteLinkWhere(player, linkedUser?.id)
 
   if (!linkWhere) {
     return resolvePlayerInvitationStatus({
-      hasActiveAccount: !!player.userId,
+      hasActiveAccount,
       latestPendingInvite: null,
       latestAcceptedInvite: null,
     })
@@ -1076,7 +1075,7 @@ async function getPlayerInvitationStatusSnapshot(auth: any, player: any) {
   ])
 
   return resolvePlayerInvitationStatus({
-    hasActiveAccount: !!player.userId,
+    hasActiveAccount,
     latestPendingInvite,
     latestAcceptedInvite,
   })
@@ -3058,7 +3057,19 @@ app.use(async (req: any, res: any, next: any) => {
       req.path === '/players' &&
       typeof req.body?.teamId === 'string' &&
       req.body.teamId.trim().length > 0
-    if ((auth.role === 'DIRECTION' || auth.role === 'COACH') && !getActiveTeamIdForAuth(auth) && !allowsExplicitTeamOnPlayersCreate) {
+    const allowsPlayerInviteWithoutActiveTeam =
+      req.method === 'POST' &&
+      /^\/players\/[^/]+\/invite$/.test(req.path)
+    const allowsPlayerUpdateWithoutActiveTeam =
+      (req.method === 'PUT' || req.method === 'PATCH') &&
+      /^\/players\/[^/]+$/.test(req.path)
+    if (
+      (auth.role === 'DIRECTION' || auth.role === 'COACH') &&
+      !getActiveTeamIdForAuth(auth) &&
+      !allowsExplicitTeamOnPlayersCreate &&
+      !allowsPlayerInviteWithoutActiveTeam &&
+      !allowsPlayerUpdateWithoutActiveTeam
+    ) {
       return res.status(400).json({ error: 'Select an active team before making changes' })
     }
   } catch {
@@ -3525,6 +3536,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   if (!req.auth?.clubId) {
     return res.status(400).json({ error: 'Staff account must be attached to a club' })
   }
+  const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(player, req.auth.clubId)
 
   const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player)
   if (snapshot.status === 'ACCEPTED') {
@@ -3535,7 +3547,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
     where: { email: playerEmail },
     select: { id: true }
   })
-  if (existingUser && existingUser.id !== player.userId) {
+  if (existingUser && existingUser.id !== linkedPlayerAccountUser?.id) {
     return res.status(409).json({ error: 'Email already in use by another account' })
   }
 
@@ -3577,7 +3589,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
         teamId: player.teamId ?? null,
         managedTeamIds: [],
         ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
-        linkedPlayerUserId: player.userId ?? null,
+        linkedPlayerUserId: linkedPlayerAccountUser?.id ?? null,
         expiresAt,
       },
       select: {
