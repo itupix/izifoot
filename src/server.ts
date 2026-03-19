@@ -3052,26 +3052,6 @@ app.use(async (req: any, res: any, next: any) => {
     if (isReadOnlyRole(auth)) {
       return res.status(403).json({ error: 'Read-only account: write access is not allowed' })
     }
-    const allowsExplicitTeamOnPlayersCreate =
-      req.method === 'POST' &&
-      req.path === '/players' &&
-      typeof req.body?.teamId === 'string' &&
-      req.body.teamId.trim().length > 0
-    const allowsPlayerInviteWithoutActiveTeam =
-      req.method === 'POST' &&
-      /^\/players\/[^/]+\/invite$/.test(req.path)
-    const allowsPlayerUpdateWithoutActiveTeam =
-      (req.method === 'PUT' || req.method === 'PATCH') &&
-      /^\/players\/[^/]+$/.test(req.path)
-    if (
-      (auth.role === 'DIRECTION' || auth.role === 'COACH') &&
-      !getActiveTeamIdForAuth(auth) &&
-      !allowsExplicitTeamOnPlayersCreate &&
-      !allowsPlayerInviteWithoutActiveTeam &&
-      !allowsPlayerUpdateWithoutActiveTeam
-    ) {
-      return res.status(400).json({ error: 'Select an active team before making changes' })
-    }
   } catch {
     return res.status(401).json({ error: 'Invalid token' })
   }
@@ -4007,12 +3987,13 @@ app.post('/plateaus', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     date: z.string().or(z.date()),
     lieu: z.string().min(1),
+    teamId: z.string().min(1).optional(),
   }).merge(plateauMetadataSchema)
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
   try {
-    team = await resolveTeamForWrite(req.auth)
+    team = await resolveTeamForWrite(req.auth, parsed.data.teamId || undefined)
   } catch (e: any) {
     return res.status(400).json({ error: e.message })
   }

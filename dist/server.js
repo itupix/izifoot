@@ -2887,21 +2887,6 @@ app.use(async (req, res, next) => {
         if (isReadOnlyRole(auth)) {
             return res.status(403).json({ error: 'Read-only account: write access is not allowed' });
         }
-        const allowsExplicitTeamOnPlayersCreate = req.method === 'POST' &&
-            req.path === '/players' &&
-            typeof req.body?.teamId === 'string' &&
-            req.body.teamId.trim().length > 0;
-        const allowsPlayerInviteWithoutActiveTeam = req.method === 'POST' &&
-            /^\/players\/[^/]+\/invite$/.test(req.path);
-        const allowsPlayerUpdateWithoutActiveTeam = (req.method === 'PUT' || req.method === 'PATCH') &&
-            /^\/players\/[^/]+$/.test(req.path);
-        if ((auth.role === 'DIRECTION' || auth.role === 'COACH') &&
-            !getActiveTeamIdForAuth(auth) &&
-            !allowsExplicitTeamOnPlayersCreate &&
-            !allowsPlayerInviteWithoutActiveTeam &&
-            !allowsPlayerUpdateWithoutActiveTeam) {
-            return res.status(400).json({ error: 'Select an active team before making changes' });
-        }
     }
     catch {
         return res.status(401).json({ error: 'Invalid token' });
@@ -3844,13 +3829,14 @@ app.post('/plateaus', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         date: zod_1.z.string().or(zod_1.z.date()),
         lieu: zod_1.z.string().min(1),
+        teamId: zod_1.z.string().min(1).optional(),
     }).merge(plateau_metadata_1.plateauMetadataSchema);
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     let team;
     try {
-        team = await resolveTeamForWrite(req.auth);
+        team = await resolveTeamForWrite(req.auth, parsed.data.teamId || undefined);
     }
     catch (e) {
         return res.status(400).json({ error: e.message });
