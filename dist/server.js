@@ -31,6 +31,7 @@ const match_events_1 = require("./match-events");
 const match_update_validation_1 = require("./match-update-validation");
 const player_payload_1 = require("./player-payload");
 const player_invitation_status_1 = require("./player-invitation-status");
+const match_payload_1 = require("./match-payload");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -2027,8 +2028,10 @@ app.post('/auth/register', async (req, res) => {
         message: 'Required'
     });
     const parsed = schema.safeParse(req.body);
-    if (!parsed.success)
-        return res.status(400).json({ error: parsed.error.flatten() });
+    if (!parsed.success) {
+        const firstIssue = parsed.error.issues[0];
+        return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() });
+    }
     const { email, password } = parsed.data;
     const clubName = parsed.data.clubName || parsed.data.club;
     const existing = await prisma.user.findUnique({ where: { email } });
@@ -4207,19 +4210,6 @@ function normalizeMatchState(payload, fallbackPlayed = false) {
         buteurs: played ? (payload.buteurs ?? []) : []
     };
 }
-const matchScorerPayloadSchema = zod_1.z.object({
-    playerId: zod_1.z.string(),
-    side: zod_1.z.enum(['home', 'away']),
-    assistId: zod_1.z.string().nullable().optional(),
-}).superRefine((value, ctx) => {
-    if (value.assistId && value.assistId === value.playerId) {
-        ctx.addIssue({
-            code: zod_1.z.ZodIssueCode.custom,
-            path: ['assistId'],
-            message: 'assistId must be different from playerId',
-        });
-    }
-});
 function toMatchEventResponse(row) {
     return {
         id: row.id,
@@ -4416,7 +4406,7 @@ app.get('/matches', authMiddleware, async (req, res) => {
         include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
         orderBy: { createdAt: 'desc' }
     });
-    res.json(matches);
+    res.json(matches.map((match) => ({ ...match, tactic: match.tactic ?? null })));
 });
 app.get('/matches/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
@@ -4514,32 +4504,20 @@ app.delete('/matches/:id/events/:eventId', authMiddleware, async (req, res) => {
 app.post('/matches', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
-    const schema = zod_1.z.object({
-        type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']),
-        played: zod_1.z.boolean().optional(),
-        plateauId: zod_1.z.string().optional(),
-        sides: zod_1.z.object({
-            home: zod_1.z.object({
-                starters: zod_1.z.array(zod_1.z.string()).default([]),
-                subs: zod_1.z.array(zod_1.z.string()).default([])
-            }).default({ starters: [], subs: [] }),
-            away: zod_1.z.object({
-                starters: zod_1.z.array(zod_1.z.string()).default([]),
-                subs: zod_1.z.array(zod_1.z.string()).default([])
-            }).default({ starters: [], subs: [] })
-        }),
-        score: zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) }).optional(),
-        buteurs: zod_1.z.array(matchScorerPayloadSchema).optional(),
-        opponentName: zod_1.z.string().min(1).max(100).optional()
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success)
-        return res.status(400).json({ error: parsed.error.flatten() });
-    const { type, plateauId, sides, score, buteurs, opponentName, played } = parsed.data;
+    const parsed = match_payload_1.matchCreatePayloadSchema.safeParse(req.body);
+    if (!parsed.success) {
+        const firstIssue = parsed.error.issues[0];
+        return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() });
+    }
+    const { type, plateauId, sides, score, buteurs, opponentName, played, tactic } = parsed.data;
     const normalized = normalizeMatchState({ played, score, buteurs });
     let team = null;
+    let teamFormat = null;
     if (plateauId) {
-        const ownedPlateau = await plateauFindFirstForUser(prisma, req.auth, { where: { id: plateauId } });
+        const ownedPlateau = await plateauFindFirstForUser(prisma, req.auth, {
+            where: { id: plateauId },
+            select: { teamId: true, clubId: true },
+        });
         if (!ownedPlateau)
             return res.status(404).json({ error: 'Plateau not found' });
         team = { id: ownedPlateau.teamId, clubId: ownedPlateau.clubId };
@@ -4552,9 +4530,24 @@ app.post('/matches', authMiddleware, async (req, res) => {
             return res.status(400).json({ error: e.message });
         }
     }
+    const owningTeam = team?.id
+        ? await prisma.team.findFirst({
+            where: { id: team.id, ...(team?.clubId ? { clubId: team.clubId } : {}) },
+            select: { format: true },
+        })
+        : null;
+    teamFormat = owningTeam?.format ?? null;
+    const payloadValidation = (0, match_update_validation_1.validateMatchUpdatePayloadForTeamFormat)({
+        teamFormat,
+        sides,
+        tactic,
+    });
+    if (!payloadValidation.ok)
+        return res.status(400).json({ error: payloadValidation.error });
     try {
         const match = await matchCreateForUser(prisma, req.auth, {
             type, plateauId, opponentName, played: normalized.played,
+            tactic: tactic ?? null,
             clubId: team?.clubId ?? req.auth.clubId ?? null,
             teamId: team?.id ?? null
         });
@@ -4586,7 +4579,7 @@ app.post('/matches', authMiddleware, async (req, res) => {
             where: { id: match.id },
             include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
         });
-        res.json(full);
+        res.status(201).json(full);
     }
     catch (e) {
         if (e?.code === 'PLAYER_NOT_IN_MATCH_TEAMS')
@@ -4615,7 +4608,7 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
             })
         }),
         score: zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) }),
-        buteurs: zod_1.z.array(matchScorerPayloadSchema).default([]),
+        buteurs: zod_1.z.array(match_payload_1.matchScorerPayloadSchema).default([]),
         opponentName: zod_1.z.string().max(100).optional(),
         tactic: match_tactic_1.matchTacticSchema.nullable().optional(),
     });

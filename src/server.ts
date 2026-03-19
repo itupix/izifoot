@@ -38,6 +38,7 @@ import { matchEventCreateSchema } from './match-events'
 import { validateMatchUpdatePayloadForTeamFormat } from './match-update-validation'
 import { normalizePlayerForApi, parsePlayerCreatePayload, parsePlayerUpdatePayload } from './player-payload'
 import { resolvePlayerInvitationStatus } from './player-invitation-status'
+import { matchCreatePayloadSchema, matchScorerPayloadSchema } from './match-payload'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -2174,7 +2175,10 @@ app.post('/auth/register', async (req, res) => {
     message: 'Required'
   })
   const parsed = schema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0]
+    return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() })
+  }
   const { email, password } = parsed.data
   const clubName = parsed.data.clubName || parsed.data.club!
   const existing = await prisma.user.findUnique({ where: { email } })
@@ -4349,20 +4353,6 @@ function normalizeMatchState<T extends { score?: { home: number; away: number };
   }
 }
 
-const matchScorerPayloadSchema = z.object({
-  playerId: z.string(),
-  side: z.enum(['home', 'away']),
-  assistId: z.string().nullable().optional(),
-}).superRefine((value, ctx) => {
-  if (value.assistId && value.assistId === value.playerId) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['assistId'],
-      message: 'assistId must be different from playerId',
-    })
-  }
-})
-
 function toMatchEventResponse(row: any) {
   return {
     id: row.id,
@@ -4569,7 +4559,7 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
     include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
     orderBy: { createdAt: 'desc' }
   })
-  res.json(matches)
+  res.json(matches.map((match: any) => ({ ...match, tactic: match.tactic ?? null })))
 })
 
 app.get('/matches/:id', authMiddleware, async (req: any, res) => {
@@ -4659,32 +4649,21 @@ app.delete('/matches/:id/events/:eventId', authMiddleware, async (req: any, res)
 
 app.post('/matches', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const schema = z.object({
-    type: z.enum(['ENTRAINEMENT', 'PLATEAU']),
-    played: z.boolean().optional(),
-    plateauId: z.string().optional(),
-    sides: z.object({
-      home: z.object({
-        starters: z.array(z.string()).default([]),
-        subs: z.array(z.string()).default([])
-      }).default({ starters: [], subs: [] }),
-      away: z.object({
-        starters: z.array(z.string()).default([]),
-        subs: z.array(z.string()).default([])
-      }).default({ starters: [], subs: [] })
-    }),
-    score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }).optional(),
-    buteurs: z.array(matchScorerPayloadSchema).optional(),
-    opponentName: z.string().min(1).max(100).optional()
-  })
-  const parsed = schema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const { type, plateauId, sides, score, buteurs, opponentName, played } = parsed.data
+  const parsed = matchCreatePayloadSchema.safeParse(req.body)
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0]
+    return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() })
+  }
+  const { type, plateauId, sides, score, buteurs, opponentName, played, tactic } = parsed.data
   const normalized = normalizeMatchState({ played, score, buteurs })
 
   let team: any = null
+  let teamFormat: string | null = null
   if (plateauId) {
-    const ownedPlateau = await plateauFindFirstForUser(prisma, req.auth, { where: { id: plateauId } })
+    const ownedPlateau = await plateauFindFirstForUser(prisma, req.auth, {
+      where: { id: plateauId },
+      select: { teamId: true, clubId: true },
+    })
     if (!ownedPlateau) return res.status(404).json({ error: 'Plateau not found' })
     team = { id: ownedPlateau.teamId, clubId: ownedPlateau.clubId }
   } else {
@@ -4695,9 +4674,24 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
     }
   }
 
+  const owningTeam = team?.id
+    ? await prisma.team.findFirst({
+      where: { id: team.id, ...(team?.clubId ? { clubId: team.clubId } : {}) },
+      select: { format: true },
+    })
+    : null
+  teamFormat = owningTeam?.format ?? null
+  const payloadValidation = validateMatchUpdatePayloadForTeamFormat({
+    teamFormat,
+    sides,
+    tactic,
+  })
+  if (!payloadValidation.ok) return res.status(400).json({ error: payloadValidation.error })
+
   try {
     const match = await matchCreateForUser(prisma, req.auth, {
       type, plateauId, opponentName, played: normalized.played,
+      tactic: tactic ?? null,
       clubId: team?.clubId ?? req.auth.clubId ?? null,
       teamId: team?.id ?? null
     })
@@ -4733,7 +4727,7 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
       where: { id: match.id },
       include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
     })
-    res.json(full)
+    res.status(201).json(full)
   } catch (e: any) {
     if (e?.code === 'PLAYER_NOT_IN_MATCH_TEAMS') return res.status(400).json({ error: e.message })
     if (e?.code === 'P2003') return res.status(400).json({ error: 'Invalid scorer reference in payload' })
