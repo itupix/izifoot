@@ -28,11 +28,21 @@ exports.matchSidesPayloadSchema = zod_1.z.object({
 });
 exports.matchCreatePayloadSchema = zod_1.z.object({
     type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']),
+    status: zod_1.z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
     played: zod_1.z.boolean().optional(),
     plateauId: zod_1.z.string().optional(),
+    rotationGameKey: zod_1.z.string().min(1).max(120).optional(),
     sides: exports.matchSidesPayloadSchema,
     score: zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) }).optional(),
     buteurs: zod_1.z.array(exports.matchScorerPayloadSchema).optional(),
     opponentName: zod_1.z.string().min(1).max(100).optional(),
     tactic: match_tactic_1.matchTacticSchema.nullable().optional(),
+}).superRefine((value, ctx) => {
+    if (value.status === 'CANCELLED' && value.played === true) {
+        ctx.addIssue({
+            code: zod_1.z.ZodIssueCode.custom,
+            path: ['played'],
+            message: 'played must be false when status is CANCELLED',
+        });
+    }
 });

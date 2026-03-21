@@ -50,3 +50,15 @@ const match_payload_1 = require("../match-payload");
     });
     strict_1.default.equal(parsed.success, false);
 });
+(0, node_test_1.default)('POST /matches payload rejects played=true when status=CANCELLED', () => {
+    const parsed = match_payload_1.matchCreatePayloadSchema.safeParse({
+        type: 'PLATEAU',
+        status: 'CANCELLED',
+        played: true,
+        sides: {
+            home: { starters: ['h1'], subs: [] },
+            away: { starters: ['a1'], subs: [] },
+        },
+    });
+    strict_1.default.equal(parsed.success, false);
+});

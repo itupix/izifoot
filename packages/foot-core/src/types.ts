@@ -24,11 +24,14 @@ export interface Plateau {
 }
 
 export type MatchType = 'ENTRAINEMENT' | 'PLATEAU';
+export type MatchStatus = 'PLANNED' | 'PLAYED' | 'CANCELLED';
 
 export interface Match {
   id: string;
   type: MatchType;
   played: boolean;
+  status?: MatchStatus;
+  rotationGameKey?: string | null;
   home: PlayerId[];
   away: PlayerId[];
   starters?: PlayerId[];

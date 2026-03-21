@@ -28,11 +28,21 @@ export const matchSidesPayloadSchema = z.object({
 
 export const matchCreatePayloadSchema = z.object({
   type: z.enum(['ENTRAINEMENT', 'PLATEAU']),
+  status: z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
   played: z.boolean().optional(),
   plateauId: z.string().optional(),
+  rotationGameKey: z.string().min(1).max(120).optional(),
   sides: matchSidesPayloadSchema,
   score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }).optional(),
   buteurs: z.array(matchScorerPayloadSchema).optional(),
   opponentName: z.string().min(1).max(100).optional(),
   tactic: matchTacticSchema.nullable().optional(),
+}).superRefine((value, ctx) => {
+  if (value.status === 'CANCELLED' && value.played === true) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['played'],
+      message: 'played must be false when status is CANCELLED',
+    })
+  }
 })

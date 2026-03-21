@@ -32,6 +32,8 @@ const match_update_validation_1 = require("./match-update-validation");
 const player_payload_1 = require("./player-payload");
 const player_invitation_status_1 = require("./player-invitation-status");
 const match_payload_1 = require("./match-payload");
+const match_status_1 = require("./match-status");
+const plateau_absence_1 = require("./plateau-absence");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -1950,6 +1952,76 @@ function findRotationCandidate(data) {
     }
     return null;
 }
+function findPlanningPlateauIdCandidate(data) {
+    if (!data || typeof data !== 'object')
+        return null;
+    const directCandidates = [
+        data.plateauId,
+        data?.data?.plateauId,
+        data?.planning?.plateauId,
+        data?.rotation?.plateauId,
+        data?.meta?.plateauId,
+    ];
+    for (const candidate of directCandidates) {
+        if (typeof candidate === 'string' && candidate.trim().length > 0)
+            return candidate.trim();
+    }
+    return null;
+}
+async function findPlateauLinkedToPlanning(db, planning, scopeOrUserId, planningData) {
+    const explicitPlateauId = findPlanningPlateauIdCandidate(planningData);
+    if (explicitPlateauId) {
+        return plateauFindFirstForUser(db, scopeOrUserId, { where: { id: explicitPlateauId }, select: { id: true } });
+    }
+    const dayStart = new Date(planning.date);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    return plateauFindFirstForUser(db, scopeOrUserId, {
+        where: {
+            date: { gte: dayStart, lt: dayEnd },
+            ...(planning.userId ? { userId: planning.userId } : {}),
+        },
+        orderBy: { updatedAt: 'desc' },
+        select: { id: true },
+    });
+}
+async function applyTeamAbsenceOnPlateauTx(input) {
+    const keyedRotation = (0, plateau_absence_1.ensureRotationGameKeys)(input.rotation);
+    const targetRotationGameKeys = (0, plateau_absence_1.findRotationGameKeysForTeam)(keyedRotation, input.teamLabel);
+    if (!targetRotationGameKeys.length) {
+        return { impactedCount: 0, updatedCount: 0 };
+    }
+    const plateauMatches = await matchFindManyForUser(input.tx, input.auth, {
+        where: {
+            plateauId: input.plateauId,
+            OR: [
+                { rotationGameKey: { in: targetRotationGameKeys } },
+                { opponentName: { equals: input.teamLabel, mode: 'insensitive' } },
+            ],
+        },
+        select: { id: true, status: true, played: true },
+    });
+    const patches = (0, plateau_absence_1.buildAbsenceMatchPatches)({ matches: plateauMatches, absent: input.absent });
+    if (!patches.length) {
+        return { impactedCount: plateauMatches.length, updatedCount: 0 };
+    }
+    const groups = new Map();
+    for (const patch of patches) {
+        const key = `${patch.status}:${patch.played ? '1' : '0'}`;
+        if (!groups.has(key))
+            groups.set(key, []);
+        groups.get(key).push(patch.id);
+    }
+    for (const [key, ids] of groups.entries()) {
+        const [status, playedToken] = key.split(':');
+        await input.tx.match.updateMany({
+            where: { id: { in: ids } },
+            data: { status, played: playedToken === '1' },
+        });
+    }
+    return { impactedCount: plateauMatches.length, updatedCount: patches.length };
+}
 async function getPublicPlateauPayloadByToken(token) {
     let share;
     try {
@@ -2941,11 +3013,51 @@ app.put('/plannings/:id', authMiddleware, async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const p = await prisma.planning.findFirst({ where: { id: req.params.id, userId: req.userId } });
-    if (!p)
-        return res.status(404).json({ error: 'Not found' });
-    const updated = await prisma.planning.update({ where: { id: p.id }, data: { data: JSON.stringify(parsed.data.data) } });
-    res.json({ ...updated, data: parsed.data.data });
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            const p = await tx.planning.findFirst({ where: { id: req.params.id, userId: req.userId } });
+            if (!p) {
+                const err = new Error('Not found');
+                err.code = 'PLANNING_NOT_FOUND';
+                throw err;
+            }
+            const previousData = safeParseJSON(p.data);
+            const nextData = parsed.data.data;
+            const updated = await tx.planning.update({ where: { id: p.id }, data: { data: JSON.stringify(nextData) } });
+            const nextRotationRaw = findRotationCandidate(nextData);
+            const previousRotationRaw = findRotationCandidate(previousData);
+            const nextRotation = nextRotationRaw ? (0, plateau_absence_1.ensureRotationGameKeys)(nextRotationRaw) : null;
+            const previousTeams = (0, plateau_absence_1.extractRotationTeams)(previousRotationRaw);
+            const nextTeams = (0, plateau_absence_1.extractRotationTeams)(nextRotation);
+            const changes = (0, plateau_absence_1.diffTeamAbsence)(previousTeams, nextTeams);
+            if (!changes.length || !nextRotation) {
+                return { updated, data: nextData, propagation: [] };
+            }
+            const linkedPlateau = await findPlateauLinkedToPlanning(tx, p, req.auth, nextData);
+            if (!linkedPlateau) {
+                return { updated, data: nextData, propagation: [] };
+            }
+            const propagation = [];
+            for (const change of changes) {
+                const stats = await applyTeamAbsenceOnPlateauTx({
+                    tx,
+                    auth: req.auth,
+                    plateauId: linkedPlateau.id,
+                    rotation: nextRotation,
+                    teamLabel: change.teamLabel,
+                    absent: change.absent,
+                });
+                propagation.push({ teamLabel: change.teamLabel, absent: change.absent, ...stats });
+            }
+            return { updated, data: nextData, propagation };
+        });
+        res.json(result);
+    }
+    catch (e) {
+        if (e?.code === 'PLANNING_NOT_FOUND')
+            return res.status(404).json({ error: 'Not found' });
+        throw e;
+    }
 });
 app.delete('/plannings/:id', authMiddleware, async (req, res) => {
     const p = await prisma.planning.findFirst({ where: { id: req.params.id, userId: req.userId } });
@@ -3878,6 +3990,107 @@ app.put('/plateaus/:id', authMiddleware, async (req, res) => {
         return res.status(500).json({ error: 'Failed to update plateau' });
     }
 });
+app.post('/plateaus/:id/teams/absence', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const schema = zod_1.z.object({
+        teamLabel: zod_1.z.string().min(1),
+        absent: zod_1.z.boolean(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const plateau = await plateauFindFirstForUser(prisma, req.auth, {
+        where: { id: req.params.id },
+        select: { id: true, date: true, userId: true },
+    });
+    if (!plateau)
+        return res.status(404).json({ error: 'Plateau not found' });
+    try {
+        const payload = await prisma.$transaction(async (tx) => {
+            const dayStart = new Date(plateau.date);
+            dayStart.setHours(0, 0, 0, 0);
+            const dayEnd = new Date(dayStart);
+            dayEnd.setDate(dayEnd.getDate() + 1);
+            const planning = await tx.planning.findFirst({
+                where: {
+                    date: { gte: dayStart, lt: dayEnd },
+                    ...(plateau.userId ? { userId: plateau.userId } : {}),
+                },
+                orderBy: { updatedAt: 'desc' },
+            });
+            if (!planning) {
+                const err = new Error('Planning not found for this plateau day');
+                err.code = 'PLANNING_NOT_FOUND';
+                throw err;
+            }
+            const planningData = safeParseJSON(planning.data);
+            const rotationCandidate = findRotationCandidate(planningData);
+            if (!rotationCandidate) {
+                const err = new Error('Rotation not found in planning');
+                err.code = 'ROTATION_NOT_FOUND';
+                throw err;
+            }
+            const keyedRotation = (0, plateau_absence_1.ensureRotationGameKeys)(rotationCandidate);
+            const teams = (0, plateau_absence_1.extractRotationTeams)(keyedRotation);
+            let foundTeam = false;
+            let touched = false;
+            const nextTeams = teams.map((team) => {
+                if (team.label.trim().toLowerCase() !== parsed.data.teamLabel.trim().toLowerCase())
+                    return team;
+                foundTeam = true;
+                const currentAbsent = Boolean(team.absent);
+                if (currentAbsent === parsed.data.absent)
+                    return team;
+                touched = true;
+                return { ...team, absent: parsed.data.absent };
+            });
+            if (!foundTeam) {
+                const err = new Error('No team found in rotation');
+                err.code = 'TEAM_NOT_FOUND';
+                throw err;
+            }
+            const nextRotation = { ...keyedRotation, teams: nextTeams };
+            const nextPlanningData = {
+                ...(planningData && typeof planningData === 'object' ? planningData : {}),
+                rotation: nextRotation,
+            };
+            if (touched) {
+                await tx.planning.update({
+                    where: { id: planning.id },
+                    data: { data: JSON.stringify(nextPlanningData) },
+                });
+            }
+            const stats = await applyTeamAbsenceOnPlateauTx({
+                tx,
+                auth: req.auth,
+                plateauId: plateau.id,
+                rotation: nextRotation,
+                teamLabel: parsed.data.teamLabel,
+                absent: parsed.data.absent,
+            });
+            return {
+                ok: true,
+                planningId: planning.id,
+                teamLabel: parsed.data.teamLabel,
+                absent: parsed.data.absent,
+                planningUpdated: touched,
+                ...stats,
+            };
+        });
+        return res.json(payload);
+    }
+    catch (e) {
+        if (e?.code === 'PLANNING_NOT_FOUND')
+            return res.status(404).json({ error: e.message });
+        if (e?.code === 'ROTATION_NOT_FOUND')
+            return res.status(400).json({ error: e.message });
+        if (e?.code === 'TEAM_NOT_FOUND')
+            return res.status(404).json({ error: e.message });
+        console.error('[POST /plateaus/:id/teams/absence] failed', e);
+        return res.status(500).json({ error: 'Failed to update team absence' });
+    }
+});
 app.post('/plateaus/:id/share', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ expiresInDays: zod_1.z.number().int().min(1).max(365).optional() });
     const parsed = schema.safeParse(req.body ?? {});
@@ -4039,17 +4252,22 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
             byTeam[row.matchTeamId].push(row);
         }
         // Build enriched matches with teams[].players including player info
-        const matches = matchesRaw.map((m) => ({
-            ...m,
-            teams: m.teams.map((t) => ({
-                ...t,
-                players: (byTeam[t.id] || []).map(p => ({
-                    playerId: p.playerId,
-                    role: p.role,
-                    player: p.player
+        const matches = matchesRaw.map((m) => {
+            const status = (0, match_status_1.resolveMatchStatus)({ status: m.status, played: Boolean(m.played) });
+            return {
+                ...m,
+                status,
+                played: (0, match_status_1.derivePlayedFromStatus)(status),
+                teams: m.teams.map((t) => ({
+                    ...t,
+                    players: (byTeam[t.id] || []).map(p => ({
+                        playerId: p.playerId,
+                        role: p.role,
+                        player: p.player
+                    }))
                 }))
-            }))
-        }));
+            };
+        });
         // Hydrate playersById from match teams and build convocations
         const convocatedMap = {};
         for (const m of matches) {
@@ -4145,7 +4363,12 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
                 assistName: s.assistId ? (playersById[s.assistId]?.name || null) : null
             }))
         }));
-        res.json({ plateau, convocations, matches: matchesEnriched, playersById });
+        const stats = {
+            matchesTotal: matchesEnriched.length,
+            matchesPlayed: (0, match_status_1.countPlayedMatchesExcludingCancelled)(matchesEnriched),
+            matchesCancelled: matchesEnriched.filter((m) => (0, match_status_1.resolveMatchStatus)({ status: m.status, played: m.played }) === 'CANCELLED').length,
+        };
+        res.json({ plateau, convocations, matches: matchesEnriched, playersById, stats });
     }
     catch (e) {
         console.error('[GET /plateaus/:id/summary] failed', e);
@@ -4202,12 +4425,22 @@ app.post('/attendance', authMiddleware, async (req, res) => {
 function rowsForMatchTeam(matchTeamId, ids, role) {
     return ids.map((playerId) => ({ matchTeamId, playerId, role }));
 }
-function normalizeMatchState(payload, fallbackPlayed = false) {
-    const played = payload.played ?? fallbackPlayed;
+function normalizeMatchState(input) {
+    const status = (0, match_status_1.resolvePatchedMatchStatus)({
+        payloadStatus: input.payload.status,
+        payloadPlayed: input.payload.played,
+        existingStatus: input.fallbackStatus ?? 'PLANNED',
+    });
+    const normalized = (0, match_status_1.normalizeMatchWriteState)({
+        status,
+        score: input.payload.score,
+        buteurs: input.payload.buteurs,
+    });
     return {
-        played,
-        score: played ? (payload.score ?? { home: 0, away: 0 }) : { home: 0, away: 0 },
-        buteurs: played ? (payload.buteurs ?? []) : []
+        status,
+        played: normalized.played,
+        score: normalized.score,
+        buteurs: normalized.buteurs,
     };
 }
 function toMatchEventResponse(row) {
@@ -4384,12 +4617,15 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         assistName: s.assistId ? (allPlayersById[s.assistId]?.name || playersById[s.assistId]?.name || null) : null
     }));
     const events = await listMatchEventsByMatchId(db, id);
+    const status = (0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) });
     return {
         id: match.id,
         createdAt: match.createdAt,
         type: match.type,
-        played: Boolean(match.played),
+        status,
+        played: (0, match_status_1.derivePlayedFromStatus)(status),
         plateauId: match.plateauId ?? null,
+        rotationGameKey: match.rotationGameKey ?? null,
         opponentName: match.opponentName ?? null,
         tactic: match.tactic ?? null,
         teams,
@@ -4406,7 +4642,16 @@ app.get('/matches', authMiddleware, async (req, res) => {
         include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
         orderBy: { createdAt: 'desc' }
     });
-    res.json(matches.map((match) => ({ ...match, tactic: match.tactic ?? null })));
+    res.json(matches.map((match) => {
+        const status = (0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) });
+        return {
+            ...match,
+            status,
+            played: (0, match_status_1.derivePlayedFromStatus)(status),
+            tactic: match.tactic ?? null,
+            rotationGameKey: match.rotationGameKey ?? null,
+        };
+    }));
 });
 app.get('/matches/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
@@ -4444,10 +4689,13 @@ app.post('/matches/:id/events', authMiddleware, async (req, res) => {
     try {
         const match = await matchFindFirstForUser(prisma, req.auth, {
             where: { id: matchId },
-            select: { id: true },
+            select: { id: true, status: true, played: true },
         });
         if (!match)
             return res.status(404).json({ error: 'Match not found' });
+        if ((0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) }) === 'CANCELLED') {
+            return res.status(409).json({ error: 'Cannot start live actions on a cancelled match' });
+        }
         const payload = parsed.data;
         const playerIds = [payload.scorerId, payload.assistId, payload.inPlayerId, payload.outPlayerId].filter(Boolean);
         await assertEventPlayerIdsInMatchScope(prisma, req.auth, matchId, playerIds);
@@ -4509,8 +4757,14 @@ app.post('/matches', authMiddleware, async (req, res) => {
         const firstIssue = parsed.error.issues[0];
         return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() });
     }
-    const { type, plateauId, sides, score, buteurs, opponentName, played, tactic } = parsed.data;
-    const normalized = normalizeMatchState({ played, score, buteurs });
+    const { type, plateauId, sides, score, buteurs, opponentName, played, status, tactic, rotationGameKey } = parsed.data;
+    const normalized = normalizeMatchState({
+        payload: { played, status, score, buteurs },
+        fallbackStatus: 'PLANNED',
+    });
+    if (status === 'CANCELLED' && played === true) {
+        return res.status(400).json({ error: 'played must be false when status is CANCELLED' });
+    }
     let team = null;
     let teamFormat = null;
     if (plateauId) {
@@ -4546,7 +4800,8 @@ app.post('/matches', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: payloadValidation.error });
     try {
         const match = await matchCreateForUser(prisma, req.auth, {
-            type, plateauId, opponentName, played: normalized.played,
+            type, plateauId, opponentName, played: normalized.played, status: normalized.status,
+            rotationGameKey: rotationGameKey ?? null,
             tactic: tactic ?? null,
             clubId: team?.clubId ?? req.auth.clubId ?? null,
             teamId: team?.id ?? null
@@ -4595,8 +4850,10 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
     const matchId = req.params.id;
     const schema = zod_1.z.object({
         type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']).optional(),
+        status: zod_1.z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
         played: zod_1.z.boolean().optional(),
         plateauId: zod_1.z.string().nullable().optional(),
+        rotationGameKey: zod_1.z.string().min(1).max(120).nullable().optional(),
         sides: zod_1.z.object({
             home: zod_1.z.object({
                 starters: zod_1.z.array(zod_1.z.string()).default([]),
@@ -4615,6 +4872,9 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
+    if (parsed.data.status === 'CANCELLED' && parsed.data.played === true) {
+        return res.status(400).json({ error: 'played must be false when status is CANCELLED' });
+    }
     try {
         const payload = parsed.data;
         const updatedId = await prisma.$transaction(async (tx) => {
@@ -4649,7 +4909,16 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                     fallbackFormat: payloadValidation.format,
                 });
             }
-            const normalized = normalizeMatchState(payload, Boolean(existing.played));
+            const existingStatus = (0, match_status_1.resolveMatchStatus)({ status: existing.status, played: Boolean(existing.played) });
+            const normalized = normalizeMatchState({
+                payload: {
+                    played: payload.played,
+                    status: payload.status,
+                    score: payload.score,
+                    buteurs: payload.buteurs,
+                },
+                fallbackStatus: existingStatus,
+            });
             if (payload.plateauId !== undefined && payload.plateauId) {
                 const plateau = await plateauFindFirstForUser(tx, req.auth, { where: { id: payload.plateauId }, select: { id: true } });
                 if (!plateau) {
@@ -4674,12 +4943,17 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
             const matchPatch = {};
             if (payload.type !== undefined)
                 matchPatch.type = payload.type;
-            if (payload.played !== undefined)
+            if (payload.played !== undefined || payload.status !== undefined) {
                 matchPatch.played = normalized.played;
+                matchPatch.status = normalized.status;
+            }
             if (payload.plateauId !== undefined) {
                 matchPatch.plateau = payload.plateauId
                     ? { connect: { id: payload.plateauId } }
                     : { disconnect: true };
+            }
+            if (payload.rotationGameKey !== undefined) {
+                matchPatch.rotationGameKey = payload.rotationGameKey ?? null;
             }
             if (payload.opponentName !== undefined)
                 matchPatch.opponentName = payload.opponentName;
@@ -4848,10 +5122,13 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
     }
     const createdIds = await prisma.$transaction(async (db) => {
         const ids = [];
-        for (const m of schedule.matches) {
+        for (const [index, m] of schedule.matches.entries()) {
             const match = await matchCreateForUser(db, req.auth, {
                 type: plateauId ? 'PLATEAU' : 'ENTRAINEMENT',
                 plateauId,
+                status: 'PLANNED',
+                played: false,
+                rotationGameKey: plateauId ? `schedule:${index}` : null,
                 clubId: targetTeam?.clubId ?? req.auth.clubId ?? null,
                 teamId: targetTeam?.id ?? null
             });

@@ -222,8 +222,10 @@ model Match {
   teamId       String?
   type         String
   played       Boolean     @default(false)
+  status       MatchStatus @default(PLANNED)
   plateau      Plateau?    @relation(fields: [plateauId], references: [id])
   plateauId    String?
+  rotationGameKey String?
   teams        MatchTeam[]
   scorers      Scorer[]
   events       MatchEvent[]
@@ -231,6 +233,14 @@ model Match {
   updatedAt    DateTime    @updatedAt
   opponentName String?
   tactic       Json?
+
+  @@index([plateauId, rotationGameKey])
+}
+
+enum MatchStatus {
+  PLANNED
+  PLAYED
+  CANCELLED
 }
 
 enum MatchEventType {

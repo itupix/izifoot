@@ -51,3 +51,17 @@ test('POST /matches payload rejects invalid tactic', () => {
 
   assert.equal(parsed.success, false)
 })
+
+test('POST /matches payload rejects played=true when status=CANCELLED', () => {
+  const parsed = matchCreatePayloadSchema.safeParse({
+    type: 'PLATEAU',
+    status: 'CANCELLED',
+    played: true,
+    sides: {
+      home: { starters: ['h1'], subs: [] },
+      away: { starters: ['a1'], subs: [] },
+    },
+  })
+
+  assert.equal(parsed.success, false)
+})
