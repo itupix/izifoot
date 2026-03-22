@@ -24,7 +24,7 @@ test('POST /matches payload accepts tactic when valid', () => {
 test('POST /matches payload accepts missing tactic', () => {
   const parsed = matchCreatePayloadSchema.safeParse({
     type: 'PLATEAU',
-    plateauId: 'pl_1',
+    matchdayId: 'pl_1',
     sides: {
       home: { starters: ['h1'], subs: [] },
       away: { starters: ['a1'], subs: [] },

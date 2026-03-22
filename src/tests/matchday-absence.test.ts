@@ -5,7 +5,7 @@ import {
   diffTeamAbsence,
   ensureRotationGameKeys,
   findRotationGameKeysForTeam,
-} from '../plateau-absence'
+} from '../matchday-absence'
 
 test('propagation absent=true impacts N matches by rotation keys', () => {
   const rotation = ensureRotationGameKeys({

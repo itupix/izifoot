@@ -30,7 +30,7 @@ export const matchCreatePayloadSchema = z.object({
   type: z.enum(['ENTRAINEMENT', 'PLATEAU']),
   status: z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
   played: z.boolean().optional(),
-  plateauId: z.string().optional(),
+  matchdayId: z.string().optional(),
   rotationGameKey: z.string().min(1).max(120).optional(),
   sides: matchSidesPayloadSchema,
   score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }).optional(),

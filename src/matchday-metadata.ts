@@ -7,13 +7,13 @@ const nullableHHMMSchema = z.union([
   z.null(),
 ])
 
-export const plateauMetadataSchema = z.object({
+export const matchdayMetadataSchema = z.object({
   address: z.union([z.string(), z.null()]).optional(),
   startTime: nullableHHMMSchema.optional(),
   meetingTime: nullableHHMMSchema.optional(),
 })
 
-export function buildPlateauMetadataPatch(data: z.infer<typeof plateauMetadataSchema>) {
+export function buildMatchdayMetadataPatch(data: z.infer<typeof matchdayMetadataSchema>) {
   const patch: { address?: string | null; startTime?: string | null; meetingTime?: string | null } = {}
 
   if (Object.prototype.hasOwnProperty.call(data, 'address')) patch.address = data.address ?? null
@@ -23,7 +23,7 @@ export function buildPlateauMetadataPatch(data: z.infer<typeof plateauMetadataSc
   return patch
 }
 
-export function toPublicPlateau(plateau: {
+export function toPublicMatchday(matchday: {
   id: string
   date: Date
   lieu: string
@@ -32,11 +32,11 @@ export function toPublicPlateau(plateau: {
   meetingTime?: string | null
 }) {
   return {
-    id: plateau.id,
-    date: plateau.date,
-    lieu: plateau.lieu,
-    address: plateau.address ?? null,
-    startTime: plateau.startTime ?? null,
-    meetingTime: plateau.meetingTime ?? null,
+    id: matchday.id,
+    date: matchday.date,
+    lieu: matchday.lieu,
+    address: matchday.address ?? null,
+    startTime: matchday.startTime ?? null,
+    meetingTime: matchday.meetingTime ?? null,
   }
 }

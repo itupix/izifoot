@@ -7,7 +7,7 @@ export interface Player {
   primary: Position;
   secondary?: Position;
   trainingsCount?: number;
-  plateausCount?: number;
+  matchdaysCount?: number;
 }
 
 export interface Training {
@@ -16,7 +16,7 @@ export interface Training {
   present: PlayerId[];
 }
 
-export interface Plateau {
+export interface Matchday {
   id: string;
   date: string;
   lieu: string;

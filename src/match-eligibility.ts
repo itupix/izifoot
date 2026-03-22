@@ -1,4 +1,4 @@
-type PlateauAttendanceRow = {
+type MatchdayAttendanceRow = {
   playerId: string
   session_type: string
   present?: boolean | null
@@ -8,7 +8,7 @@ type PlateauAttendanceRow = {
 // - present players are eligible
 // - explicitly convoked players are also eligible
 // - if no attendance rows exist yet, return null (no filtering)
-export function buildEligiblePlayerIdsFromPlateauAttendance(rows: PlateauAttendanceRow[]): Set<string> | null {
+export function buildEligiblePlayerIdsFromMatchdayAttendance(rows: MatchdayAttendanceRow[]): Set<string> | null {
   if (!rows.length) return null
 
   const attendanceMap = new Map<string, boolean | null>()

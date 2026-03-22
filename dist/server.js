@@ -18,7 +18,7 @@ const qrcode_1 = __importDefault(require("qrcode"));
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const date_fns_1 = require("date-fns");
 const crypto_1 = require("crypto");
-const plateau_metadata_1 = require("./plateau-metadata");
+const matchday_metadata_1 = require("./matchday-metadata");
 const attendance_1 = require("./attendance");
 const training_role_assignments_1 = require("./training-role-assignments");
 const tactics_1 = require("./tactics");
@@ -33,7 +33,7 @@ const player_payload_1 = require("./player-payload");
 const player_invitation_status_1 = require("./player-invitation-status");
 const match_payload_1 = require("./match-payload");
 const match_status_1 = require("./match-status");
-const plateau_absence_1 = require("./plateau-absence");
+const matchday_absence_1 = require("./matchday-absence");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -492,10 +492,10 @@ async function attendanceSetPresenceForUser(db, scopeOrUserId, params) {
         })
     });
 }
-async function attendanceSetPlateauRsvpForUser(db, scopeOrUserId, plateauId, playerId, present) {
+async function attendanceSetMatchdayRsvpForUser(db, scopeOrUserId, matchdayId, playerId, present) {
     return attendanceSetPresenceForUser(db, scopeOrUserId, {
         session_type: 'PLATEAU',
-        session_id: plateauId,
+        session_id: matchdayId,
         playerId,
         present,
     });
@@ -514,16 +514,16 @@ async function resolveAttendanceScopeFromSession(auth, session_type, session_id)
             teamId: training.teamId ?? auth?.teamId ?? null,
         };
     }
-    const plateau = await plateauFindFirstForUser(prisma, auth, {
+    const matchday = await matchdayFindFirstForUser(prisma, auth, {
         where: { id: session_id },
         select: { id: true, clubId: true, teamId: true },
     });
-    if (!plateau)
+    if (!matchday)
         return null;
     return {
         ...auth,
-        clubId: plateau.clubId ?? auth?.clubId ?? null,
-        teamId: plateau.teamId ?? auth?.teamId ?? null,
+        clubId: matchday.clubId ?? auth?.clubId ?? null,
+        teamId: matchday.teamId ?? auth?.teamId ?? null,
     };
 }
 async function playerFindManyForUser(db, scopeOrUserId, args = {}) {
@@ -567,19 +567,19 @@ async function trainingCreateForUser(db, scopeOrUserId, data) {
 async function trainingUpdateCompat(db, id, data) {
     return db.training.update({ where: { id }, data });
 }
-async function plateauFindManyForUser(db, scopeOrUserId, args = {}) {
+async function matchdayFindManyForUser(db, scopeOrUserId, args = {}) {
     return db.plateau.findMany({
         ...args,
         where: scopedWhereOrLegacy(scopeOrUserId, args.where || {}),
     });
 }
-async function plateauFindFirstForUser(db, scopeOrUserId, args = {}) {
+async function matchdayFindFirstForUser(db, scopeOrUserId, args = {}) {
     return db.plateau.findFirst({
         ...args,
         where: scopedWhereOrLegacy(scopeOrUserId, args.where || {}),
     });
 }
-async function plateauCreateForUser(db, scopeOrUserId, data) {
+async function matchdayCreateForUser(db, scopeOrUserId, data) {
     const auth = normalizeScopeInput(scopeOrUserId);
     return db.plateau.create({
         data: {
@@ -1900,7 +1900,7 @@ function normalizePublicTeamLabel(raw, fallback) {
         return 'B';
     return normalized;
 }
-function buildPublicPlateauRotation(matches) {
+function buildPublicMatchdayRotation(matches) {
     if (!matches.length)
         return null;
     const slots = matches.map((match, index) => {
@@ -1952,10 +1952,15 @@ function findRotationCandidate(data) {
     }
     return null;
 }
-function findPlanningPlateauIdCandidate(data) {
+function findPlanningMatchdayIdCandidate(data) {
     if (!data || typeof data !== 'object')
         return null;
     const directCandidates = [
+        data.matchdayId,
+        data?.data?.matchdayId,
+        data?.planning?.matchdayId,
+        data?.rotation?.matchdayId,
+        data?.meta?.matchdayId,
         data.plateauId,
         data?.data?.plateauId,
         data?.planning?.plateauId,
@@ -1968,16 +1973,16 @@ function findPlanningPlateauIdCandidate(data) {
     }
     return null;
 }
-async function findPlateauLinkedToPlanning(db, planning, scopeOrUserId, planningData) {
-    const explicitPlateauId = findPlanningPlateauIdCandidate(planningData);
-    if (explicitPlateauId) {
-        return plateauFindFirstForUser(db, scopeOrUserId, { where: { id: explicitPlateauId }, select: { id: true } });
+async function findMatchdayLinkedToPlanning(db, planning, scopeOrUserId, planningData) {
+    const explicitMatchdayId = findPlanningMatchdayIdCandidate(planningData);
+    if (explicitMatchdayId) {
+        return matchdayFindFirstForUser(db, scopeOrUserId, { where: { id: explicitMatchdayId }, select: { id: true } });
     }
     const dayStart = new Date(planning.date);
     dayStart.setHours(0, 0, 0, 0);
     const dayEnd = new Date(dayStart);
     dayEnd.setDate(dayEnd.getDate() + 1);
-    return plateauFindFirstForUser(db, scopeOrUserId, {
+    return matchdayFindFirstForUser(db, scopeOrUserId, {
         where: {
             date: { gte: dayStart, lt: dayEnd },
             ...(planning.userId ? { userId: planning.userId } : {}),
@@ -1986,15 +1991,15 @@ async function findPlateauLinkedToPlanning(db, planning, scopeOrUserId, planning
         select: { id: true },
     });
 }
-async function applyTeamAbsenceOnPlateauTx(input) {
-    const keyedRotation = (0, plateau_absence_1.ensureRotationGameKeys)(input.rotation);
-    const targetRotationGameKeys = (0, plateau_absence_1.findRotationGameKeysForTeam)(keyedRotation, input.teamLabel);
+async function applyTeamAbsenceOnMatchdayTx(input) {
+    const keyedRotation = (0, matchday_absence_1.ensureRotationGameKeys)(input.rotation);
+    const targetRotationGameKeys = (0, matchday_absence_1.findRotationGameKeysForTeam)(keyedRotation, input.teamLabel);
     if (!targetRotationGameKeys.length) {
         return { impactedCount: 0, updatedCount: 0 };
     }
-    const plateauMatches = await matchFindManyForUser(input.tx, input.auth, {
+    const matchdayMatches = await matchFindManyForUser(input.tx, input.auth, {
         where: {
-            plateauId: input.plateauId,
+            plateauId: input.matchdayId,
             OR: [
                 { rotationGameKey: { in: targetRotationGameKeys } },
                 { opponentName: { equals: input.teamLabel, mode: 'insensitive' } },
@@ -2002,9 +2007,9 @@ async function applyTeamAbsenceOnPlateauTx(input) {
         },
         select: { id: true, status: true, played: true },
     });
-    const patches = (0, plateau_absence_1.buildAbsenceMatchPatches)({ matches: plateauMatches, absent: input.absent });
+    const patches = (0, matchday_absence_1.buildAbsenceMatchPatches)({ matches: matchdayMatches, absent: input.absent });
     if (!patches.length) {
-        return { impactedCount: plateauMatches.length, updatedCount: 0 };
+        return { impactedCount: matchdayMatches.length, updatedCount: 0 };
     }
     const groups = new Map();
     for (const patch of patches) {
@@ -2020,9 +2025,9 @@ async function applyTeamAbsenceOnPlateauTx(input) {
             data: { status, played: playedToken === '1' },
         });
     }
-    return { impactedCount: plateauMatches.length, updatedCount: patches.length };
+    return { impactedCount: matchdayMatches.length, updatedCount: patches.length };
 }
-async function getPublicPlateauPayloadByToken(token) {
+async function getPublicMatchdayPayloadByToken(token) {
     let share;
     try {
         share = await prisma.plateauShareToken.findFirst({
@@ -2077,12 +2082,12 @@ async function getPublicPlateauPayloadByToken(token) {
             },
             orderBy: { createdAt: 'asc' }
         });
-        rotation = buildPublicPlateauRotation(matches);
+        rotation = buildPublicMatchdayRotation(matches);
     }
     return {
         status: 200,
         body: {
-            plateau: (0, plateau_metadata_1.toPublicPlateau)(share.plateau),
+            matchday: (0, matchday_metadata_1.toPublicMatchday)(share.plateau),
             rotation
         }
     };
@@ -2939,7 +2944,7 @@ app.use(async (req, res, next) => {
         '/plannings',
         '/players',
         '/trainings',
-        '/plateaus',
+        '/matchday',
         '/attendance',
         '/matches',
         '/schedule',
@@ -3026,23 +3031,23 @@ app.put('/plannings/:id', authMiddleware, async (req, res) => {
             const updated = await tx.planning.update({ where: { id: p.id }, data: { data: JSON.stringify(nextData) } });
             const nextRotationRaw = findRotationCandidate(nextData);
             const previousRotationRaw = findRotationCandidate(previousData);
-            const nextRotation = nextRotationRaw ? (0, plateau_absence_1.ensureRotationGameKeys)(nextRotationRaw) : null;
-            const previousTeams = (0, plateau_absence_1.extractRotationTeams)(previousRotationRaw);
-            const nextTeams = (0, plateau_absence_1.extractRotationTeams)(nextRotation);
-            const changes = (0, plateau_absence_1.diffTeamAbsence)(previousTeams, nextTeams);
+            const nextRotation = nextRotationRaw ? (0, matchday_absence_1.ensureRotationGameKeys)(nextRotationRaw) : null;
+            const previousTeams = (0, matchday_absence_1.extractRotationTeams)(previousRotationRaw);
+            const nextTeams = (0, matchday_absence_1.extractRotationTeams)(nextRotation);
+            const changes = (0, matchday_absence_1.diffTeamAbsence)(previousTeams, nextTeams);
             if (!changes.length || !nextRotation) {
                 return { updated, data: nextData, propagation: [] };
             }
-            const linkedPlateau = await findPlateauLinkedToPlanning(tx, p, req.auth, nextData);
-            if (!linkedPlateau) {
+            const linkedMatchday = await findMatchdayLinkedToPlanning(tx, p, req.auth, nextData);
+            if (!linkedMatchday) {
                 return { updated, data: nextData, propagation: [] };
             }
             const propagation = [];
             for (const change of changes) {
-                const stats = await applyTeamAbsenceOnPlateauTx({
+                const stats = await applyTeamAbsenceOnMatchdayTx({
                     tx,
                     auth: req.auth,
-                    plateauId: linkedPlateau.id,
+                    matchdayId: linkedMatchday.id,
                     rotation: nextRotation,
                     teamLabel: change.teamLabel,
                     absent: change.absent,
@@ -3245,7 +3250,7 @@ app.post('/drills', authMiddleware, async (req, res) => {
         throw e;
     }
 });
-// Models used: Player, Training, Plateau, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
+// Models used: Player, Training, Matchday, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 // ---- Players ----
 app.get('/players', authMiddleware, async (req, res) => {
@@ -3377,11 +3382,11 @@ app.put('/effectif/:id', authMiddleware, updatePlayerByIdHandler);
 app.put('/api/players/:id', authMiddleware, updatePlayerByIdHandler);
 app.put('/api/effectif/:id', authMiddleware, updatePlayerByIdHandler);
 // --- Player invite JWT and playerAuth ---
-function signPlayerInvite(playerId, plateauId, email) {
-    return jsonwebtoken_1.default.sign({ aud: 'player_invite', pid: playerId, plid: plateauId || null, em: email || null }, JWT_SECRET, { expiresIn: '30d' });
+function signPlayerInvite(playerId, matchdayId, email) {
+    return jsonwebtoken_1.default.sign({ aud: 'player_invite', pid: playerId, mid: matchdayId || null, em: email || null }, JWT_SECRET, { expiresIn: '30d' });
 }
-function signRsvpToken(playerId, plateauId, status) {
-    return jsonwebtoken_1.default.sign({ aud: 'player_rsvp', pid: playerId, plid: plateauId, st: status }, JWT_SECRET, { expiresIn: '60d' });
+function signRsvpToken(playerId, matchdayId, status) {
+    return jsonwebtoken_1.default.sign({ aud: 'player_rsvp', pid: playerId, mid: matchdayId, st: status }, JWT_SECRET, { expiresIn: '60d' });
 }
 async function playerAuth(req, res, next) {
     const token = req.cookies?.player_token || req.headers['x-player-token'];
@@ -3396,7 +3401,7 @@ async function playerAuth(req, res, next) {
             return res.status(401).json({ error: 'Invalid token' });
         req.playerId = payload.pid;
         req.playerUserId = player.userId;
-        req.scopePlateauId = payload.plid || null;
+        req.scopeMatchdayId = payload.mid || null;
         next();
     }
     catch {
@@ -3409,7 +3414,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
         return;
     const { id } = req.params;
     const schema = zod_1.z.object({
-        plateauId: zod_1.z.string().optional(),
+        matchdayId: zod_1.z.string().optional(),
         email: zod_1.z.string().email().optional(),
         expiresInDays: zod_1.z.coerce.number().int().min(1).max(30).optional()
     });
@@ -3432,17 +3437,17 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     if (!player)
         return res.status(404).json({ error: 'Player not found' });
     const inviteEmail = parsed.data.email || player.email || null;
-    if (parsed.data.plateauId) {
+    if (parsed.data.matchdayId) {
         const base = `${req.protocol}://${req.get('host')}`;
-        const presentToken = signRsvpToken(id, parsed.data.plateauId, 'present');
-        const absentToken = signRsvpToken(id, parsed.data.plateauId, 'absent');
+        const presentToken = signRsvpToken(id, parsed.data.matchdayId, 'present');
+        const absentToken = signRsvpToken(id, parsed.data.matchdayId, 'absent');
         const presentUrl = `${base}/rsvp/p?token=${encodeURIComponent(presentToken)}`;
         const absentUrl = `${base}/rsvp/a?token=${encodeURIComponent(absentToken)}`;
-        // Mark player as convoked for this plateau
+        // Mark player as convoked for this matchday
         try {
             await attendanceUpsertMarkerForUser(prisma, req.auth, {
                 session_type: 'PLATEAU_CONVOKE',
-                session_id: parsed.data.plateauId,
+                session_id: parsed.data.matchdayId,
                 playerId: id,
             });
         }
@@ -3456,7 +3461,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
                     to: inviteEmail,
                     subject: 'Confirmation de présence – Izifoot',
                     html: `<p>Bonjour${player.name ? ' ' + player.name : ''},</p>
-<p>Merci d'indiquer votre présence pour le plateau.</p>
+<p>Merci d'indiquer votre présence pour le matchday.</p>
 <p><a href="${presentUrl}">Je serai présent</a> &nbsp;|&nbsp; <a href="${absentUrl}">Je serai absent</a></p>
 <p>(Ces liens sont valables 60 jours)</p>`
                 });
@@ -3578,9 +3583,9 @@ app.get('/player/login', async (req, res) => {
         if (payload?.aud !== 'player_invite' || !payload?.pid)
             return res.redirect(302, redirectTo);
         res.cookie('player_token', token, playerCookieOpts());
-        // If token is scoped to a plateau, send the user straight to that MatchDay
-        if (payload?.plid) {
-            const dest = `${APP_BASE_URL}/match-day/${payload.plid}`;
+        // If token is scoped to a matchday, send the user straight to that MatchDay
+        if (payload?.mid) {
+            const dest = `${APP_BASE_URL}/match-day/${payload.mid}`;
             return res.redirect(302, dest);
         }
         return res.redirect(302, redirectTo);
@@ -3597,19 +3602,19 @@ app.get('/rsvp/p', async (req, res) => {
         return res.redirect(302, redirectBase);
     try {
         const payload = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        if (payload?.aud !== 'player_rsvp' || payload?.st !== 'present' || !payload?.pid || !payload?.plid) {
+        if (payload?.aud !== 'player_rsvp' || payload?.st !== 'present' || !payload?.pid || !payload?.mid) {
             return res.redirect(302, redirectBase);
         }
         const player = await playerFindByIdCompat(prisma, payload.pid);
         if (!player?.userId)
             return res.redirect(302, redirectBase);
         try {
-            await attendanceSetPlateauRsvpForUser(prisma, player.userId, payload.plid, payload.pid, true);
+            await attendanceSetMatchdayRsvpForUser(prisma, player.userId, payload.mid, payload.pid, true);
         }
         catch (e) {
             // Ignore, always redirect anyway
         }
-        return res.redirect(302, `${redirectBase}/match-day/${payload.plid}?rsvp=present`);
+        return res.redirect(302, `${redirectBase}/match-day/${payload.mid}?rsvp=present`);
     }
     catch {
         return res.redirect(302, redirectBase);
@@ -3622,19 +3627,19 @@ app.get('/rsvp/a', async (req, res) => {
         return res.redirect(302, redirectBase);
     try {
         const payload = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        if (payload?.aud !== 'player_rsvp' || payload?.st !== 'absent' || !payload?.pid || !payload?.plid) {
+        if (payload?.aud !== 'player_rsvp' || payload?.st !== 'absent' || !payload?.pid || !payload?.mid) {
             return res.redirect(302, redirectBase);
         }
         const player = await playerFindByIdCompat(prisma, payload.pid);
         if (!player?.userId)
             return res.redirect(302, redirectBase);
         try {
-            await attendanceSetPlateauRsvpForUser(prisma, player.userId, payload.plid, payload.pid, false);
+            await attendanceSetMatchdayRsvpForUser(prisma, player.userId, payload.mid, payload.pid, false);
         }
         catch (e) {
             console.warn('[RSVP absent] failed', e);
         }
-        return res.redirect(302, `${redirectBase}/match-day/${payload.plid}?rsvp=absent`);
+        return res.redirect(302, `${redirectBase}/match-day/${payload.mid}?rsvp=absent`);
     }
     catch {
         return res.redirect(302, redirectBase);
@@ -3651,48 +3656,48 @@ app.get('/player/me', playerAuth, async (req, res) => {
         return res.status(404).json({ error: 'Player not found' });
     res.json({ id: p.id, name: p.name || '', email: p.email || null, phone: p.phone || null });
 });
-app.get('/player/plateaus', playerAuth, async (req, res) => {
+app.get('/player/matchday', playerAuth, async (req, res) => {
     const playerId = req.playerId;
-    // Plateaus via attendance
+    // Matchdays via attendance
     const att = await attendanceFindManyForUser(prisma, req.playerUserId, {
         where: { session_type: 'PLATEAU', playerId },
         select: { session_id: true }
     });
-    const plateauIdsFromAttendance = Array.from(new Set(att.map(a => a.session_id)));
-    // Plateaus via match participation
+    const matchdayIdsFromAttendance = Array.from(new Set(att.map(a => a.session_id)));
+    // Matchdays via match participation
     const mtps = await prisma.matchTeamPlayer.findMany({ where: { playerId }, select: { matchTeamId: true } });
     const teamIds = mtps.map(m => m.matchTeamId);
-    let plateauIdsFromMatches = [];
+    let matchdayIdsFromMatches = [];
     if (teamIds.length) {
         const teams = await prisma.matchTeam.findMany({ where: { id: { in: teamIds } }, select: { matchId: true } });
         const matchIds = teams.map(t => t.matchId);
         if (matchIds.length) {
             const matches = await matchFindManyForUser(prisma, req.playerUserId, { where: { id: { in: matchIds } }, select: { plateauId: true } });
-            plateauIdsFromMatches = matches.map(m => m.plateauId).filter(Boolean);
+            matchdayIdsFromMatches = matches.map(m => m.plateauId).filter(Boolean);
         }
     }
-    const set = new Set([...plateauIdsFromAttendance, ...plateauIdsFromMatches]);
+    const set = new Set([...matchdayIdsFromAttendance, ...matchdayIdsFromMatches]);
     const ids = Array.from(set);
     if (!ids.length)
         return res.json([]);
-    const plateaus = await plateauFindManyForUser(prisma, req.playerUserId, { where: { id: { in: ids } }, orderBy: { date: 'desc' } });
-    res.json(plateaus);
+    const matchdays = await matchdayFindManyForUser(prisma, req.playerUserId, { where: { id: { in: ids } }, orderBy: { date: 'desc' } });
+    res.json(matchdays);
 });
-app.get('/player/plateaus/:id/summary', playerAuth, async (req, res) => {
-    const plateauId = req.params.id;
-    // If token is scoped to a specific plateau, enforce it
-    if (req.scopePlateauId && req.scopePlateauId !== plateauId)
+app.get('/player/matchday/:id/summary', playerAuth, async (req, res) => {
+    const matchdayId = req.params.id;
+    // If token is scoped to a specific matchday, enforce it
+    if (req.scopeMatchdayId && req.scopeMatchdayId !== matchdayId)
         return res.status(403).json({ error: 'Forbidden' });
-    // Reuse the same build as /plateaus/:id/summary
+    // Reuse the same build as /matchday/:id/summary
     const ctxRes = {};
-    const fakeReq = { params: { id: plateauId }, userId: req.playerUserId };
+    const fakeReq = { params: { id: matchdayId }, userId: req.playerUserId };
     const fakeRes = {
         statusCode: 200,
         _json: null,
         status(c) { this.statusCode = c; return this; },
         json(v) { this._json = v; return this; }
     };
-    await app._router.handle({ ...fakeReq, method: 'GET', url: `/plateaus/${plateauId}/summary` }, fakeRes, () => { });
+    await app._router.handle({ ...fakeReq, method: 'GET', url: `/matchday/${matchdayId}/summary` }, fakeRes, () => { });
     const summary = fakeRes._json;
     if (!summary || fakeRes.statusCode !== 200)
         return res.status(fakeRes.statusCode || 500).json(summary || { error: 'Failed' });
@@ -3700,7 +3705,7 @@ app.get('/player/plateaus/:id/summary', playerAuth, async (req, res) => {
     const isConvocated = Boolean((summary.convocations || []).some((c) => c.player?.id === req.playerId) ||
         (summary.matches || []).some((m) => (m.teams || []).some((t) => (t.players || []).some((p) => p.playerId === req.playerId))));
     if (!isConvocated)
-        return res.status(403).json({ error: 'Not convocated for this plateau' });
+        return res.status(403).json({ error: 'Not convocated for this matchday' });
     // Optionally, we could filter convocations to only the player
     const filtered = { ...summary, convocations: (summary.convocations || []).filter((c) => c.player?.id === req.playerId) };
     res.json(filtered);
@@ -3928,24 +3933,24 @@ app.put('/trainings/:id/roles', authMiddleware, async (req, res) => {
         return res.status(500).json({ error: 'Failed to save training roles' });
     }
 });
-// ---- Plateaus ----
-app.get('/plateaus', async (req, res, next) => {
+// ---- Matchdays ----
+app.get('/matchday', async (req, res, next) => {
     const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
     if (!token)
         return res.json([]);
     return next();
 }, authMiddleware, async (req, res) => {
-    const plateaus = await plateauFindManyForUser(prisma, req.auth, { orderBy: { date: 'desc' } });
-    res.json(plateaus);
+    const matchdays = await matchdayFindManyForUser(prisma, req.auth, { orderBy: { date: 'desc' } });
+    res.json(matchdays);
 });
-app.post('/plateaus', authMiddleware, async (req, res) => {
+app.post('/matchday', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
     const schema = zod_1.z.object({
         date: zod_1.z.string().or(zod_1.z.date()),
         lieu: zod_1.z.string().min(1),
         teamId: zod_1.z.string().min(1).optional(),
-    }).merge(plateau_metadata_1.plateauMetadataSchema);
+    }).merge(matchday_metadata_1.matchdayMetadataSchema);
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
@@ -3957,40 +3962,40 @@ app.post('/plateaus', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: e.message });
     }
     const date = new Date(parsed.data.date);
-    const pl = await plateauCreateForUser(prisma, req.auth, {
+    const pl = await matchdayCreateForUser(prisma, req.auth, {
         date,
         lieu: parsed.data.lieu,
-        ...(0, plateau_metadata_1.buildPlateauMetadataPatch)(parsed.data),
+        ...(0, matchday_metadata_1.buildMatchdayMetadataPatch)(parsed.data),
         clubId: team.clubId,
         teamId: team.id
     });
     res.json(pl);
 });
-app.put('/plateaus/:id', authMiddleware, async (req, res) => {
+app.put('/matchday/:id', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
-    const parsed = plateau_metadata_1.plateauMetadataSchema.safeParse(req.body);
+    const parsed = matchday_metadata_1.matchdayMetadataSchema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const data = (0, plateau_metadata_1.buildPlateauMetadataPatch)(parsed.data);
+    const data = (0, matchday_metadata_1.buildMatchdayMetadataPatch)(parsed.data);
     if (Object.keys(data).length === 0) {
         return res.status(400).json({ error: 'No updatable fields provided' });
     }
     try {
-        const existing = await plateauFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
+        const existing = await matchdayFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
         if (!existing)
-            return res.status(404).json({ error: 'Plateau not found' });
+            return res.status(404).json({ error: 'Matchday not found' });
         const updated = await prisma.plateau.update({ where: { id: existing.id }, data });
         res.json(updated);
     }
     catch (e) {
         if (e?.code === 'P2025')
-            return res.status(404).json({ error: 'Plateau not found' });
-        console.error('[PUT /plateaus/:id] update failed', e);
-        return res.status(500).json({ error: 'Failed to update plateau' });
+            return res.status(404).json({ error: 'Matchday not found' });
+        console.error('[PUT /matchday/:id] update failed', e);
+        return res.status(500).json({ error: 'Failed to update matchday' });
     }
 });
-app.post('/plateaus/:id/teams/absence', authMiddleware, async (req, res) => {
+app.post('/matchday/:id/teams/absence', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
     const schema = zod_1.z.object({
@@ -4000,27 +4005,27 @@ app.post('/plateaus/:id/teams/absence', authMiddleware, async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const plateau = await plateauFindFirstForUser(prisma, req.auth, {
+    const matchday = await matchdayFindFirstForUser(prisma, req.auth, {
         where: { id: req.params.id },
         select: { id: true, date: true, userId: true },
     });
-    if (!plateau)
-        return res.status(404).json({ error: 'Plateau not found' });
+    if (!matchday)
+        return res.status(404).json({ error: 'Matchday not found' });
     try {
         const payload = await prisma.$transaction(async (tx) => {
-            const dayStart = new Date(plateau.date);
+            const dayStart = new Date(matchday.date);
             dayStart.setHours(0, 0, 0, 0);
             const dayEnd = new Date(dayStart);
             dayEnd.setDate(dayEnd.getDate() + 1);
             const planning = await tx.planning.findFirst({
                 where: {
                     date: { gte: dayStart, lt: dayEnd },
-                    ...(plateau.userId ? { userId: plateau.userId } : {}),
+                    ...(matchday.userId ? { userId: matchday.userId } : {}),
                 },
                 orderBy: { updatedAt: 'desc' },
             });
             if (!planning) {
-                const err = new Error('Planning not found for this plateau day');
+                const err = new Error('Planning not found for this matchday day');
                 err.code = 'PLANNING_NOT_FOUND';
                 throw err;
             }
@@ -4031,8 +4036,8 @@ app.post('/plateaus/:id/teams/absence', authMiddleware, async (req, res) => {
                 err.code = 'ROTATION_NOT_FOUND';
                 throw err;
             }
-            const keyedRotation = (0, plateau_absence_1.ensureRotationGameKeys)(rotationCandidate);
-            const teams = (0, plateau_absence_1.extractRotationTeams)(keyedRotation);
+            const keyedRotation = (0, matchday_absence_1.ensureRotationGameKeys)(rotationCandidate);
+            const teams = (0, matchday_absence_1.extractRotationTeams)(keyedRotation);
             let foundTeam = false;
             let touched = false;
             const nextTeams = teams.map((team) => {
@@ -4061,10 +4066,10 @@ app.post('/plateaus/:id/teams/absence', authMiddleware, async (req, res) => {
                     data: { data: JSON.stringify(nextPlanningData) },
                 });
             }
-            const stats = await applyTeamAbsenceOnPlateauTx({
+            const stats = await applyTeamAbsenceOnMatchdayTx({
                 tx,
                 auth: req.auth,
-                plateauId: plateau.id,
+                matchdayId: matchday.id,
                 rotation: nextRotation,
                 teamLabel: parsed.data.teamLabel,
                 absent: parsed.data.absent,
@@ -4087,20 +4092,20 @@ app.post('/plateaus/:id/teams/absence', authMiddleware, async (req, res) => {
             return res.status(400).json({ error: e.message });
         if (e?.code === 'TEAM_NOT_FOUND')
             return res.status(404).json({ error: e.message });
-        console.error('[POST /plateaus/:id/teams/absence] failed', e);
+        console.error('[POST /matchday/:id/teams/absence] failed', e);
         return res.status(500).json({ error: 'Failed to update team absence' });
     }
 });
-app.post('/plateaus/:id/share', authMiddleware, async (req, res) => {
+app.post('/matchday/:id/share', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({ expiresInDays: zod_1.z.number().int().min(1).max(365).optional() });
     const parsed = schema.safeParse(req.body ?? {});
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const plateau = await plateauFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
-    if (!plateau)
-        return res.status(404).json({ error: 'Plateau not found' });
+    const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
+    if (!matchday)
+        return res.status(404).json({ error: 'Matchday not found' });
     const existing = await prisma.plateauShareToken.findFirst({
-        where: { plateauId: plateau.id },
+        where: { plateauId: matchday.id },
         orderBy: { createdAt: 'desc' }
     });
     let token = existing?.token || (0, crypto_1.randomUUID)();
@@ -4121,33 +4126,33 @@ app.post('/plateaus/:id/share', authMiddleware, async (req, res) => {
     else {
         await prisma.plateauShareToken.create({
             data: {
-                plateauId: plateau.id,
+                plateauId: matchday.id,
                 token,
                 expiresAt: expiresAt ?? undefined
             }
         });
     }
-    const url = `${APP_BASE_URL.replace(/\/+$/, '')}/plateau/public/${token}`;
+    const url = `${APP_BASE_URL.replace(/\/+$/, '')}/public/matchday/${token}`;
     res.json({ token, url, expiresAt });
 });
-app.delete('/plateaus/:id/share', authMiddleware, async (req, res) => {
-    const plateau = await plateauFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
-    if (!plateau)
-        return res.status(404).json({ error: 'Plateau not found' });
-    await prisma.plateauShareToken.deleteMany({ where: { plateauId: plateau.id } });
+app.delete('/matchday/:id/share', authMiddleware, async (req, res) => {
+    const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
+    if (!matchday)
+        return res.status(404).json({ error: 'Matchday not found' });
+    await prisma.plateauShareToken.deleteMany({ where: { plateauId: matchday.id } });
     res.json({ ok: true });
 });
-app.get('/public/plateaus/:token', async (req, res) => {
-    const result = await getPublicPlateauPayloadByToken(req.params.token);
+app.get('/public/matchday/:token', async (req, res) => {
+    const result = await getPublicMatchdayPayloadByToken(req.params.token);
     return res.status(result.status).json(result.body);
 });
-app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
+app.delete('/matchday/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;
     try {
-        // Ensure plateau exists
-        const exists = await plateauFindFirstForUser(prisma, req.auth, { where: { id } });
+        // Ensure matchday exists
+        const exists = await matchdayFindFirstForUser(prisma, req.auth, { where: { id } });
         if (!exists)
-            return res.status(404).json({ error: 'Plateau not found' });
+            return res.status(404).json({ error: 'Matchday not found' });
         // Collect related matches and teams
         const matches = await matchFindManyForUser(prisma, req.auth, { where: { plateauId: id }, include: { teams: true } });
         const matchIds = matches.map((m) => m.id);
@@ -4167,49 +4172,49 @@ app.delete('/plateaus/:id', authMiddleware, async (req, res) => {
     }
     catch (e) {
         if (e?.code === 'P2025')
-            return res.status(404).json({ error: 'Plateau not found' });
-        console.error('[DELETE /plateaus/:id] failed', e);
-        return res.status(500).json({ error: 'Failed to delete plateau' });
+            return res.status(404).json({ error: 'Matchday not found' });
+        console.error('[DELETE /matchday/:id] failed', e);
+        return res.status(500).json({ error: 'Failed to delete matchday' });
     }
 });
-// Get a single plateau by id
-app.get('/plateaus/:id', async (req, res, next) => {
+// Get a single matchday by id
+app.get('/matchday/:id', async (req, res, next) => {
     const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
     if (token)
         return next();
-    const result = await getPublicPlateauPayloadByToken(req.params.id);
+    const result = await getPublicMatchdayPayloadByToken(req.params.id);
     if (result.status !== 200)
         return res.status(result.status).json(result.body);
-    return res.json(result.body.plateau);
+    return res.json(result.body.matchday);
 });
-app.get('/plateaus/:id', authMiddleware, async (req, res) => {
+app.get('/matchday/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
-        const plateau = await plateauFindFirstForUser(prisma, req.auth, { where: { id } });
-        if (!plateau)
-            return res.status(404).json({ error: 'Plateau not found' });
-        res.json(plateau);
+        const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id } });
+        if (!matchday)
+            return res.status(404).json({ error: 'Matchday not found' });
+        res.json(matchday);
     }
     catch (e) {
-        console.error('[GET /plateaus/:id] failed', e);
-        return res.status(500).json({ error: 'Failed to fetch plateau' });
+        console.error('[GET /matchday/:id] failed', e);
+        return res.status(500).json({ error: 'Failed to fetch matchday' });
     }
 });
-// Aggregated view for a match day (plateau)
-app.get('/plateaus/:id/summary', async (req, res, next) => {
+// Aggregated view for a matchday
+app.get('/matchday/:id/summary', async (req, res, next) => {
     const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
     if (token)
         return next();
-    const result = await getPublicPlateauPayloadByToken(req.params.id);
+    const result = await getPublicMatchdayPayloadByToken(req.params.id);
     return res.status(result.status).json(result.body);
 });
-app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
+app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
     const { id } = req.params;
     try {
-        const plateau = await plateauFindFirstForUser(prisma, req.auth, { where: { id } });
-        if (!plateau)
-            return res.status(404).json({ error: 'Plateau not found' });
-        // Attendance (present/absent records) for this plateau, include player info
+        const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id } });
+        if (!matchday)
+            return res.status(404).json({ error: 'Matchday not found' });
+        // Attendance (present/absent records) for this matchday, include player info
         const attendance = await attendanceFindManyForUser(prisma, req.auth, {
             where: {
                 session_id: id,
@@ -4230,7 +4235,7 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
                 phone: pl.phone ?? null
             };
         }
-        // Matches for this plateau (with teams and scorers first)
+        // Matches for this matchday (with teams and scorers first)
         const matchesRaw = await matchFindManyForUser(prisma, req.auth, {
             where: { plateauId: id },
             include: {
@@ -4368,11 +4373,11 @@ app.get('/plateaus/:id/summary', authMiddleware, async (req, res) => {
             matchesPlayed: (0, match_status_1.countPlayedMatchesExcludingCancelled)(matchesEnriched),
             matchesCancelled: matchesEnriched.filter((m) => (0, match_status_1.resolveMatchStatus)({ status: m.status, played: m.played }) === 'CANCELLED').length,
         };
-        res.json({ plateau, convocations, matches: matchesEnriched, playersById, stats });
+        res.json({ matchday, convocations, matches: matchesEnriched, playersById, stats });
     }
     catch (e) {
-        console.error('[GET /plateaus/:id/summary] failed', e);
-        return res.status(500).json({ error: 'Failed to fetch plateau summary' });
+        console.error('[GET /matchday/:id/summary] failed', e);
+        return res.status(500).json({ error: 'Failed to fetch matchday summary' });
     }
 });
 // ---- Attendance (TRAINING / PLATEAU) ----
@@ -4389,7 +4394,7 @@ app.get('/attendance', authMiddleware, async (req, res) => {
     if (session_type && session_id) {
         const resolved = await resolveAttendanceScopeFromSession(req.auth, session_type, session_id);
         if (!resolved)
-            return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Plateau'} not found` });
+            return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Matchday'} not found` });
         scopeAuth = resolved;
     }
     const where = {};
@@ -4417,7 +4422,7 @@ app.post('/attendance', authMiddleware, async (req, res) => {
     const present = parsed.data.present ?? false;
     const scopeAuth = await resolveAttendanceScopeFromSession(req.auth, session_type, session_id);
     if (!scopeAuth)
-        return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Plateau'} not found` });
+        return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Matchday'} not found` });
     await attendanceSetPresenceForUser(prisma, scopeAuth, { session_type, session_id, playerId, present });
     res.json({ ok: true });
 });
@@ -4559,7 +4564,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
                 session_type: true,
             },
         });
-        eligiblePlayerIds = (0, match_eligibility_1.buildEligiblePlayerIdsFromPlateauAttendance)(attendanceRows);
+        eligiblePlayerIds = (0, match_eligibility_1.buildEligiblePlayerIdsFromMatchdayAttendance)(attendanceRows);
     }
     const teamIds = (match.teams || []).map((t) => t.id);
     const teamPlayers = teamIds.length ? await db.matchTeamPlayer.findMany({
@@ -4624,7 +4629,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         type: match.type,
         status,
         played: (0, match_status_1.derivePlayedFromStatus)(status),
-        plateauId: match.plateauId ?? null,
+        matchdayId: match.plateauId ?? null,
         rotationGameKey: match.rotationGameKey ?? null,
         opponentName: match.opponentName ?? null,
         tactic: match.tactic ?? null,
@@ -4635,8 +4640,8 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
     };
 }
 app.get('/matches', authMiddleware, async (req, res) => {
-    const { plateauId } = req.query;
-    const where = plateauId ? { plateauId: String(plateauId) } : {};
+    const { matchdayId } = req.query;
+    const where = matchdayId ? { plateauId: String(matchdayId) } : {};
     const matches = await matchFindManyForUser(prisma, req.auth, {
         where,
         include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
@@ -4644,8 +4649,10 @@ app.get('/matches', authMiddleware, async (req, res) => {
     });
     res.json(matches.map((match) => {
         const status = (0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) });
+        const { plateauId, ...rest } = match;
         return {
-            ...match,
+            ...rest,
+            matchdayId: plateauId ?? null,
             status,
             played: (0, match_status_1.derivePlayedFromStatus)(status),
             tactic: match.tactic ?? null,
@@ -4757,7 +4764,7 @@ app.post('/matches', authMiddleware, async (req, res) => {
         const firstIssue = parsed.error.issues[0];
         return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() });
     }
-    const { type, plateauId, sides, score, buteurs, opponentName, played, status, tactic, rotationGameKey } = parsed.data;
+    const { type, matchdayId, sides, score, buteurs, opponentName, played, status, tactic, rotationGameKey } = parsed.data;
     const normalized = normalizeMatchState({
         payload: { played, status, score, buteurs },
         fallbackStatus: 'PLANNED',
@@ -4767,14 +4774,14 @@ app.post('/matches', authMiddleware, async (req, res) => {
     }
     let team = null;
     let teamFormat = null;
-    if (plateauId) {
-        const ownedPlateau = await plateauFindFirstForUser(prisma, req.auth, {
-            where: { id: plateauId },
+    if (matchdayId) {
+        const ownedMatchday = await matchdayFindFirstForUser(prisma, req.auth, {
+            where: { id: matchdayId },
             select: { teamId: true, clubId: true },
         });
-        if (!ownedPlateau)
-            return res.status(404).json({ error: 'Plateau not found' });
-        team = { id: ownedPlateau.teamId, clubId: ownedPlateau.clubId };
+        if (!ownedMatchday)
+            return res.status(404).json({ error: 'Matchday not found' });
+        team = { id: ownedMatchday.teamId, clubId: ownedMatchday.clubId };
     }
     else {
         try {
@@ -4800,7 +4807,7 @@ app.post('/matches', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: payloadValidation.error });
     try {
         const match = await matchCreateForUser(prisma, req.auth, {
-            type, plateauId, opponentName, played: normalized.played, status: normalized.status,
+            type, plateauId: matchdayId, opponentName, played: normalized.played, status: normalized.status,
             rotationGameKey: rotationGameKey ?? null,
             tactic: tactic ?? null,
             clubId: team?.clubId ?? req.auth.clubId ?? null,
@@ -4834,7 +4841,8 @@ app.post('/matches', authMiddleware, async (req, res) => {
             where: { id: match.id },
             include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
         });
-        res.status(201).json(full);
+        const { plateauId, ...rest } = full;
+        res.status(201).json({ ...rest, matchdayId: plateauId ?? null });
     }
     catch (e) {
         if (e?.code === 'PLAYER_NOT_IN_MATCH_TEAMS')
@@ -4852,7 +4860,7 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
         type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']).optional(),
         status: zod_1.z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
         played: zod_1.z.boolean().optional(),
-        plateauId: zod_1.z.string().nullable().optional(),
+        matchdayId: zod_1.z.string().nullable().optional(),
         rotationGameKey: zod_1.z.string().min(1).max(120).nullable().optional(),
         sides: zod_1.z.object({
             home: zod_1.z.object({
@@ -4919,11 +4927,11 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                 },
                 fallbackStatus: existingStatus,
             });
-            if (payload.plateauId !== undefined && payload.plateauId) {
-                const plateau = await plateauFindFirstForUser(tx, req.auth, { where: { id: payload.plateauId }, select: { id: true } });
-                if (!plateau) {
-                    const err = new Error('Plateau not found');
-                    err.code = 'PLATEAU_NOT_FOUND';
+            if (payload.matchdayId !== undefined && payload.matchdayId) {
+                const matchday = await matchdayFindFirstForUser(tx, req.auth, { where: { id: payload.matchdayId }, select: { id: true } });
+                if (!matchday) {
+                    const err = new Error('Matchday not found');
+                    err.code = 'MATCHDAY_NOT_FOUND';
                     throw err;
                 }
             }
@@ -4947,9 +4955,9 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                 matchPatch.played = normalized.played;
                 matchPatch.status = normalized.status;
             }
-            if (payload.plateauId !== undefined) {
-                matchPatch.plateau = payload.plateauId
-                    ? { connect: { id: payload.plateauId } }
+            if (payload.matchdayId !== undefined) {
+                matchPatch.plateau = payload.matchdayId
+                    ? { connect: { id: payload.matchdayId } }
                     : { disconnect: true };
             }
             if (payload.rotationGameKey !== undefined) {
@@ -5017,8 +5025,8 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
     catch (e) {
         if (e?.code === 'MATCH_NOT_FOUND')
             return res.status(404).json({ error: 'Match not found' });
-        if (e?.code === 'PLATEAU_NOT_FOUND')
-            return res.status(404).json({ error: 'Plateau not found' });
+        if (e?.code === 'MATCHDAY_NOT_FOUND')
+            return res.status(404).json({ error: 'Matchday not found' });
         if (e?.code === 'MATCH_PAYLOAD_INVALID')
             return res.status(400).json({ error: e.message });
         if (e?.code === 'PLAYER_NOT_IN_MATCH_TEAMS')
@@ -5095,7 +5103,7 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
     const schema = zod_1.z.object({
-        plateauId: zod_1.z.string().optional(),
+        matchdayId: zod_1.z.string().optional(),
         teams: zod_1.z.array(zod_1.z.array(zod_1.z.string().min(1))).min(2),
         schedule: zod_1.z.object({ matches: zod_1.z.array(zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) })) }),
         defaults: zod_1.z.object({ startersPerTeam: zod_1.z.number().int().min(1).max(11).default(5) }).optional()
@@ -5103,14 +5111,14 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
-    const { plateauId, teams, schedule, defaults } = parsed.data;
+    const { matchdayId, teams, schedule, defaults } = parsed.data;
     const startersPerTeam = defaults?.startersPerTeam ?? 5;
     let targetTeam = null;
-    if (plateauId) {
-        const ownedPlateau = await plateauFindFirstForUser(prisma, req.auth, { where: { id: plateauId } });
-        if (!ownedPlateau)
-            return res.status(404).json({ error: 'Plateau not found' });
-        targetTeam = { id: ownedPlateau.teamId, clubId: ownedPlateau.clubId };
+    if (matchdayId) {
+        const ownedMatchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id: matchdayId } });
+        if (!ownedMatchday)
+            return res.status(404).json({ error: 'Matchday not found' });
+        targetTeam = { id: ownedMatchday.teamId, clubId: ownedMatchday.clubId };
     }
     else {
         try {
@@ -5124,11 +5132,11 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
         const ids = [];
         for (const [index, m] of schedule.matches.entries()) {
             const match = await matchCreateForUser(db, req.auth, {
-                type: plateauId ? 'PLATEAU' : 'ENTRAINEMENT',
-                plateauId,
+                type: matchdayId ? 'PLATEAU' : 'ENTRAINEMENT',
+                plateauId: matchdayId,
                 status: 'PLANNED',
                 played: false,
-                rotationGameKey: plateauId ? `schedule:${index}` : null,
+                rotationGameKey: matchdayId ? `schedule:${index}` : null,
                 clubId: targetTeam?.clubId ?? req.auth.clubId ?? null,
                 teamId: targetTeam?.id ?? null
             });
@@ -5153,7 +5161,11 @@ app.post('/schedule/commit', authMiddleware, async (req, res) => {
         where: { id: { in: createdIds } },
         include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
     });
-    res.json({ ok: true, createdCount: createdIds.length, matches });
+    const normalizedMatches = matches.map((match) => {
+        const { plateauId, ...rest } = match;
+        return { ...rest, matchdayId: plateauId ?? null };
+    });
+    res.json({ ok: true, createdCount: createdIds.length, matches: normalizedMatches });
 });
 // ---- Training drills (exercices attachés à une séance) ----
 app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req, res) => {

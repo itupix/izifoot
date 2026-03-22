@@ -1,14 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildEligiblePlayerIdsFromPlateauAttendance } from '../match-eligibility'
+import { buildEligiblePlayerIdsFromMatchdayAttendance } from '../match-eligibility'
 
-test('buildEligiblePlayerIdsFromPlateauAttendance returns null when attendance is empty', () => {
-  const eligible = buildEligiblePlayerIdsFromPlateauAttendance([])
+test('buildEligiblePlayerIdsFromMatchdayAttendance returns null when attendance is empty', () => {
+  const eligible = buildEligiblePlayerIdsFromMatchdayAttendance([])
   assert.equal(eligible, null)
 })
 
-test('buildEligiblePlayerIdsFromPlateauAttendance includes present and convoked players only', () => {
-  const eligible = buildEligiblePlayerIdsFromPlateauAttendance([
+test('buildEligiblePlayerIdsFromMatchdayAttendance includes present and convoked players only', () => {
+  const eligible = buildEligiblePlayerIdsFromMatchdayAttendance([
     { playerId: 'p1', session_type: 'PLATEAU', present: true },
     { playerId: 'p2', session_type: 'PLATEAU_ABSENT', present: false },
     { playerId: 'p3', session_type: 'PLATEAU_CONVOKE' },
@@ -22,8 +22,8 @@ test('buildEligiblePlayerIdsFromPlateauAttendance includes present and convoked 
   assert.equal(eligible!.has('p4'), false)
 })
 
-test('buildEligiblePlayerIdsFromPlateauAttendance supports legacy PLATEAU marker without present field', () => {
-  const eligible = buildEligiblePlayerIdsFromPlateauAttendance([
+test('buildEligiblePlayerIdsFromMatchdayAttendance supports legacy PLATEAU marker without present field', () => {
+  const eligible = buildEligiblePlayerIdsFromMatchdayAttendance([
     { playerId: 'p1', session_type: 'PLATEAU' },
   ])
 

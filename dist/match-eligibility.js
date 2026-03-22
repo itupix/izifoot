@@ -1,11 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.buildEligiblePlayerIdsFromPlateauAttendance = buildEligiblePlayerIdsFromPlateauAttendance;
+exports.buildEligiblePlayerIdsFromMatchdayAttendance = buildEligiblePlayerIdsFromMatchdayAttendance;
 // Eligibility for match composition:
 // - present players are eligible
 // - explicitly convoked players are also eligible
 // - if no attendance rows exist yet, return null (no filtering)
-function buildEligiblePlayerIdsFromPlateauAttendance(rows) {
+function buildEligiblePlayerIdsFromMatchdayAttendance(rows) {
     if (!rows.length)
         return null;
     const attendanceMap = new Map();
