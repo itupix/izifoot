@@ -1952,6 +1952,29 @@ function findRotationCandidate(data) {
     }
     return null;
 }
+function buildPlanningScopeForMatchday(matchday) {
+    if (matchday.userId)
+        return { userId: matchday.userId };
+    if (matchday.teamId)
+        return { teamId: matchday.teamId };
+    if (matchday.clubId)
+        return { clubId: matchday.clubId };
+    return {};
+}
+async function findLatestPlanningForMatchday(db, matchday) {
+    const dayStart = new Date(matchday.date);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const scope = buildPlanningScopeForMatchday(matchday);
+    return db.planning.findFirst({
+        where: {
+            date: { gte: dayStart, lt: dayEnd },
+            ...scope,
+        },
+        orderBy: { updatedAt: 'desc' },
+    });
+}
 function findPlanningMatchdayIdCandidate(data) {
     if (!data || typeof data !== 'object')
         return null;
@@ -2051,24 +2074,17 @@ async function getPublicMatchdayPayloadByToken(token) {
     if (share.expiresAt && share.expiresAt < new Date())
         return { status: 410, body: { error: 'Link expired' } };
     let rotation = null;
-    // Prefer rotation saved by the planning editor (same coach + same day).
-    if (share.plateau.userId) {
-        const dayStart = new Date(share.plateau.date);
-        dayStart.setHours(0, 0, 0, 0);
-        const dayEnd = new Date(dayStart);
-        dayEnd.setDate(dayEnd.getDate() + 1);
-        const planning = await prisma.planning.findFirst({
-            where: {
-                userId: share.plateau.userId,
-                date: { gte: dayStart, lt: dayEnd }
-            },
-            orderBy: { updatedAt: 'desc' }
-        });
-        if (planning) {
-            const planningData = safeParseJSON(planning.data);
-            const candidate = findRotationCandidate(planningData);
-            rotation = normalizePublicRotation(candidate, planning.updatedAt.toISOString());
-        }
+    // Prefer rotation saved by the planning editor (same day + best available scope).
+    const planning = await findLatestPlanningForMatchday(prisma, {
+        date: share.plateau.date,
+        userId: share.plateau.userId ?? null,
+        teamId: share.plateau.teamId ?? null,
+        clubId: share.plateau.clubId ?? null,
+    });
+    if (planning) {
+        const planningData = safeParseJSON(planning.data);
+        const candidate = findRotationCandidate(planningData);
+        rotation = normalizePublicRotation(candidate, planning.updatedAt.toISOString());
     }
     // Fallback: synthesize a minimal rotation from matches.
     if (!rotation) {
@@ -4248,17 +4264,12 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
             return typeof m.rotationGameKey === 'string' && m.rotationGameKey.trim().length > 0;
         });
         let hasPlanningRotation = false;
-        if (!hasPersistedRotationKey && matchday.userId) {
-            const dayStart = new Date(matchday.date);
-            dayStart.setHours(0, 0, 0, 0);
-            const dayEnd = new Date(dayStart);
-            dayEnd.setDate(dayEnd.getDate() + 1);
-            const planning = await prisma.planning.findFirst({
-                where: {
-                    userId: matchday.userId,
-                    date: { gte: dayStart, lt: dayEnd },
-                },
-                orderBy: { updatedAt: 'desc' },
+        if (!hasPersistedRotationKey) {
+            const planning = await findLatestPlanningForMatchday(prisma, {
+                date: matchday.date,
+                userId: matchday.userId ?? null,
+                teamId: matchday.teamId ?? null,
+                clubId: matchday.clubId ?? null,
             });
             if (planning) {
                 const planningData = safeParseJSON(planning.data);
@@ -4673,16 +4684,34 @@ app.get('/matches', authMiddleware, async (req, res) => {
         include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
         orderBy: { createdAt: 'desc' }
     });
-    res.json(matches.map((match) => {
+    let hasPlanningRotation = false;
+    const hasPersistedRotationKey = matches.some((match) => typeof match.rotationGameKey === 'string' && match.rotationGameKey.trim().length > 0);
+    if (matchdayId && !hasPersistedRotationKey) {
+        const matchday = await matchdayFindFirstForUser(prisma, req.auth, {
+            where: { id: String(matchdayId) },
+            select: { date: true, userId: true, teamId: true, clubId: true },
+        });
+        if (matchday) {
+            const planning = await findLatestPlanningForMatchday(prisma, matchday);
+            if (planning) {
+                const planningData = safeParseJSON(planning.data);
+                hasPlanningRotation = Boolean(findRotationCandidate(planningData));
+            }
+        }
+    }
+    res.json(matches.map((match, index) => {
         const status = (0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) });
         const { plateauId, ...rest } = match;
+        const fallbackRotationGameKey = (!match.rotationGameKey && (hasPersistedRotationKey || hasPlanningRotation))
+            ? `legacy:${index}`
+            : null;
         return {
             ...rest,
             matchdayId: plateauId ?? null,
             status,
             played: (0, match_status_1.derivePlayedFromStatus)(status),
             tactic: match.tactic ?? null,
-            rotationGameKey: match.rotationGameKey ?? null,
+            rotationGameKey: match.rotationGameKey ?? fallbackRotationGameKey,
         };
     }));
 });
