@@ -4437,6 +4437,29 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
       orderBy: { createdAt: 'asc' }
     })
 
+    const hasPersistedRotationKey = matchesRaw.some((m: any) => {
+      return typeof m.rotationGameKey === 'string' && m.rotationGameKey.trim().length > 0
+    })
+    let hasPlanningRotation = false
+    if (!hasPersistedRotationKey && matchday.userId) {
+      const dayStart = new Date(matchday.date)
+      dayStart.setHours(0, 0, 0, 0)
+      const dayEnd = new Date(dayStart)
+      dayEnd.setDate(dayEnd.getDate() + 1)
+
+      const planning = await prisma.planning.findFirst({
+        where: {
+          userId: matchday.userId,
+          date: { gte: dayStart, lt: dayEnd },
+        },
+        orderBy: { updatedAt: 'desc' },
+      })
+      if (planning) {
+        const planningData = safeParseJSON(planning.data)
+        hasPlanningRotation = Boolean(findRotationCandidate(planningData))
+      }
+    }
+
     // Fetch all team players in one query and attach player objects
     const allTeamIds = matchesRaw.flatMap((m: any) => m.teams.map((t: any) => t.id))
     const mtPlayers = allTeamIds.length ? await prisma.matchTeamPlayer.findMany({
@@ -4450,12 +4473,16 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
     }
 
     // Build enriched matches with teams[].players including player info
-    const matches = matchesRaw.map((m: any) => {
+    const matches = matchesRaw.map((m: any, index: number) => {
       const status = resolveMatchStatus({ status: m.status, played: Boolean(m.played) })
+      const fallbackRotationGameKey = (!m.rotationGameKey && (hasPersistedRotationKey || hasPlanningRotation))
+        ? `legacy:${index}`
+        : null
       return {
         ...m,
         status,
         played: derivePlayedFromStatus(status),
+        rotationGameKey: m.rotationGameKey ?? fallbackRotationGameKey,
         teams: m.teams.map((t: any) => ({
           ...t,
           players: (byTeam[t.id] || []).map(p => ({
@@ -4548,8 +4575,9 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
       matchesPlayed: countPlayedMatchesExcludingCancelled(matchesEnriched),
       matchesCancelled: matchesEnriched.filter((m: any) => resolveMatchStatus({ status: m.status, played: m.played }) === 'CANCELLED').length,
     }
+    const mode: 'ROTATION' | 'MANUAL' = (hasPersistedRotationKey || hasPlanningRotation) ? 'ROTATION' : 'MANUAL'
 
-    res.json({ matchday, convocations, matches: matchesEnriched, playersById, stats })
+    res.json({ matchday, mode, convocations, matches: matchesEnriched, playersById, stats })
   } catch (e) {
     console.error('[GET /matchday/:id/summary] failed', e)
     return res.status(500).json({ error: 'Failed to fetch matchday summary' })
@@ -5039,6 +5067,9 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
 // Update a match: score, opponentName, and (optionally) scorers (replace all)
 app.put('/matches/:id', authMiddleware, async (req: any, res) => {
   const matchId = req.params.id
+  const forceClearRotationKey = req.query.forceClearRotationKey === '1'
+    || req.query.forceClearRotationKey === 'true'
+    || req.body?.forceClearRotationKey === true
   const schema = z.object({
     type: z.enum(['ENTRAINEMENT', 'PLATEAU']).optional(),
     status: z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
@@ -5149,7 +5180,18 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
           : { disconnect: true }
       }
       if (payload.rotationGameKey !== undefined) {
-        matchPatch.rotationGameKey = payload.rotationGameKey ?? null
+        const currentRotationGameKey = typeof (existing as any).rotationGameKey === 'string'
+          ? (existing as any).rotationGameKey.trim()
+          : ''
+        if (payload.rotationGameKey === null && currentRotationGameKey.length > 0 && !forceClearRotationKey) {
+          // Non-destructive default: keep existing rotation key unless clear is explicit.
+          console.warn('[PUT /matches/:id] rotationGameKey clear ignored (use forceClearRotationKey=true to clear)', {
+            matchId,
+            existingRotationGameKey: currentRotationGameKey,
+          })
+        } else {
+          matchPatch.rotationGameKey = payload.rotationGameKey ?? null
+        }
       }
       if (payload.opponentName !== undefined) matchPatch.opponentName = payload.opponentName
       if (payload.tactic !== undefined) matchPatch.tactic = payload.tactic
