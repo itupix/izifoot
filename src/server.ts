@@ -4339,6 +4339,67 @@ app.post('/matchday/:id/share', authMiddleware, async (req: any, res) => {
   res.json({ token, url, expiresAt })
 })
 
+app.post('/matchday/:id/repair-rotation-keys', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true'
+  const matchday = await matchdayFindFirstForUser(prisma, req.auth, {
+    where: { id: req.params.id },
+    select: { id: true },
+  })
+  if (!matchday) return res.status(404).json({ error: 'Matchday not found' })
+
+  const matches = await matchFindManyForUser(prisma, req.auth, {
+    where: { plateauId: matchday.id },
+    select: { id: true, rotationGameKey: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  if (!matches.length) {
+    return res.json({ ok: true, dryRun, matchdayId: matchday.id, total: 0, repaired: 0, repairedMatchIds: [] })
+  }
+
+  const used = new Set<string>(
+    matches
+      .map((m: any) => (typeof m.rotationGameKey === 'string' ? m.rotationGameKey.trim() : ''))
+      .filter((key: string) => key.length > 0)
+  )
+
+  const repairs: Array<{ id: string; rotationGameKey: string }> = []
+  for (const [index, match] of matches.entries()) {
+    const current = typeof match.rotationGameKey === 'string' ? match.rotationGameKey.trim() : ''
+    if (current.length > 0) continue
+
+    let candidate = `legacy:${index}`
+    if (used.has(candidate)) {
+      let suffix = 1
+      while (used.has(`legacy:${index}:${suffix}`)) suffix += 1
+      candidate = `legacy:${index}:${suffix}`
+    }
+    used.add(candidate)
+    repairs.push({ id: match.id, rotationGameKey: candidate })
+  }
+
+  if (!dryRun && repairs.length > 0) {
+    await prisma.$transaction(
+      repairs.map((repair) =>
+        prisma.match.update({
+          where: { id: repair.id },
+          data: { rotationGameKey: repair.rotationGameKey },
+        })
+      )
+    )
+  }
+
+  return res.json({
+    ok: true,
+    dryRun,
+    matchdayId: matchday.id,
+    total: matches.length,
+    repaired: repairs.length,
+    repairedMatchIds: repairs.map((r) => r.id),
+  })
+})
+
 app.delete('/matchday/:id/share', authMiddleware, async (req: any, res) => {
   const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
   if (!matchday) return res.status(404).json({ error: 'Matchday not found' })

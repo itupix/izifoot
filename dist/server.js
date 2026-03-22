@@ -4151,6 +4151,57 @@ app.post('/matchday/:id/share', authMiddleware, async (req, res) => {
     const url = `${APP_BASE_URL.replace(/\/+$/, '')}/public/matchday/${token}`;
     res.json({ token, url, expiresAt });
 });
+app.post('/matchday/:id/repair-rotation-keys', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+    const matchday = await matchdayFindFirstForUser(prisma, req.auth, {
+        where: { id: req.params.id },
+        select: { id: true },
+    });
+    if (!matchday)
+        return res.status(404).json({ error: 'Matchday not found' });
+    const matches = await matchFindManyForUser(prisma, req.auth, {
+        where: { plateauId: matchday.id },
+        select: { id: true, rotationGameKey: true, createdAt: true },
+        orderBy: { createdAt: 'asc' },
+    });
+    if (!matches.length) {
+        return res.json({ ok: true, dryRun, matchdayId: matchday.id, total: 0, repaired: 0, repairedMatchIds: [] });
+    }
+    const used = new Set(matches
+        .map((m) => (typeof m.rotationGameKey === 'string' ? m.rotationGameKey.trim() : ''))
+        .filter((key) => key.length > 0));
+    const repairs = [];
+    for (const [index, match] of matches.entries()) {
+        const current = typeof match.rotationGameKey === 'string' ? match.rotationGameKey.trim() : '';
+        if (current.length > 0)
+            continue;
+        let candidate = `legacy:${index}`;
+        if (used.has(candidate)) {
+            let suffix = 1;
+            while (used.has(`legacy:${index}:${suffix}`))
+                suffix += 1;
+            candidate = `legacy:${index}:${suffix}`;
+        }
+        used.add(candidate);
+        repairs.push({ id: match.id, rotationGameKey: candidate });
+    }
+    if (!dryRun && repairs.length > 0) {
+        await prisma.$transaction(repairs.map((repair) => prisma.match.update({
+            where: { id: repair.id },
+            data: { rotationGameKey: repair.rotationGameKey },
+        })));
+    }
+    return res.json({
+        ok: true,
+        dryRun,
+        matchdayId: matchday.id,
+        total: matches.length,
+        repaired: repairs.length,
+        repairedMatchIds: repairs.map((r) => r.id),
+    });
+});
 app.delete('/matchday/:id/share', authMiddleware, async (req, res) => {
     const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
     if (!matchday)
