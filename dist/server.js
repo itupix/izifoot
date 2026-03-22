@@ -34,6 +34,7 @@ const player_invitation_status_1 = require("./player-invitation-status");
 const match_payload_1 = require("./match-payload");
 const match_status_1 = require("./match-status");
 const matchday_absence_1 = require("./matchday-absence");
+const matchday_contract_1 = require("./matchday-contract");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -1914,26 +1915,24 @@ function buildPublicMatchdayRotation(matches) {
             games: [{ pitch: `Terrain ${index + 1}`, A: teamA, B: teamB }]
         };
     });
+    const teamsByLabel = new Map();
+    for (const slot of slots) {
+        for (const game of slot.games) {
+            if (game.A && !teamsByLabel.has(game.A))
+                teamsByLabel.set(game.A, { label: game.A });
+            if (game.B && !teamsByLabel.has(game.B))
+                teamsByLabel.set(game.B, { label: game.B });
+        }
+    }
     const updatedAt = matches.reduce((latest, current) => current.updatedAt > latest ? current.updatedAt : latest, matches[0].updatedAt);
-    return { updatedAt: updatedAt.toISOString(), slots };
+    return (0, matchday_contract_1.normalizeRotationForContract)({
+        updatedAt: updatedAt.toISOString(),
+        teams: Array.from(teamsByLabel.values()),
+        slots,
+    }, updatedAt.toISOString());
 }
 function normalizePublicRotation(candidate, defaultUpdatedAtIso) {
-    if (!candidate || !Array.isArray(candidate.slots))
-        return null;
-    const slots = candidate.slots.map((slot) => ({
-        time: String(slot?.time ?? ''),
-        games: Array.isArray(slot?.games)
-            ? slot.games.map((game) => ({
-                pitch: String(game?.pitch ?? ''),
-                A: String(game?.A ?? ''),
-                B: String(game?.B ?? ''),
-            }))
-            : [],
-    }));
-    return {
-        updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : defaultUpdatedAtIso,
-        slots
-    };
+    return (0, matchday_contract_1.normalizeRotationForContract)(candidate, defaultUpdatedAtIso);
 }
 function findRotationCandidate(data) {
     if (!data || typeof data !== 'object')
@@ -2073,8 +2072,24 @@ async function getPublicMatchdayPayloadByToken(token) {
         return { status: 404, body: { error: 'Invalid link' } };
     if (share.expiresAt && share.expiresAt < new Date())
         return { status: 410, body: { error: 'Link expired' } };
-    let rotation = null;
+    const matchesRaw = await prisma.match.findMany({
+        where: { plateauId: share.plateauId },
+        select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            status: true,
+            played: true,
+            rotationGameKey: true,
+            opponentName: true,
+            teams: { select: { side: true, score: true } }
+        },
+        orderBy: { createdAt: 'asc' }
+    });
+    const hasPersistedRotationKey = matchesRaw.some((m) => typeof m.rotationGameKey === 'string' && m.rotationGameKey.trim().length > 0);
     // Prefer rotation saved by the planning editor (same day + best available scope).
+    let hasPlanningRotation = false;
+    let rotation = null;
     const planning = await findLatestPlanningForMatchday(prisma, {
         date: share.plateau.date,
         userId: share.plateau.userId ?? null,
@@ -2084,27 +2099,44 @@ async function getPublicMatchdayPayloadByToken(token) {
     if (planning) {
         const planningData = safeParseJSON(planning.data);
         const candidate = findRotationCandidate(planningData);
+        hasPlanningRotation = Boolean(candidate);
         rotation = normalizePublicRotation(candidate, planning.updatedAt.toISOString());
     }
-    // Fallback: synthesize a minimal rotation from matches.
-    if (!rotation) {
-        const matches = await prisma.match.findMany({
-            where: { plateauId: share.plateauId },
-            select: {
-                createdAt: true,
-                updatedAt: true,
-                opponentName: true,
-                teams: { select: { side: true } }
-            },
-            orderBy: { createdAt: 'asc' }
-        });
-        rotation = buildPublicMatchdayRotation(matches);
+    const mode = (0, matchday_contract_1.deriveMatchdayMode)({ hasPersistedRotationKey, hasPlanningRotation });
+    if (mode === 'ROTATION' && !rotation) {
+        const fallbackRotationMatches = matchesRaw.map((m) => ({
+            createdAt: m.createdAt,
+            updatedAt: m.updatedAt,
+            opponentName: m.opponentName ?? null,
+            teams: (m.teams || []).map((team) => ({ side: team.side })),
+        }));
+        rotation = buildPublicMatchdayRotation(fallbackRotationMatches);
     }
+    const publicMatches = (0, matchday_contract_1.ensureRotationGameKeysForContract)(matchesRaw.map((match) => {
+        const status = (0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) });
+        return {
+            id: match.id,
+            matchdayId: share.plateauId,
+            status,
+            played: (0, match_status_1.derivePlayedFromStatus)(status),
+            rotationGameKey: match.rotationGameKey ?? null,
+            teams: (match.teams || []).map((team) => ({
+                side: team.side,
+                score: team.score ?? 0,
+            })),
+        };
+    }), mode === 'ROTATION');
     return {
         status: 200,
         body: {
+            mode,
             matchday: (0, matchday_metadata_1.toPublicMatchday)(share.plateau),
-            rotation
+            rotation: mode === 'ROTATION' ? (rotation || { updatedAt: new Date().toISOString(), teams: [], slots: [] }) : null,
+            matches: publicMatches,
+            rotationGameKeyFormat: {
+                canonical: 'schedule:{index}',
+                accepts: ['schedule:*', 'legacy:*'],
+            },
         }
     };
 }
@@ -4177,12 +4209,12 @@ app.post('/matchday/:id/repair-rotation-keys', authMiddleware, async (req, res) 
         const current = typeof match.rotationGameKey === 'string' ? match.rotationGameKey.trim() : '';
         if (current.length > 0)
             continue;
-        let candidate = `legacy:${index}`;
+        let candidate = `schedule:${index}`;
         if (used.has(candidate)) {
             let suffix = 1;
-            while (used.has(`legacy:${index}:${suffix}`))
+            while (used.has(`schedule:${index}:${suffix}`))
                 suffix += 1;
-            candidate = `legacy:${index}:${suffix}`;
+            candidate = `schedule:${index}:${suffix}`;
         }
         used.add(candidate);
         repairs.push({ id: match.id, rotationGameKey: candidate });
@@ -4315,17 +4347,28 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
             return typeof m.rotationGameKey === 'string' && m.rotationGameKey.trim().length > 0;
         });
         let hasPlanningRotation = false;
-        if (!hasPersistedRotationKey) {
-            const planning = await findLatestPlanningForMatchday(prisma, {
-                date: matchday.date,
-                userId: matchday.userId ?? null,
-                teamId: matchday.teamId ?? null,
-                clubId: matchday.clubId ?? null,
-            });
-            if (planning) {
-                const planningData = safeParseJSON(planning.data);
-                hasPlanningRotation = Boolean(findRotationCandidate(planningData));
-            }
+        let rotation = null;
+        const planning = await findLatestPlanningForMatchday(prisma, {
+            date: matchday.date,
+            userId: matchday.userId ?? null,
+            teamId: matchday.teamId ?? null,
+            clubId: matchday.clubId ?? null,
+        });
+        if (planning) {
+            const planningData = safeParseJSON(planning.data);
+            const candidate = findRotationCandidate(planningData);
+            hasPlanningRotation = Boolean(candidate);
+            rotation = normalizePublicRotation(candidate, planning.updatedAt.toISOString());
+        }
+        const mode = (0, matchday_contract_1.deriveMatchdayMode)({ hasPersistedRotationKey, hasPlanningRotation });
+        if (mode === 'ROTATION' && !rotation) {
+            const fallbackRotationMatches = matchesRaw.map((m) => ({
+                createdAt: m.createdAt,
+                updatedAt: m.updatedAt,
+                opponentName: m.opponentName ?? null,
+                teams: (m.teams || []).map((team) => ({ side: team.side })),
+            }));
+            rotation = buildPublicMatchdayRotation(fallbackRotationMatches);
         }
         // Fetch all team players in one query and attach player objects
         const allTeamIds = matchesRaw.flatMap((m) => m.teams.map((t) => t.id));
@@ -4339,17 +4382,17 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
                 byTeam[row.matchTeamId] = [];
             byTeam[row.matchTeamId].push(row);
         }
+        const matchesRawWithContractKeys = (0, matchday_contract_1.ensureRotationGameKeysForContract)(matchesRaw, mode === 'ROTATION');
         // Build enriched matches with teams[].players including player info
-        const matches = matchesRaw.map((m, index) => {
+        const matches = matchesRawWithContractKeys.map((m) => {
             const status = (0, match_status_1.resolveMatchStatus)({ status: m.status, played: Boolean(m.played) });
-            const fallbackRotationGameKey = (!m.rotationGameKey && (hasPersistedRotationKey || hasPlanningRotation))
-                ? `legacy:${index}`
-                : null;
+            const { plateauId, ...rest } = m;
             return {
-                ...m,
+                ...rest,
+                matchdayId: plateauId ?? null,
                 status,
                 played: (0, match_status_1.derivePlayedFromStatus)(status),
-                rotationGameKey: m.rotationGameKey ?? fallbackRotationGameKey,
+                rotationGameKey: m.rotationGameKey ?? null,
                 teams: m.teams.map((t) => ({
                     ...t,
                     players: (byTeam[t.id] || []).map(p => ({
@@ -4460,8 +4503,19 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
             matchesPlayed: (0, match_status_1.countPlayedMatchesExcludingCancelled)(matchesEnriched),
             matchesCancelled: matchesEnriched.filter((m) => (0, match_status_1.resolveMatchStatus)({ status: m.status, played: m.played }) === 'CANCELLED').length,
         };
-        const mode = (hasPersistedRotationKey || hasPlanningRotation) ? 'ROTATION' : 'MANUAL';
-        res.json({ matchday, mode, convocations, matches: matchesEnriched, playersById, stats });
+        res.json({
+            matchday,
+            mode,
+            rotation: mode === 'ROTATION' ? (rotation || { updatedAt: new Date().toISOString(), teams: [], slots: [] }) : null,
+            matches: matchesEnriched,
+            convocations,
+            playersById,
+            stats,
+            rotationGameKeyFormat: {
+                canonical: 'schedule:{index}',
+                accepts: ['schedule:*', 'legacy:*'],
+            },
+        });
     }
     catch (e) {
         console.error('[GET /matchday/:id/summary] failed', e);
@@ -4750,19 +4804,18 @@ app.get('/matches', authMiddleware, async (req, res) => {
             }
         }
     }
-    res.json(matches.map((match, index) => {
+    const mode = (0, matchday_contract_1.deriveMatchdayMode)({ hasPersistedRotationKey, hasPlanningRotation });
+    const matchesWithContractKeys = (0, matchday_contract_1.ensureRotationGameKeysForContract)(matches, mode === 'ROTATION');
+    res.json(matchesWithContractKeys.map((match) => {
         const status = (0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) });
         const { plateauId, ...rest } = match;
-        const fallbackRotationGameKey = (!match.rotationGameKey && (hasPersistedRotationKey || hasPlanningRotation))
-            ? `legacy:${index}`
-            : null;
         return {
             ...rest,
             matchdayId: plateauId ?? null,
             status,
             played: (0, match_status_1.derivePlayedFromStatus)(status),
             tactic: match.tactic ?? null,
-            rotationGameKey: match.rotationGameKey ?? fallbackRotationGameKey,
+            rotationGameKey: match.rotationGameKey ?? null,
         };
     }));
 });
