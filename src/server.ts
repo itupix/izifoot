@@ -4064,7 +4064,7 @@ app.put('/trainings/:trainingId/attendance', authMiddleware, async (req: any, re
       clubId: training.clubId ?? req.auth?.clubId ?? null,
       teamId: training.teamId ?? req.auth?.teamId ?? null,
     }
-    const players = await playerFindManyForUser(prisma, scopeAuth, {
+    const players = await prisma.player.findMany({
       where: { teamId: training.teamId },
       select: { id: true },
     })
@@ -4078,10 +4078,14 @@ app.put('/trainings/:trainingId/attendance', authMiddleware, async (req: any, re
     }
 
     const rows = await prisma.$transaction(async (tx) => {
-      await attendanceDeleteManyForUser(tx, scopeAuth, {
+      const attendanceWhere: any = {
         session_type: { in: attendanceSessionTypeVariants('TRAINING') } as any,
         session_id: trainingId,
-      })
+        teamId: training.teamId,
+      }
+      if (training.clubId) attendanceWhere.clubId = training.clubId
+
+      await tx.attendance.deleteMany({ where: attendanceWhere })
 
       if (snapshot.items.length > 0) {
         await tx.attendance.createMany({
@@ -4089,16 +4093,14 @@ app.put('/trainings/:trainingId/attendance', authMiddleware, async (req: any, re
             ...(scopeAuth?.id ? { userId: scopeAuth.id } : {}),
             ...(scopeAuth?.clubId ? { clubId: scopeAuth.clubId } : {}),
             ...(scopeAuth?.teamId ? { teamId: scopeAuth.teamId } : {}),
+            trainingId,
             ...item,
           })),
         })
       }
 
-      return attendanceFindManyForUser(tx, scopeAuth, {
-        where: {
-          session_type: { in: attendanceSessionTypeVariants('TRAINING') } as any,
-          session_id: trainingId,
-        },
+      return tx.attendance.findMany({
+        where: attendanceWhere,
         orderBy: { playerId: 'asc' },
       })
     })
