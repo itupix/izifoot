@@ -4059,7 +4059,12 @@ app.put('/trainings/:trainingId/attendance', authMiddleware, async (req: any, re
     })
     if (!training) return res.status(404).json({ error: 'Training not found' })
 
-    const players = await playerFindManyForUser(prisma, req.auth, {
+    const scopeAuth = {
+      ...req.auth,
+      clubId: training.clubId ?? req.auth?.clubId ?? null,
+      teamId: training.teamId ?? req.auth?.teamId ?? null,
+    }
+    const players = await playerFindManyForUser(prisma, scopeAuth, {
       where: { teamId: training.teamId },
       select: { id: true },
     })
@@ -4070,12 +4075,6 @@ app.put('/trainings/:trainingId/attendance', authMiddleware, async (req: any, re
     })
     if (snapshot.invalidPlayerIds.length > 0) {
       return res.status(400).json({ error: 'One or more players do not belong to the training team' })
-    }
-
-    const scopeAuth = {
-      ...req.auth,
-      clubId: training.clubId ?? req.auth?.clubId ?? null,
-      teamId: training.teamId ?? req.auth?.teamId ?? null,
     }
 
     const rows = await prisma.$transaction(async (tx) => {
