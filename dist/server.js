@@ -3856,6 +3856,71 @@ app.put('/trainings/:id', authMiddleware, async (req, res) => {
         return res.status(500).json({ error: 'Failed to update training' });
     }
 });
+// Replace full attendance snapshot for a training
+app.put('/trainings/:trainingId/attendance', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const trainingId = req.params.trainingId;
+    const parsed = attendance_1.trainingAttendancePutBodySchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    try {
+        const training = await trainingFindFirstForUser(prisma, req.auth, {
+            where: { id: trainingId },
+            select: { id: true, clubId: true, teamId: true },
+        });
+        if (!training)
+            return res.status(404).json({ error: 'Training not found' });
+        const players = await playerFindManyForUser(prisma, req.auth, {
+            where: { teamId: training.teamId },
+            select: { id: true },
+        });
+        const snapshot = (0, attendance_1.buildTrainingAttendanceSnapshot)({
+            trainingId,
+            trainingPlayerIds: players.map((p) => p.id),
+            presentPlayerIds: parsed.data.playerIds,
+        });
+        if (snapshot.invalidPlayerIds.length > 0) {
+            return res.status(400).json({ error: 'One or more players do not belong to the training team' });
+        }
+        const scopeAuth = {
+            ...req.auth,
+            clubId: training.clubId ?? req.auth?.clubId ?? null,
+            teamId: training.teamId ?? req.auth?.teamId ?? null,
+        };
+        const rows = await prisma.$transaction(async (tx) => {
+            await attendanceDeleteManyForUser(tx, scopeAuth, {
+                session_type: { in: (0, attendance_1.attendanceSessionTypeVariants)('TRAINING') },
+                session_id: trainingId,
+            });
+            if (snapshot.items.length > 0) {
+                await tx.attendance.createMany({
+                    data: snapshot.items.map((item) => ({
+                        ...(scopeAuth?.id ? { userId: scopeAuth.id } : {}),
+                        ...(scopeAuth?.clubId ? { clubId: scopeAuth.clubId } : {}),
+                        ...(scopeAuth?.teamId ? { teamId: scopeAuth.teamId } : {}),
+                        ...item,
+                    })),
+                });
+            }
+            return attendanceFindManyForUser(tx, scopeAuth, {
+                where: {
+                    session_type: { in: (0, attendance_1.attendanceSessionTypeVariants)('TRAINING') },
+                    session_id: trainingId,
+                },
+                orderBy: { playerId: 'asc' },
+            });
+        });
+        return res.status(200).json({ items: rows.map(attendance_1.normalizeAttendanceRow) });
+    }
+    catch (e) {
+        console.error('[PUT /trainings/:trainingId/attendance] failed', {
+            trainingId,
+            error: e,
+        });
+        return res.status(500).json({ error: 'Failed to update training attendance' });
+    }
+});
 // Delete a training (and clean related attendance + drills)
 app.delete('/trainings/:id', authMiddleware, async (req, res) => {
     const id = req.params.id;

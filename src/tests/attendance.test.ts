@@ -3,8 +3,11 @@ import assert from 'node:assert/strict'
 import {
   attendanceSessionTypeVariants,
   attendanceStoredSessionType,
+  buildTrainingAttendanceSnapshot,
+  dedupeStringList,
   normalizeAttendanceRow,
   persistAttendancePresence,
+  trainingAttendancePutBodySchema,
 } from '../attendance'
 
 test('attendanceStoredSessionType maps true/false explicitly', () => {
@@ -67,4 +70,40 @@ test('normalizeAttendanceRow returns final boolean state for GET payload', () =>
   assert.equal(absent.present, false)
   assert.equal(present.session_type, 'TRAINING')
   assert.equal(present.present, true)
+})
+
+test('trainingAttendancePutBodySchema accepts empty payload and defaults to empty list', () => {
+  const parsed = trainingAttendancePutBodySchema.safeParse({})
+  assert.equal(parsed.success, true)
+  assert.deepEqual(parsed.data.playerIds, [])
+})
+
+test('dedupeStringList trims and deduplicates', () => {
+  const normalized = dedupeStringList([' p1 ', 'p2', 'p1', '', '  p3  '])
+  assert.deepEqual(normalized, ['p1', 'p2', 'p3'])
+})
+
+test('buildTrainingAttendanceSnapshot marks present and absent players', () => {
+  const snapshot = buildTrainingAttendanceSnapshot({
+    trainingId: 'training-1',
+    trainingPlayerIds: ['p1', 'p2', 'p3'],
+    presentPlayerIds: ['p1', 'p3'],
+  })
+
+  assert.deepEqual(snapshot.invalidPlayerIds, [])
+  assert.deepEqual(snapshot.items, [
+    { session_type: 'TRAINING', session_id: 'training-1', playerId: 'p1' },
+    { session_type: 'TRAINING_ABSENT', session_id: 'training-1', playerId: 'p2' },
+    { session_type: 'TRAINING', session_id: 'training-1', playerId: 'p3' },
+  ])
+})
+
+test('buildTrainingAttendanceSnapshot reports players outside training team', () => {
+  const snapshot = buildTrainingAttendanceSnapshot({
+    trainingId: 'training-1',
+    trainingPlayerIds: ['p1', 'p2'],
+    presentPlayerIds: ['p2', 'p3'],
+  })
+
+  assert.deepEqual(snapshot.invalidPlayerIds, ['p3'])
 })

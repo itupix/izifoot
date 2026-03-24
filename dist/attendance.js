@@ -1,9 +1,16 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.trainingAttendancePutBodySchema = void 0;
 exports.attendanceStoredSessionType = attendanceStoredSessionType;
 exports.attendanceSessionTypeVariants = attendanceSessionTypeVariants;
 exports.normalizeAttendanceRow = normalizeAttendanceRow;
+exports.dedupeStringList = dedupeStringList;
+exports.buildTrainingAttendanceSnapshot = buildTrainingAttendanceSnapshot;
 exports.persistAttendancePresence = persistAttendancePresence;
+const zod_1 = require("zod");
+exports.trainingAttendancePutBodySchema = zod_1.z.object({
+    playerIds: zod_1.z.array(zod_1.z.string().min(1)).default([]),
+});
 function attendanceStoredSessionType(sessionType, present) {
     return present ? sessionType : `${sessionType}_ABSENT`;
 }
@@ -21,6 +28,31 @@ function normalizeAttendanceRow(row) {
         return { ...row, present: true };
     }
     return row;
+}
+function dedupeStringList(values) {
+    const seen = new Set();
+    const out = [];
+    for (const raw of values) {
+        const value = raw.trim();
+        if (!value || seen.has(value))
+            continue;
+        seen.add(value);
+        out.push(value);
+    }
+    return out;
+}
+function buildTrainingAttendanceSnapshot(params) {
+    const trainingPlayerIds = dedupeStringList(params.trainingPlayerIds);
+    const presentPlayerIds = dedupeStringList(params.presentPlayerIds);
+    const allowed = new Set(trainingPlayerIds);
+    const invalidPlayerIds = presentPlayerIds.filter((id) => !allowed.has(id));
+    const presentSet = new Set(presentPlayerIds);
+    const items = trainingPlayerIds.map((playerId) => ({
+        session_type: attendanceStoredSessionType('TRAINING', presentSet.has(playerId)),
+        session_id: params.trainingId,
+        playerId,
+    }));
+    return { items, invalidPlayerIds };
 }
 async function persistAttendancePresence(params, io) {
     const storedSessionType = attendanceStoredSessionType(params.session_type, params.present);

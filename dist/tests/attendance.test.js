@@ -61,3 +61,33 @@ const attendance_1 = require("../attendance");
     strict_1.default.equal(present.session_type, 'TRAINING');
     strict_1.default.equal(present.present, true);
 });
+(0, node_test_1.default)('trainingAttendancePutBodySchema accepts empty payload and defaults to empty list', () => {
+    const parsed = attendance_1.trainingAttendancePutBodySchema.safeParse({});
+    strict_1.default.equal(parsed.success, true);
+    strict_1.default.deepEqual(parsed.data.playerIds, []);
+});
+(0, node_test_1.default)('dedupeStringList trims and deduplicates', () => {
+    const normalized = (0, attendance_1.dedupeStringList)([' p1 ', 'p2', 'p1', '', '  p3  ']);
+    strict_1.default.deepEqual(normalized, ['p1', 'p2', 'p3']);
+});
+(0, node_test_1.default)('buildTrainingAttendanceSnapshot marks present and absent players', () => {
+    const snapshot = (0, attendance_1.buildTrainingAttendanceSnapshot)({
+        trainingId: 'training-1',
+        trainingPlayerIds: ['p1', 'p2', 'p3'],
+        presentPlayerIds: ['p1', 'p3'],
+    });
+    strict_1.default.deepEqual(snapshot.invalidPlayerIds, []);
+    strict_1.default.deepEqual(snapshot.items, [
+        { session_type: 'TRAINING', session_id: 'training-1', playerId: 'p1' },
+        { session_type: 'TRAINING_ABSENT', session_id: 'training-1', playerId: 'p2' },
+        { session_type: 'TRAINING', session_id: 'training-1', playerId: 'p3' },
+    ]);
+});
+(0, node_test_1.default)('buildTrainingAttendanceSnapshot reports players outside training team', () => {
+    const snapshot = (0, attendance_1.buildTrainingAttendanceSnapshot)({
+        trainingId: 'training-1',
+        trainingPlayerIds: ['p1', 'p2'],
+        presentPlayerIds: ['p2', 'p3'],
+    });
+    strict_1.default.deepEqual(snapshot.invalidPlayerIds, ['p3']);
+});
