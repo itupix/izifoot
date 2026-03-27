@@ -226,6 +226,22 @@ function playerCookieOpts() {
   }
 }
 
+function toNonNegativeInt(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  const i = Math.trunc(n)
+  return i >= 0 ? i : null
+}
+
+function readPagination(query: any, defaults: { limit: number, maxLimit: number } = { limit: 50, maxLimit: 200 }) {
+  const limitInput = toNonNegativeInt(query?.limit)
+  const offsetInput = toNonNegativeInt(query?.offset)
+  const limit = Math.min(limitInput ?? defaults.limit, defaults.maxLimit)
+  const offset = offsetInput ?? 0
+  return { take: limit, skip: offset, limit, offset }
+}
+
 // --- Auth helpers ---
 function signToken(userId: string) {
   return jwt.sign({ sub: userId }, JWT_SECRET, { expiresIn: '7d' })
@@ -3373,28 +3389,41 @@ app.get('/plannings/:id/qr', authMiddleware, async (req: any, res) => {
 
 app.get('/drills', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
+  const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
   const q = (req.query.q as string | undefined)?.toLowerCase().trim()
   const cat = (req.query.category as string | undefined)?.toLowerCase().trim()
   const tag = (req.query.tag as string | undefined)?.toLowerCase().trim()
-
-  const catalog = await drillFindManyForUser(prisma, req.auth, { orderBy: { createdAt: 'asc' } })
-  let items = catalog.slice()
+  const where: any = {}
+  const and: any[] = []
   if (q) {
-    items = items.filter(d =>
-      d.title.toLowerCase().includes(q) ||
-      d.description.toLowerCase().includes(q) ||
-      d.tags.some((t: string) => t.toLowerCase().includes(q))
-    )
+    and.push({
+      OR: [
+        { title: { contains: q, mode: 'insensitive' } },
+        { description: { contains: q, mode: 'insensitive' } },
+      ],
+    })
   }
-  if (cat) items = items.filter(d => d.category.toLowerCase() === cat)
-  if (tag) items = items.filter(d => d.tags.map((t: string) => t.toLowerCase()).includes(tag))
+  if (cat) and.push({ category: { equals: cat, mode: 'insensitive' } })
+  if (tag) and.push({ tags: { has: tag } })
+  if (and.length > 0) where.AND = and
+
+  const [catalog, items] = await Promise.all([
+    drillFindManyForUser(prisma, req.auth, { orderBy: { createdAt: 'asc' } }),
+    drillFindManyForUser(prisma, req.auth, {
+      where,
+      orderBy: { createdAt: 'asc' },
+      take: pagination.take,
+      skip: pagination.skip,
+    }),
+  ])
   const renderedItems = items.map((d: any) => withDrillDescriptionHtml(d))
   const renderedCatalog = catalog.map((d: any) => withDrillDescriptionHtml(d))
 
   res.json({
     items: renderedItems,
     categories: Array.from(new Set(renderedCatalog.map(d => d.category))).sort(),
-    tags: Array.from(new Set(renderedCatalog.flatMap(d => d.tags))).sort()
+    tags: Array.from(new Set(renderedCatalog.flatMap(d => d.tags))).sort(),
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: renderedItems.length }
   })
 })
 
@@ -3503,8 +3532,16 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
 // ---- Players ----
 app.get('/players', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const players = await playerFindManyForUser(prisma, req.auth, { orderBy: [{ first_name: 'asc' }, { last_name: 'asc' }, { name: 'asc' }] })
-  res.json(players.map((player: any) => normalizePlayerForApi(player)))
+  const pagination = readPagination(req.query, { limit: 100, maxLimit: 300 })
+  const players = await playerFindManyForUser(prisma, req.auth, {
+    orderBy: [{ first_name: 'asc' }, { last_name: 'asc' }, { name: 'asc' }],
+    take: pagination.take,
+    skip: pagination.skip,
+  })
+  res.json({
+    items: players.map((player: any) => normalizePlayerForApi(player)),
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: players.length }
+  })
 })
 
 const getPlayerByIdHandler = async (req: any, res: any) => {
@@ -3979,8 +4016,16 @@ app.delete('/api/effectif/:id', authMiddleware, deletePlayerByIdHandler)
 
 // ---- Trainings ----
 app.get('/trainings', authMiddleware, async (req: any, res) => {
-  const trainings = await trainingFindManyForUser(prisma, req.auth, { orderBy: { date: 'desc' } })
-  res.json(trainings)
+  const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
+  const trainings = await trainingFindManyForUser(prisma, req.auth, {
+    orderBy: { date: 'desc' },
+    take: pagination.take,
+    skip: pagination.skip,
+  })
+  res.json({
+    items: trainings,
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: trainings.length }
+  })
 })
 
 // Get single training
@@ -4246,11 +4291,19 @@ app.put('/trainings/:id/roles', authMiddleware, async (req: any, res) => {
 // ---- Matchdays ----
 app.get('/matchday', async (req: any, res, next) => {
   const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
-  if (!token) return res.json([])
+  if (!token) return res.json({ items: [], pagination: { limit: 0, offset: 0, returned: 0 } })
   return next()
 }, authMiddleware, async (req: any, res) => {
-  const matchdays = await matchdayFindManyForUser(prisma, req.auth, { orderBy: { date: 'desc' } })
-  res.json(matchdays)
+  const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
+  const matchdays = await matchdayFindManyForUser(prisma, req.auth, {
+    orderBy: { date: 'desc' },
+    take: pagination.take,
+    skip: pagination.skip,
+  })
+  res.json({
+    items: matchdays,
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: matchdays.length }
+  })
 })
 
 
@@ -4582,6 +4635,7 @@ app.get('/matchday/:id/summary', async (req: any, res, next) => {
 
 app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
   const { id } = req.params
+  const includeAllPlayers = req.query.includeAllPlayers === '1' || req.query.includeAllPlayers === 'true'
   try {
     const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id } })
     if (!matchday) return res.status(404).json({ error: 'Matchday not found' })
@@ -4592,7 +4646,20 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
         session_id: id,
         session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] as any },
       },
-      include: { player: true }
+      select: {
+        playerId: true,
+        session_type: true,
+        player: {
+          select: {
+            id: true,
+            name: true,
+            primary_position: true,
+            secondary_position: true,
+            email: true,
+            phone: true,
+          },
+        },
+      },
     })
     // Build attendancePlayers and playersById from attendance
     const attendancePlayers = attendance.map(a => a.player).filter(Boolean) as any[]
@@ -4612,8 +4679,8 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
     const matchesRaw = await matchFindManyForUser(prisma, req.auth, {
       where: { plateauId: id },
       include: {
-        teams: true,
-        scorers: true
+        teams: { select: { id: true, side: true, score: true } },
+        scorers: { select: { id: true, playerId: true, assistId: true, side: true } }
       },
       orderBy: { createdAt: 'asc' }
     })
@@ -4650,7 +4717,21 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
     const allTeamIds = matchesRaw.flatMap((m: any) => m.teams.map((t: any) => t.id))
     const mtPlayers = allTeamIds.length ? await prisma.matchTeamPlayer.findMany({
       where: { matchTeamId: { in: allTeamIds } },
-      include: { player: true }
+      select: {
+        matchTeamId: true,
+        playerId: true,
+        role: true,
+        player: {
+          select: {
+            id: true,
+            name: true,
+            primary_position: true,
+            secondary_position: true,
+            email: true,
+            phone: true,
+          },
+        },
+      },
     }) : []
     const byTeam: Record<string, typeof mtPlayers> = {}
     for (const row of mtPlayers) {
@@ -4704,23 +4785,35 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
       if (!convocatedMap[pl.id]) convocatedMap[pl.id] = playersById[pl.id]
     }
     // Ensure we know all players (for listing). We do not auto-mark as convoked.
-    try {
-      const allPlayers = await playerFindManyForUser(prisma, req.auth, { orderBy: { name: 'asc' } })
-      for (const pl of allPlayers) {
-        if (!playersById[pl.id]) {
-          playersById[pl.id] = {
-            id: pl.id,
-            name: (pl as any).name,
-            primary_position: (pl as any).primary_position ?? null,
-            secondary_position: (pl as any).secondary_position ?? null,
-            email: (pl as any).email ?? null,
-            phone: (pl as any).phone ?? null,
-          } as any
+    if (includeAllPlayers) {
+      try {
+        const allPlayers = await playerFindManyForUser(prisma, req.auth, {
+          orderBy: { name: 'asc' },
+          select: {
+            id: true,
+            name: true,
+            primary_position: true,
+            secondary_position: true,
+            email: true,
+            phone: true,
+          },
+        })
+        for (const pl of allPlayers) {
+          if (!playersById[pl.id]) {
+            playersById[pl.id] = {
+              id: pl.id,
+              name: pl.name,
+              primary_position: pl.primary_position ?? null,
+              secondary_position: pl.secondary_position ?? null,
+              email: (pl as any).email ?? null,
+              phone: (pl as any).phone ?? null,
+            } as any
+          }
         }
+      } catch (e) {
+        // If fetching all players fails for any reason, proceed with partial list
+        console.warn('[summary] failed to include full players list', (e as any)?.message || e)
       }
-    } catch (e) {
-      // If fetching all players fails for any reason, proceed with partial list
-      console.warn('[summary] failed to include full players list', (e as any)?.message || e)
     }
 
     // Mark presence/absence and convocation using attendance
@@ -4799,8 +4892,16 @@ app.get('/attendance', authMiddleware, async (req: any, res) => {
   if (session_type) where.session_type = { in: attendanceSessionTypeVariants(session_type) } as any
   else where.session_type = { in: ['TRAINING', 'TRAINING_ABSENT', 'PLATEAU', 'PLATEAU_ABSENT'] } as any
   if (session_id) where.session_id = session_id
-  const rows = await attendanceFindManyForUser(prisma, scopeAuth, { where })
-  res.json(rows.map(normalizeAttendanceRow))
+  const pagination = readPagination(req.query, { limit: 200, maxLimit: 500 })
+  const rows = await attendanceFindManyForUser(prisma, scopeAuth, {
+    where,
+    take: pagination.take,
+    skip: pagination.skip,
+  })
+  res.json({
+    items: rows.map(normalizeAttendanceRow),
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: rows.length }
+  })
 })
 app.post('/attendance', authMiddleware, async (req: any, res) => {
   const schema = z.object({
@@ -4913,16 +5014,16 @@ async function assertEventPlayerIdsInMatchScope(db: any, scopeOrUserId: any, mat
 
   if (!missingInMatchTeams.length) return
 
-  for (const playerId of missingInMatchTeams) {
-    const player = await playerFindFirstForUser(db, scopeOrUserId, {
-      where: { id: playerId },
-      select: { id: true },
-    })
-    if (!player) {
-      const err: any = new Error(`Player ${playerId} is outside match scope`)
-      err.code = 'PLAYER_SCOPE_FORBIDDEN'
-      throw err
-    }
+  const scopedPlayers = await playerFindManyForUser(db, scopeOrUserId, {
+    where: { id: { in: missingInMatchTeams } },
+    select: { id: true },
+  })
+  const scopedIds = new Set(scopedPlayers.map((row: any) => row.id))
+  const forbiddenPlayerId = missingInMatchTeams.find((id) => !scopedIds.has(id))
+  if (forbiddenPlayerId) {
+    const err: any = new Error(`Player ${forbiddenPlayerId} is outside match scope`)
+    err.code = 'PLAYER_SCOPE_FORBIDDEN'
+    throw err
   }
 }
 
@@ -5054,12 +5155,15 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
 }
 
 app.get('/matches', authMiddleware, async (req: any, res) => {
+  const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
   const { matchdayId } = req.query as { matchdayId?: string }
   const where = matchdayId ? { plateauId: String(matchdayId) } : {}
   const matches = await matchFindManyForUser(prisma, req.auth, {
     where,
-    include: { teams: { include: { players: { include: { player: true } } } }, scorers: true },
-    orderBy: { createdAt: 'desc' }
+    include: { teams: true, scorers: true },
+    orderBy: { createdAt: 'desc' },
+    take: pagination.take,
+    skip: pagination.skip,
   })
   let hasPlanningRotation = false
   const hasPersistedRotationKey = matches.some((match: any) => typeof match.rotationGameKey === 'string' && match.rotationGameKey.trim().length > 0)
@@ -5078,7 +5182,8 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
   }
   const mode = deriveMatchdayMode({ hasPersistedRotationKey, hasPlanningRotation })
   const matchesWithContractKeys = ensureRotationGameKeysForContract(matches, mode === 'ROTATION')
-  res.json(matchesWithContractKeys.map((match: any) => {
+  res.json({
+    items: matchesWithContractKeys.map((match: any) => {
     const status = resolveMatchStatus({ status: match.status, played: Boolean(match.played) })
     const { plateauId, ...rest } = match
     return {
@@ -5089,7 +5194,9 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
       tactic: match.tactic ?? null,
       rotationGameKey: match.rotationGameKey ?? null,
     }
-  }))
+  }),
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: matches.length }
+  })
 })
 
 app.get('/matches/:id', authMiddleware, async (req: any, res) => {
