@@ -8,32 +8,32 @@ datasource db {
 }
 
 model User {
-  id           String     @id @default(cuid())
-  email        String     @unique
-  passwordHash String
-  firstName    String?
-  lastName     String?
-  phone        String?
-  isPremium    Boolean    @default(false)
-  role         UserRole   @default(DIRECTION)
-  clubId       String?
-  club         Club?      @relation(fields: [clubId], references: [id])
-  teamId       String?
-  team         Team?      @relation(fields: [teamId], references: [id])
-  managedTeamIds String[] @default([])
-  linkedPlayerUserId String?
-  createdAt    DateTime   @default(now())
-  accountInvitesSent AccountInvite[] @relation("InviteSender")
-  acceptedInvite AccountInvite? @relation("InviteAcceptedUser")
-  drills       Drill[]
-  plannings    Planning[]
-  players      Player[]
-  trainings    Training[]
-  plateaus     Plateau[]
-  attendance   Attendance[]
-  matches      Match[]
-  trainingDrills TrainingDrill[]
-  diagrams     Diagram[]
+  id                      String                   @id @default(cuid())
+  email                   String                   @unique
+  passwordHash            String
+  firstName               String?
+  lastName                String?
+  phone                   String?
+  isPremium               Boolean                  @default(false)
+  role                    UserRole                 @default(DIRECTION)
+  clubId                  String?
+  club                    Club?                    @relation(fields: [clubId], references: [id])
+  teamId                  String?
+  team                    Team?                    @relation(fields: [teamId], references: [id])
+  managedTeamIds          String[]                 @default([])
+  linkedPlayerUserId      String?
+  createdAt               DateTime                 @default(now())
+  accountInvitesSent      AccountInvite[]          @relation("InviteSender")
+  acceptedInvite          AccountInvite?           @relation("InviteAcceptedUser")
+  drills                  Drill[]
+  plannings               Planning[]
+  players                 Player[]
+  trainings               Training[]
+  plateaus                Plateau[]
+  attendance              Attendance[]
+  matches                 Match[]
+  trainingDrills          TrainingDrill[]
+  diagrams                Diagram[]
   trainingRoleAssignments TrainingRoleAssignment[]
 }
 
@@ -74,8 +74,8 @@ model Team {
 }
 
 model AccountInvite {
-  id                 String            @id @default(cuid())
-  token              String            @unique
+  id                 String              @id @default(cuid())
+  token              String              @unique
   email              String
   firstName          String?
   lastName           String?
@@ -85,17 +85,17 @@ model AccountInvite {
   clubId             String
   invitedByUserId    String
   teamId             String?
-  managedTeamIds     String[]          @default([])
+  managedTeamIds     String[]            @default([])
   linkedPlayerId     String?
   linkedPlayerUserId String?
-  userId             String?           @unique
+  userId             String?             @unique
   expiresAt          DateTime
   acceptedAt         DateTime?
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
 
-  invitedBy          User              @relation("InviteSender", fields: [invitedByUserId], references: [id], onDelete: Cascade)
-  user               User?             @relation("InviteAcceptedUser", fields: [userId], references: [id], onDelete: SetNull)
+  invitedBy User  @relation("InviteSender", fields: [invitedByUserId], references: [id], onDelete: Cascade)
+  user      User? @relation("InviteAcceptedUser", fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([clubId, status])
   @@index([email, status])
@@ -127,73 +127,79 @@ model ShareToken {
 // === FOOT DOMAIN ===
 
 model Player {
-  id                 String            @id @default(cuid())
-  userId             String?
-  user               User?             @relation(fields: [userId], references: [id])
-  clubId             String?
-  teamId             String
-  name               String
-  first_name         String?
-  last_name          String?
-  primary_position   String
-  secondary_position String?
-  is_child           Boolean           @default(false)
-  parent_first_name  String?
-  parent_last_name   String?
-  licence            String?
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
-  scorers            Scorer[] @relation("ScorerPlayer")
-  assistedScorers    Scorer[] @relation("ScorerAssist")
-  Attendance         Attendance[]
-  MatchTeamPlayer    MatchTeamPlayer[]
+  id                      String                   @id @default(cuid())
+  userId                  String?
+  user                    User?                    @relation(fields: [userId], references: [id])
+  clubId                  String?
+  teamId                  String
+  name                    String
+  first_name              String?
+  last_name               String?
+  primary_position        String
+  secondary_position      String?
+  is_child                Boolean                  @default(false)
+  parent_first_name       String?
+  parent_last_name        String?
+  licence                 String?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  scorers                 Scorer[]                 @relation("ScorerPlayer")
+  assistedScorers         Scorer[]                 @relation("ScorerAssist")
+  Attendance              Attendance[]
+  MatchTeamPlayer         MatchTeamPlayer[]
   trainingRoleAssignments TrainingRoleAssignment[]
-  email              String?
-  phone              String?
+  email                   String?
+  phone                   String?
 
   @@unique([userId, email])
+  @@index([teamId])
+  @@index([teamId, last_name, first_name, name])
 }
 
 model Training {
-  id            String          @id @default(cuid())
-  userId        String?
-  user          User?           @relation(fields: [userId], references: [id])
-  clubId        String?
-  teamId        String
-  date          DateTime
-  status        String          @default("PLANNED") // <= DOIT être là
-  attendance    Attendance[]
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
-  TrainingDrill TrainingDrill[]
+  id                      String                   @id @default(cuid())
+  userId                  String?
+  user                    User?                    @relation(fields: [userId], references: [id])
+  clubId                  String?
+  teamId                  String
+  date                    DateTime
+  status                  String                   @default("PLANNED") // <= DOIT être là
+  attendance              Attendance[]
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  TrainingDrill           TrainingDrill[]
   trainingRoleAssignments TrainingRoleAssignment[]
+
+  @@index([teamId, date])
 }
 
 model Plateau {
-  id         String       @id @default(cuid())
-  userId     String?
-  user       User?        @relation(fields: [userId], references: [id])
-  clubId     String?
-  teamId     String
-  date       DateTime
-  lieu       String
-  address    String?
-  startTime  String?      @map("start_time") @db.VarChar(5)
-  meetingTime String?     @map("meeting_time") @db.VarChar(5)
-  matches    Match[]
-  attendance Attendance[]
-  shares     PlateauShareToken[]
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
+  id          String              @id @default(cuid())
+  userId      String?
+  user        User?               @relation(fields: [userId], references: [id])
+  clubId      String?
+  teamId      String
+  date        DateTime
+  lieu        String
+  address     String?
+  startTime   String?             @map("start_time") @db.VarChar(5)
+  meetingTime String?             @map("meeting_time") @db.VarChar(5)
+  matches     Match[]
+  attendance  Attendance[]
+  shares      PlateauShareToken[]
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@index([teamId, date])
 }
 
 model PlateauShareToken {
-  id        String   @id @default(cuid())
-  token     String   @unique
+  id        String    @id @default(cuid())
+  token     String    @unique
   plateauId String
-  plateau   Plateau  @relation(fields: [plateauId], references: [id], onDelete: Cascade)
+  plateau   Plateau   @relation(fields: [plateauId], references: [id], onDelete: Cascade)
   expiresAt DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 }
 
 model Attendance {
@@ -212,29 +218,31 @@ model Attendance {
   plateauId    String?
 
   @@unique([userId, session_type, session_id, playerId])
+  @@index([session_type, session_id, teamId])
 }
 
 model Match {
-  id           String      @id @default(cuid())
-  userId       String?
-  user         User?       @relation(fields: [userId], references: [id])
-  clubId       String?
-  teamId       String?
-  type         String
-  played       Boolean     @default(false)
-  status       MatchStatus @default(PLANNED)
-  plateau      Plateau?    @relation(fields: [plateauId], references: [id])
-  plateauId    String?
+  id              String       @id @default(cuid())
+  userId          String?
+  user            User?        @relation(fields: [userId], references: [id])
+  clubId          String?
+  teamId          String?
+  type            String
+  played          Boolean      @default(false)
+  status          MatchStatus  @default(PLANNED)
+  plateau         Plateau?     @relation(fields: [plateauId], references: [id])
+  plateauId       String?
   rotationGameKey String?
-  teams        MatchTeam[]
-  scorers      Scorer[]
-  events       MatchEvent[]
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
-  opponentName String?
-  tactic       Json?
+  teams           MatchTeam[]
+  scorers         Scorer[]
+  events          MatchEvent[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  opponentName    String?
+  tactic          Json?
 
   @@index([plateauId, rotationGameKey])
+  @@index([plateauId, createdAt])
 }
 
 enum MatchStatus {
@@ -285,6 +293,8 @@ model Scorer {
   assist   Player? @relation("ScorerAssist", fields: [assistId], references: [id])
   assistId String?
   side     String
+
+  @@index([matchId])
 }
 
 model MatchTeamPlayer {
@@ -296,6 +306,7 @@ model MatchTeamPlayer {
   role        String // 'starter' | 'sub'
 
   @@unique([matchTeamId, playerId, role])
+  @@index([playerId])
 }
 
 model TrainingDrill {
