@@ -67,6 +67,9 @@ const prisma = new PrismaClient()
 const PORT = process.env.PORT || 4000
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret'
 const IS_PROD = process.env.NODE_ENV === 'production'
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS || 700)
+const PERF_SAMPLE_WINDOW = Number(process.env.PERF_SAMPLE_WINDOW || 200)
+const PERF_LOG_EVERY = Number(process.env.PERF_LOG_EVERY || 100)
 const DEFAULT_DEV_APP_BASE_URL = 'http://localhost:5173'
 const APP_BASE_URL = process.env.APP_BASE_URL || DEFAULT_DEV_APP_BASE_URL
 const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`
@@ -184,6 +187,26 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }))
 app.use(cookieParser())
 app.use(morgan('dev'))
+app.use((req: any, res: any, next: any) => {
+  const startedAt = process.hrtime.bigint()
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000
+    const path = String(req.originalUrl || req.url || '').split('?')[0] || '/'
+    const routeKey = `${req.method} ${path}`
+    recordRoutePerf(routeKey, durationMs)
+
+    if (durationMs >= SLOW_REQUEST_MS || res.statusCode >= 500) {
+      const level = res.statusCode >= 500 ? 'error' : 'warn'
+      console[level]('[perf.request]', {
+        method: req.method,
+        path,
+        status: res.statusCode,
+        durationMs: Number(durationMs.toFixed(1)),
+      })
+    }
+  })
+  next()
+})
 
 // Anti-cache pour l'API (évite les 304 Not Modified sur GET protégés)
 app.set('etag', false)
@@ -240,6 +263,42 @@ function readPagination(query: any, defaults: { limit: number, maxLimit: number 
   const limit = Math.min(limitInput ?? defaults.limit, defaults.maxLimit)
   const offset = offsetInput ?? 0
   return { take: limit, skip: offset, limit, offset }
+}
+
+function percentile(values: number[], p: number) {
+  if (!values.length) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))
+  return sorted[idx]
+}
+
+const routePerfStats = new Map<string, { count: number, samples: number[] }>()
+
+function recordRoutePerf(routeKey: string, durationMs: number) {
+  let stat = routePerfStats.get(routeKey)
+  if (!stat) {
+    stat = { count: 0, samples: [] }
+    routePerfStats.set(routeKey, stat)
+  }
+
+  stat.count += 1
+  stat.samples.push(durationMs)
+  if (stat.samples.length > PERF_SAMPLE_WINDOW) stat.samples.shift()
+
+  if (stat.count % PERF_LOG_EVERY === 0) {
+    const sampleCount = stat.samples.length
+    const sum = stat.samples.reduce((acc, ms) => acc + ms, 0)
+    const avg = sampleCount ? sum / sampleCount : 0
+    const p95 = percentile(stat.samples, 0.95)
+    const p99 = percentile(stat.samples, 0.99)
+    console.log('[perf.route]', {
+      route: routeKey,
+      sampleCount,
+      p95Ms: Number(p95.toFixed(1)),
+      p99Ms: Number(p99.toFixed(1)),
+      avgMs: Number(avg.toFixed(1)),
+    })
+  }
 }
 
 // --- Auth helpers ---
