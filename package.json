@@ -11,6 +11,7 @@
     "prisma:push": "prisma db push",
     "prisma:push:accept-loss": "prisma db push --accept-data-loss",
     "prisma:studio": "prisma studio",
+    "perf:explain": "bash scripts/perf-explain.sh",
     "migrate:sqlite-to-postgres": "node scripts/migrate-sqlite-to-postgres.mjs",
     "backfill:user-ownership": "node scripts/backfill-user-ownership.mjs"
   },
