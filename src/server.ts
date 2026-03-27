@@ -1200,8 +1200,7 @@ async function sendPlayerAccountInviteEmail(params: {
 }) {
   if (!transporter) return
 
-  const acceptPath = process.env.INVITE_ACCEPT_PATH || '/invite/accept'
-  const inviteUrl = `${APP_BASE_URL.replace(/\/+$/, '')}${acceptPath}?token=${encodeURIComponent(params.token)}`
+  const inviteUrl = buildAccountInviteUrl(params.token)
   const displayName = (params.playerName || '').trim()
   const greeting = displayName ? `Bonjour ${displayName},` : 'Bonjour,'
 
@@ -1218,6 +1217,11 @@ async function sendPlayerAccountInviteEmail(params: {
   } catch (e) {
     console.warn('[players invite] email failed:', e)
   }
+}
+
+function buildAccountInviteUrl(token: string) {
+  const acceptPath = process.env.INVITE_ACCEPT_PATH || '/invite/accept'
+  return `${APP_BASE_URL.replace(/\/+$/, '')}${acceptPath}?token=${encodeURIComponent(token)}`
 }
 
 // --- Routes ---
@@ -2576,6 +2580,9 @@ app.get('/me', async (req: any, res, next) => {
     return res.json({
       id: null,
       email: null,
+      firstName: null,
+      lastName: null,
+      phone: null,
       isPremium: false,
       planningCount: 0,
       anonymous: true,
@@ -2593,6 +2600,9 @@ app.get('/me', async (req: any, res, next) => {
   res.json({
     id: user.id,
     email: user.email,
+    firstName: user.firstName ?? null,
+    lastName: user.lastName ?? null,
+    phone: user.phone ?? null,
     isPremium: user.isPremium,
     planningCount,
     role: user.role,
@@ -2600,6 +2610,54 @@ app.get('/me', async (req: any, res, next) => {
     teamId: user.teamId,
     managedTeamIds: user.managedTeamIds
   })
+})
+
+app.put('/me/profile', authMiddleware, async (req: any, res) => {
+  const schema = z.object({
+    firstName: z.string().trim().min(1).max(80).optional(),
+    lastName: z.string().trim().min(1).max(80).optional(),
+    phone: z.string().trim().min(3).max(32).nullable().optional(),
+    email: z.string().trim().email().optional(),
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const patch: any = {}
+  if (parsed.data.firstName !== undefined) patch.firstName = parsed.data.firstName
+  if (parsed.data.lastName !== undefined) patch.lastName = parsed.data.lastName
+  if (parsed.data.phone !== undefined) patch.phone = parsed.data.phone
+  if (parsed.data.email !== undefined) patch.email = normEmail(parsed.data.email)
+
+  if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'No profile fields provided' })
+
+  if (patch.email) {
+    const existing = await prisma.user.findUnique({
+      where: { email: patch.email },
+      select: { id: true }
+    })
+    if (existing && existing.id !== req.auth.id) {
+      return res.status(409).json({ error: 'Email already in use' })
+    }
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: req.auth.id },
+    data: patch,
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      phone: true,
+      isPremium: true,
+      role: true,
+      clubId: true,
+      teamId: true,
+      managedTeamIds: true,
+    }
+  })
+
+  res.json(updated)
 })
 
 app.put('/me/team', authMiddleware, async (req: any, res) => {
@@ -3885,12 +3943,53 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
     expiresAt: invitation.expiresAt,
   })
 
+  const inviteUrl = buildAccountInviteUrl(invitation.token)
+
   return res.json({
     status: 'PENDING',
     invitationId: invitation.id,
     sentAt: invitation.updatedAt.toISOString(),
     expiresAt: invitation.expiresAt ? invitation.expiresAt.toISOString() : null,
+    inviteUrl,
   })
+})
+
+app.get('/players/:id/invite/qr', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const { id } = req.params
+  const player = await playerFindFirstForUser(prisma, req.auth, {
+    where: { id },
+    select: {
+      id: true,
+      userId: true,
+      clubId: true,
+      teamId: true,
+    }
+  })
+  if (!player) return res.status(404).json({ error: 'Player not found' })
+
+  const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player)
+  if (snapshot.status !== 'PENDING' || !snapshot.invitationId) {
+    return res.status(404).json({ error: 'No active invitation for this player' })
+  }
+
+  const invitation = await prisma.accountInvite.findUnique({
+    where: { id: snapshot.invitationId },
+    select: {
+      id: true,
+      token: true,
+      status: true,
+      expiresAt: true,
+    }
+  })
+  if (!invitation || invitation.status !== 'PENDING' || invitation.expiresAt < new Date()) {
+    return res.status(404).json({ error: 'No active invitation for this player' })
+  }
+
+  const inviteUrl = buildAccountInviteUrl(invitation.token)
+  const png = await QRCode.toBuffer(inviteUrl, { width: 512 })
+  res.setHeader('Cache-Control', 'no-store')
+  res.type('image/png').send(png)
 })
 
 // --- Public endpoint to accept invite and set player_token cookie ---
