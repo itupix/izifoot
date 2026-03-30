@@ -35,6 +35,9 @@ model User {
   trainingDrills          TrainingDrill[]
   diagrams                Diagram[]
   trainingRoleAssignments TrainingRoleAssignment[]
+  sentTeamMessages        TeamMessage[]
+  teamMessageLikes        TeamMessageLike[]
+  teamMessageReads        TeamMessageRead[]
 }
 
 enum UserRole {
@@ -69,8 +72,51 @@ model Team {
   createdAt DateTime @default(now())
   users     User[]
   tactics   Tactic[]
+  messages  TeamMessage[]
+  messageReads TeamMessageRead[]
 
   @@unique([clubId, name])
+}
+
+model TeamMessage {
+  id           String            @id @default(cuid())
+  clubId       String
+  teamId       String
+  team         Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  authorUserId String
+  author       User              @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+  content      String
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  likes        TeamMessageLike[]
+
+  @@index([teamId, createdAt(sort: Desc)])
+  @@index([clubId, teamId, createdAt(sort: Desc)])
+}
+
+model TeamMessageLike {
+  id        String      @id @default(cuid())
+  messageId String
+  message   TeamMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+
+  @@unique([messageId, userId])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model TeamMessageRead {
+  id         String   @id @default(cuid())
+  teamId     String
+  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lastReadAt DateTime
+  updatedAt  DateTime @updatedAt
+
+  @@unique([teamId, userId])
+  @@index([userId, teamId])
 }
 
 model AccountInvite {

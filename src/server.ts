@@ -552,6 +552,128 @@ async function resolveTeamForWrite(auth: any, requestedTeamId?: string | null) {
   throw err
 }
 
+const teamMessageCreateBodySchema = z.object({
+  content: z.string().trim().min(1).max(2000),
+  teamId: z.string().trim().min(1).optional(),
+})
+
+async function resolveReadableTeamForMessaging(auth: any, requestedTeamId?: string | null) {
+  if (!auth?.clubId) {
+    const err: any = new Error('No club attached to account')
+    err.code = 'NO_CLUB'
+    throw err
+  }
+
+  const readableTeamIds = getReadableTeamIds(auth)
+  const requested = (requestedTeamId || '').trim() || null
+
+  if (requested) {
+    const canRead = auth.role === 'DIRECTION' && !auth.teamId
+      ? true
+      : readableTeamIds.includes(requested)
+    if (!canRead) {
+      const err: any = new Error('Forbidden team scope')
+      err.code = 'TEAM_FORBIDDEN'
+      throw err
+    }
+    const team = await prisma.team.findFirst({
+      where: { id: requested, clubId: auth.clubId },
+      select: { id: true, clubId: true },
+    })
+    if (!team) {
+      const err: any = new Error('Team not found in club')
+      err.code = 'TEAM_FORBIDDEN'
+      throw err
+    }
+    return team
+  }
+
+  if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
+    const activeTeamId = getActiveTeamIdForAuth(auth)
+    if (!activeTeamId) {
+      const err: any = new Error('Active team selection is required')
+      err.code = 'TEAM_REQUIRED'
+      throw err
+    }
+    const team = await prisma.team.findFirst({
+      where: { id: activeTeamId, clubId: auth.clubId },
+      select: { id: true, clubId: true },
+    })
+    if (!team) {
+      const err: any = new Error('Team not found in club')
+      err.code = 'TEAM_FORBIDDEN'
+      throw err
+    }
+    return team
+  }
+
+  if (readableTeamIds.length !== 1) {
+    const err: any = new Error('Readable team scope missing')
+    err.code = 'TEAM_REQUIRED'
+    throw err
+  }
+
+  const team = await prisma.team.findFirst({
+    where: { id: readableTeamIds[0], clubId: auth.clubId },
+    select: { id: true, clubId: true },
+  })
+  if (!team) {
+    const err: any = new Error('Team not found in club')
+    err.code = 'TEAM_FORBIDDEN'
+    throw err
+  }
+  return team
+}
+
+async function assertCanReadTeamOrThrow(auth: any, teamId: string, clubId: string) {
+  if (!auth?.clubId || auth.clubId !== clubId) {
+    const err: any = new Error('Forbidden team scope')
+    err.code = 'TEAM_FORBIDDEN'
+    throw err
+  }
+  if (auth.role === 'DIRECTION' && !auth.teamId) return
+
+  const readableTeamIds = getReadableTeamIds(auth)
+  if (!readableTeamIds.includes(teamId)) {
+    const err: any = new Error('Forbidden team scope')
+    err.code = 'TEAM_FORBIDDEN'
+    throw err
+  }
+}
+
+async function computeUnreadTeamMessagesCount(auth: any): Promise<number> {
+  if (!auth?.id || !auth?.clubId) return 0
+
+  const teamIds = auth.role === 'DIRECTION' && !auth.teamId
+    ? (await prisma.team.findMany({
+      where: { clubId: auth.clubId },
+      select: { id: true },
+    })).map((row) => row.id)
+    : getReadableTeamIds(auth)
+
+  if (!teamIds.length) return 0
+
+  const reads = await prisma.teamMessageRead.findMany({
+    where: { userId: auth.id, teamId: { in: teamIds } },
+    select: { teamId: true, lastReadAt: true },
+  })
+  const readByTeamId = new Map(reads.map((row) => [row.teamId, row.lastReadAt]))
+
+  let count = 0
+  for (const teamId of teamIds) {
+    const lastReadAt = readByTeamId.get(teamId)
+    count += await prisma.teamMessage.count({
+      where: {
+        clubId: auth.clubId,
+        teamId,
+        authorUserId: { not: auth.id },
+        ...(lastReadAt ? { createdAt: { gt: lastReadAt } } : {}),
+      },
+    })
+  }
+  return count
+}
+
 function normalizeScopeInput(scopeOrUserId: any) {
   if (scopeOrUserId && typeof scopeOrUserId === 'object' && 'role' in scopeOrUserId) return scopeOrUserId
   if (typeof scopeOrUserId === 'string') return { id: scopeOrUserId, role: 'DIRECTION' }
@@ -6390,6 +6512,185 @@ app.delete('/diagrams/:id', authMiddleware, async (req: any, res) => {
     console.error('[DELETE /diagrams/:id] failed', e)
     return res.status(500).json({ error: 'Failed to delete diagram' })
   }
+})
+
+app.get('/team-messages/unread-count', authMiddleware, async (req: any, res) => {
+  const count = await computeUnreadTeamMessagesCount(req.auth)
+  return res.json({ count })
+})
+
+app.get('/team-messages', authMiddleware, async (req: any, res) => {
+  const queryParsed = z.object({
+    teamId: z.string().trim().min(1).optional(),
+    limit: z.coerce.number().int().min(1).max(100).optional(),
+    offset: z.coerce.number().int().min(0).optional(),
+  }).safeParse(req.query)
+  if (!queryParsed.success) {
+    return res.status(400).json({ error: queryParsed.error.issues[0]?.message || queryParsed.error.flatten() })
+  }
+
+  let team: { id: string, clubId: string }
+  try {
+    team = await resolveReadableTeamForMessaging(req.auth, queryParsed.data.teamId)
+  } catch (e: any) {
+    if (e?.code === 'TEAM_REQUIRED') return res.status(400).json({ error: e.message })
+    if (e?.code === 'TEAM_FORBIDDEN') return res.status(403).json({ error: e.message })
+    return res.status(400).json({ error: e.message || 'Invalid team scope' })
+  }
+
+  const pagination = readPagination(queryParsed.data, { limit: 30, maxLimit: 100 })
+  const items = await prisma.teamMessage.findMany({
+    where: { clubId: team.clubId, teamId: team.id },
+    include: {
+      author: {
+        select: { id: true, firstName: true, lastName: true, role: true },
+      },
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: pagination.limit,
+    skip: pagination.offset,
+  })
+
+  const messageIds = items.map((item) => item.id)
+  const [likes, likedByMeRows] = await Promise.all([
+    messageIds.length
+      ? prisma.teamMessageLike.findMany({
+        where: { messageId: { in: messageIds } },
+        select: { messageId: true },
+      })
+      : Promise.resolve([] as Array<{ messageId: string }>),
+    messageIds.length
+      ? prisma.teamMessageLike.findMany({
+        where: { messageId: { in: messageIds }, userId: req.auth.id },
+        select: { messageId: true },
+      })
+      : Promise.resolve([] as Array<{ messageId: string }>),
+  ])
+
+  const likesCountByMessageId = new Map<string, number>()
+  for (const like of likes) likesCountByMessageId.set(like.messageId, (likesCountByMessageId.get(like.messageId) || 0) + 1)
+  const likedByMeSet = new Set(likedByMeRows.map((row) => row.messageId))
+
+  if (req.auth?.id) {
+    const now = new Date()
+    await prisma.teamMessageRead.upsert({
+      where: { teamId_userId: { teamId: team.id, userId: req.auth.id } },
+      create: {
+        teamId: team.id,
+        userId: req.auth.id,
+        lastReadAt: now,
+      },
+      update: { lastReadAt: now },
+    })
+  }
+
+  return res.json({
+    items: items.map((item) => ({
+      id: item.id,
+      teamId: item.teamId,
+      clubId: item.clubId,
+      content: item.content,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      author: item.author ? {
+        id: item.author.id,
+        firstName: item.author.firstName || null,
+        lastName: item.author.lastName || null,
+        role: item.author.role,
+      } : null,
+      likesCount: likesCountByMessageId.get(item.id) || 0,
+      likedByMe: likedByMeSet.has(item.id),
+    })),
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: items.length },
+  })
+})
+
+app.post('/team-messages', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  const parsed = teamMessageCreateBodySchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || parsed.error.flatten() })
+
+  let team: { id: string, clubId: string }
+  try {
+    team = await resolveTeamForWrite(req.auth, parsed.data.teamId || undefined)
+  } catch (e: any) {
+    if (e?.code === 'TEAM_FORBIDDEN') return res.status(403).json({ error: e.message })
+    return res.status(400).json({ error: e.message || 'Invalid team scope' })
+  }
+
+  const created = await prisma.teamMessage.create({
+    data: {
+      clubId: team.clubId,
+      teamId: team.id,
+      authorUserId: req.auth.id,
+      content: parsed.data.content,
+    },
+    include: {
+      author: {
+        select: { id: true, firstName: true, lastName: true, role: true },
+      },
+    },
+  })
+
+  return res.status(201).json({
+    id: created.id,
+    teamId: created.teamId,
+    clubId: created.clubId,
+    content: created.content,
+    createdAt: created.createdAt,
+    updatedAt: created.updatedAt,
+    author: created.author ? {
+      id: created.author.id,
+      firstName: created.author.firstName || null,
+      lastName: created.author.lastName || null,
+      role: created.author.role,
+    } : null,
+    likesCount: 0,
+    likedByMe: false,
+  })
+})
+
+app.post('/team-messages/:id/reactions/like', authMiddleware, async (req: any, res) => {
+  const message = await prisma.teamMessage.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, teamId: true, clubId: true },
+  })
+  if (!message) return res.status(404).json({ error: 'Message not found' })
+
+  try {
+    await assertCanReadTeamOrThrow(req.auth, message.teamId, message.clubId)
+  } catch (e: any) {
+    return res.status(403).json({ error: e.message || 'Forbidden team scope' })
+  }
+
+  await prisma.teamMessageLike.upsert({
+    where: { messageId_userId: { messageId: message.id, userId: req.auth.id } },
+    create: {
+      messageId: message.id,
+      userId: req.auth.id,
+    },
+    update: {},
+  })
+  const likesCount = await prisma.teamMessageLike.count({ where: { messageId: message.id } })
+  return res.json({ ok: true, likesCount, likedByMe: true })
+})
+
+app.delete('/team-messages/:id/reactions/like', authMiddleware, async (req: any, res) => {
+  const message = await prisma.teamMessage.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, teamId: true, clubId: true },
+  })
+  if (!message) return res.status(404).json({ error: 'Message not found' })
+
+  try {
+    await assertCanReadTeamOrThrow(req.auth, message.teamId, message.clubId)
+  } catch (e: any) {
+    return res.status(403).json({ error: e.message || 'Forbidden team scope' })
+  }
+
+  await prisma.teamMessageLike.deleteMany({ where: { messageId: message.id, userId: req.auth.id } })
+  const likesCount = await prisma.teamMessageLike.count({ where: { messageId: message.id } })
+  return res.json({ ok: true, likesCount, likedByMe: false })
 })
 
 app.get('/tactics', authMiddleware, async (req: any, res) => {
