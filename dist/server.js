@@ -3882,8 +3882,9 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: 'Staff account must be attached to a club' });
     }
     const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(player, req.auth.clubId);
+    const inviteRole = (0, player_account_role_1.resolvePlayerAccountInviteRole)(Boolean(player?.is_child));
     const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player);
-    if (snapshot.status === 'ACCEPTED') {
+    if (inviteRole === 'PLAYER' && snapshot.status === 'ACCEPTED') {
         return res.status(409).json({ error: 'Compte déjà activé' });
     }
     const existingUser = await prisma.user.findUnique({
@@ -3896,57 +3897,117 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     const expiresAt = (0, date_fns_1.addDays)(new Date(), parsed.data.expiresInDays ?? 7);
     const inviteToken = (0, nanoid_1.nanoid)(48);
     const playerFullName = [player.first_name, player.last_name].filter(Boolean).join(' ').trim() || player.name || null;
-    const inviteRole = (0, player_account_role_1.resolvePlayerAccountInviteRole)(Boolean(player?.is_child));
     const inviteFirstName = inviteRole === 'PARENT'
         ? ((player.parent_first_name || '').trim() || player.first_name || null)
         : (player.first_name || null);
     const inviteLastName = inviteRole === 'PARENT'
         ? ((player.parent_last_name || '').trim() || player.last_name || null)
         : (player.last_name || null);
-    const invitation = snapshot.status === 'PENDING' && snapshot.invitationId
-        ? await prisma.accountInvite.update({
-            where: { id: snapshot.invitationId },
-            data: {
-                email: playerEmail,
-                firstName: inviteFirstName,
-                lastName: inviteLastName,
-                token: inviteToken,
-                role: inviteRole,
-                teamId: player.teamId ?? null,
-                ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
-                invitedByUserId: req.auth.id,
-                status: 'PENDING',
-                expiresAt,
-            },
-            select: {
-                id: true,
-                token: true,
-                updatedAt: true,
-                expiresAt: true,
-            }
-        })
-        : await prisma.accountInvite.create({
-            data: {
-                email: playerEmail,
-                firstName: inviteFirstName,
-                lastName: inviteLastName,
-                token: inviteToken,
-                role: inviteRole,
+    const parentPendingInvite = inviteRole === 'PARENT'
+        ? await prisma.accountInvite.findFirst({
+            where: {
                 clubId: req.auth.clubId,
-                invitedByUserId: req.auth.id,
-                teamId: player.teamId ?? null,
-                managedTeamIds: [],
-                ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
-                linkedPlayerUserId: linkedPlayerAccountUser?.id ?? null,
-                expiresAt,
+                email: playerEmail,
+                role: 'PARENT',
+                status: 'PENDING',
+                expiresAt: { gte: new Date() },
+                ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID
+                    ? { linkedPlayerId: player.id }
+                    : (linkedPlayerAccountUser?.id ? { linkedPlayerUserId: linkedPlayerAccountUser.id } : {})),
             },
-            select: {
-                id: true,
-                token: true,
-                updatedAt: true,
-                expiresAt: true,
-            }
-        });
+            select: { id: true },
+            orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
+        })
+        : null;
+    const invitation = inviteRole === 'PARENT'
+        ? (parentPendingInvite
+            ? await prisma.accountInvite.update({
+                where: { id: parentPendingInvite.id },
+                data: {
+                    email: playerEmail,
+                    firstName: inviteFirstName,
+                    lastName: inviteLastName,
+                    token: inviteToken,
+                    role: inviteRole,
+                    teamId: player.teamId ?? null,
+                    ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
+                    invitedByUserId: req.auth.id,
+                    status: 'PENDING',
+                    expiresAt,
+                },
+                select: {
+                    id: true,
+                    token: true,
+                    updatedAt: true,
+                    expiresAt: true,
+                }
+            })
+            : await prisma.accountInvite.create({
+                data: {
+                    email: playerEmail,
+                    firstName: inviteFirstName,
+                    lastName: inviteLastName,
+                    token: inviteToken,
+                    role: inviteRole,
+                    clubId: req.auth.clubId,
+                    invitedByUserId: req.auth.id,
+                    teamId: player.teamId ?? null,
+                    managedTeamIds: [],
+                    ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
+                    linkedPlayerUserId: linkedPlayerAccountUser?.id ?? null,
+                    expiresAt,
+                },
+                select: {
+                    id: true,
+                    token: true,
+                    updatedAt: true,
+                    expiresAt: true,
+                }
+            }))
+        : (snapshot.status === 'PENDING' && snapshot.invitationId
+            ? await prisma.accountInvite.update({
+                where: { id: snapshot.invitationId },
+                data: {
+                    email: playerEmail,
+                    firstName: inviteFirstName,
+                    lastName: inviteLastName,
+                    token: inviteToken,
+                    role: inviteRole,
+                    teamId: player.teamId ?? null,
+                    ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
+                    invitedByUserId: req.auth.id,
+                    status: 'PENDING',
+                    expiresAt,
+                },
+                select: {
+                    id: true,
+                    token: true,
+                    updatedAt: true,
+                    expiresAt: true,
+                }
+            })
+            : await prisma.accountInvite.create({
+                data: {
+                    email: playerEmail,
+                    firstName: inviteFirstName,
+                    lastName: inviteLastName,
+                    token: inviteToken,
+                    role: inviteRole,
+                    clubId: req.auth.clubId,
+                    invitedByUserId: req.auth.id,
+                    teamId: player.teamId ?? null,
+                    managedTeamIds: [],
+                    ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
+                    linkedPlayerUserId: linkedPlayerAccountUser?.id ?? null,
+                    expiresAt,
+                },
+                select: {
+                    id: true,
+                    token: true,
+                    updatedAt: true,
+                    expiresAt: true,
+                }
+            }));
     await sendPlayerAccountInviteEmail({
         playerName: playerFullName,
         inviteEmail: playerEmail,
