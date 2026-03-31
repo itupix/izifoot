@@ -2542,13 +2542,35 @@ app.get('/me', async (req, res, next) => {
     const user = await prisma.user.findUnique({ where: { id: req.userId }, include: { plannings: true } });
     if (!user)
         return res.status(404).json({ error: 'User not found' });
+    const parentAcceptedInvite = user.role === 'PARENT'
+        ? await prisma.accountInvite.findFirst({
+            where: {
+                role: 'PARENT',
+                status: 'ACCEPTED',
+                ...(user.clubId ? { clubId: user.clubId } : {}),
+                OR: [
+                    { userId: user.id },
+                    { email: user.email },
+                ],
+            },
+            select: {
+                firstName: true,
+                lastName: true,
+                phone: true,
+            },
+            orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }]
+        })
+        : null;
+    const resolvedFirstName = firstPresentString(user.firstName, parentAcceptedInvite?.firstName);
+    const resolvedLastName = firstPresentString(user.lastName, parentAcceptedInvite?.lastName);
+    const resolvedPhone = firstPresentString(user.phone, parentAcceptedInvite?.phone);
     const planningCount = user.plannings.length;
     res.json({
         id: user.id,
         email: user.email,
-        firstName: user.firstName ?? null,
-        lastName: user.lastName ?? null,
-        phone: user.phone ?? null,
+        firstName: resolvedFirstName ?? null,
+        lastName: resolvedLastName ?? null,
+        phone: resolvedPhone ?? null,
         isPremium: user.isPremium,
         planningCount,
         role: user.role,
