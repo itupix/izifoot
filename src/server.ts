@@ -2614,7 +2614,9 @@ app.get('/auth/invitations/:token', async (req, res) => {
 app.post('/auth/invitations/accept', async (req, res) => {
   const schema = z.object({
     token: z.string().min(8),
-    password: z.string().min(6)
+    password: z.string().min(6),
+    firstName: z.string().trim().min(1).max(80).optional(),
+    lastName: z.string().trim().min(1).max(80).optional(),
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
@@ -2633,6 +2635,15 @@ app.post('/auth/invitations/accept', async (req, res) => {
   const inviteLinkedPlayerId = ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? (invite as any)?.linkedPlayerId ?? null : null
   const existing = await prisma.user.findUnique({ where: { email: invite.email } })
   if (existing) return res.status(409).json({ error: 'Email already in use' })
+  const acceptedFirstName = invite.role === 'PARENT'
+    ? ((parsed.data.firstName || '').trim() || null)
+    : (invite.firstName || null)
+  const acceptedLastName = invite.role === 'PARENT'
+    ? ((parsed.data.lastName || '').trim() || null)
+    : (invite.lastName || null)
+  if (invite.role === 'PARENT' && (!acceptedFirstName || !acceptedLastName)) {
+    return res.status(400).json({ error: 'Parent firstName and lastName are required' })
+  }
 
   const passwordHash = await bcrypt.hash(parsed.data.password, 10)
   const { user } = await prisma.$transaction(async (tx) => {
@@ -2640,8 +2651,8 @@ app.post('/auth/invitations/accept', async (req, res) => {
       data: {
         email: invite.email,
         passwordHash,
-        firstName: invite.firstName,
-        lastName: invite.lastName,
+        firstName: acceptedFirstName,
+        lastName: acceptedLastName,
         phone: invite.phone,
         role: invite.role,
         clubId: invite.clubId,
@@ -2664,6 +2675,8 @@ app.post('/auth/invitations/accept', async (req, res) => {
     await tx.accountInvite.update({
       where: { id: invite.id },
       data: {
+        firstName: acceptedFirstName,
+        lastName: acceptedLastName,
         status: 'ACCEPTED',
         acceptedAt: new Date(),
         userId: createdUser.id
@@ -3910,6 +3923,15 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
         acceptedAt: true,
         updatedAt: true,
         createdAt: true,
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+          }
+        }
       },
       orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }, { createdAt: 'desc' }]
     })
@@ -3924,10 +3946,10 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
     status: string | null
   }> = parentInvites
     .map((invite) => ({
-      firstName: (invite.firstName || '').trim() || null,
-      lastName: (invite.lastName || '').trim() || null,
-      email: (invite.email || '').trim() || null,
-      phone: (invite.phone || '').trim() || null,
+      firstName: (invite.user?.firstName || invite.firstName || '').trim() || null,
+      lastName: (invite.user?.lastName || invite.lastName || '').trim() || null,
+      email: (invite.user?.email || invite.email || '').trim() || null,
+      phone: (invite.user?.phone || invite.phone || '').trim() || null,
       status: invite.status,
     }))
     .filter((parent) => {
@@ -4197,10 +4219,10 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   const inviteToken = nanoid(48)
   const playerFullName = [player.first_name, player.last_name].filter(Boolean).join(' ').trim() || player.name || null
   const inviteFirstName = inviteRole === 'PARENT'
-    ? ((player.parent_first_name || '').trim() || player.first_name || null)
+    ? null
     : (player.first_name || null)
   const inviteLastName = inviteRole === 'PARENT'
-    ? ((player.parent_last_name || '').trim() || player.last_name || null)
+    ? null
     : (player.last_name || null)
 
   const parentPendingInvite = inviteRole === 'PARENT'
