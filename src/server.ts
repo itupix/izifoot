@@ -2895,7 +2895,12 @@ app.put('/me/profile', authMiddleware, async (req: any, res) => {
     phone: z.string().trim().min(3).max(32).nullable().optional(),
     email: z.string().trim().email().optional(),
   })
-  const parsed = schema.safeParse(req.body)
+  const parsed = schema.safeParse({
+    firstName: req.body?.firstName ?? req.body?.first_name ?? req.body?.prenom,
+    lastName: req.body?.lastName ?? req.body?.last_name ?? req.body?.nom,
+    phone: req.body?.phone ?? req.body?.telephone,
+    email: req.body?.email ?? req.body?.mail,
+  })
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
   const patch: any = {}
@@ -2932,6 +2937,28 @@ app.put('/me/profile', authMiddleware, async (req: any, res) => {
       managedTeamIds: true,
     }
   })
+
+  if (updated.role === 'PARENT') {
+    const invitePatch: any = {}
+    if (parsed.data.firstName !== undefined) invitePatch.firstName = parsed.data.firstName
+    if (parsed.data.lastName !== undefined) invitePatch.lastName = parsed.data.lastName
+    if (parsed.data.phone !== undefined) invitePatch.phone = parsed.data.phone
+
+    if (Object.keys(invitePatch).length > 0) {
+      await prisma.accountInvite.updateMany({
+        where: {
+          role: 'PARENT',
+          status: 'ACCEPTED',
+          ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+          OR: [
+            { userId: req.auth.id },
+            { email: updated.email },
+          ],
+        },
+        data: invitePatch,
+      })
+    }
+  }
 
   res.json(updated)
 })
