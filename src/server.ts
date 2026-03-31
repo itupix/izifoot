@@ -2736,13 +2736,53 @@ app.get('/me', async (req: any, res, next) => {
 }, authMiddleware, async (req: any, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.userId }, include: { plannings: true } })
   if (!user) return res.status(404).json({ error: 'User not found' })
+  const needsParentProfileHydration = user.role === 'PARENT' && (!user.firstName || !user.lastName || !user.phone)
+  let parentAcceptedInvite: { firstName: string | null, lastName: string | null, phone: string | null } | null = null
+
+  if (needsParentProfileHydration) {
+    parentAcceptedInvite = await prisma.accountInvite.findFirst({
+      where: {
+        role: 'PARENT',
+        status: 'ACCEPTED',
+        ...(user.clubId ? { clubId: user.clubId } : {}),
+        OR: [
+          { userId: user.id },
+          { email: user.email },
+        ],
+      },
+      select: {
+        firstName: true,
+        lastName: true,
+        phone: true,
+      },
+      orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }]
+    })
+  }
+
+  const resolvedFirstName = firstPresentString(user.firstName, parentAcceptedInvite?.firstName)
+  const resolvedLastName = firstPresentString(user.lastName, parentAcceptedInvite?.lastName)
+  const resolvedPhone = firstPresentString(user.phone, parentAcceptedInvite?.phone)
+
+  if (needsParentProfileHydration && parentAcceptedInvite && (resolvedFirstName || resolvedLastName || resolvedPhone)) {
+    const profilePatch: any = {}
+    if (!user.firstName && resolvedFirstName) profilePatch.firstName = resolvedFirstName
+    if (!user.lastName && resolvedLastName) profilePatch.lastName = resolvedLastName
+    if (!user.phone && resolvedPhone) profilePatch.phone = resolvedPhone
+
+    if (Object.keys(profilePatch).length > 0) {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: profilePatch,
+      })
+    }
+  }
   const planningCount = user.plannings.length
   res.json({
     id: user.id,
     email: user.email,
-    firstName: user.firstName ?? null,
-    lastName: user.lastName ?? null,
-    phone: user.phone ?? null,
+    firstName: resolvedFirstName ?? null,
+    lastName: resolvedLastName ?? null,
+    phone: resolvedPhone ?? null,
     isPremium: user.isPremium,
     planningCount,
     role: user.role,
