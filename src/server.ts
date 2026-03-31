@@ -4095,12 +4095,19 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
     return res.json({ ok: true, presentUrl, absentUrl })
   }
 
-  const playerEmail = inviteEmail ? normEmail(inviteEmail) : null
-  if (!playerEmail) {
-    return res.status(400).json({ error: inviteRole === 'PARENT' ? 'Parent email is required to send account invitation' : 'Player email is required to send account invitation' })
+  const contactEmail = inviteEmail ? normEmail(inviteEmail) : null
+  if (inviteRole === 'PARENT' && !contactEmail && !invitePhone) {
+    return res.status(400).json({ error: 'Parent email or phone is required to send account invitation' })
   }
-  if (inviteRole === 'PARENT' && !invitePhone) {
-    return res.status(400).json({ error: 'Parent phone is required to send account invitation' })
+  if (inviteRole !== 'PARENT' && !contactEmail) {
+    return res.status(400).json({ error: 'Player email is required to send account invitation' })
+  }
+  let invitationEmail = contactEmail
+  if (!invitationEmail && inviteRole === 'PARENT') {
+    invitationEmail = `parent+${nanoid(10)}@invite.izifoot.local`
+  }
+  if (!invitationEmail) {
+    return res.status(400).json({ error: 'Player email is required to send account invitation' })
   }
   if (!req.auth?.clubId) {
     return res.status(400).json({ error: 'Staff account must be attached to a club' })
@@ -4112,12 +4119,14 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
     return res.status(409).json({ error: 'Compte déjà activé' })
   }
 
-  const existingUser = await prisma.user.findUnique({
-    where: { email: playerEmail },
-    select: { id: true }
-  })
-  if (existingUser && existingUser.id !== linkedPlayerAccountUser?.id) {
-    return res.status(409).json({ error: 'Email already in use by another account' })
+  if (contactEmail) {
+    const existingUser = await prisma.user.findUnique({
+      where: { email: contactEmail },
+      select: { id: true }
+    })
+    if (existingUser && existingUser.id !== linkedPlayerAccountUser?.id) {
+      return res.status(409).json({ error: 'Email already in use by another account' })
+    }
   }
 
   const expiresAt = addDays(new Date(), parsed.data.expiresInDays ?? 7)
@@ -4134,7 +4143,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
     ? await prisma.accountInvite.findFirst({
       where: {
         clubId: req.auth.clubId,
-        email: playerEmail,
+        ...(contactEmail ? { email: contactEmail } : (invitePhone ? { phone: invitePhone } : {})),
         role: 'PARENT',
         status: 'PENDING',
         expiresAt: { gte: new Date() },
@@ -4152,12 +4161,12 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
       ? await prisma.accountInvite.update({
         where: { id: parentPendingInvite.id },
         data: {
-          email: playerEmail,
+          email: invitationEmail,
           firstName: inviteFirstName,
-        lastName: inviteLastName,
-        phone: invitePhone,
-        token: inviteToken,
-        role: inviteRole,
+          lastName: inviteLastName,
+          phone: invitePhone,
+          token: inviteToken,
+          role: inviteRole,
           teamId: player.teamId ?? null,
           ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
           invitedByUserId: req.auth.id,
@@ -4173,12 +4182,12 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
       })
       : await prisma.accountInvite.create({
         data: {
-          email: playerEmail,
+          email: invitationEmail,
           firstName: inviteFirstName,
-        lastName: inviteLastName,
-        phone: invitePhone,
-        token: inviteToken,
-        role: inviteRole,
+          lastName: inviteLastName,
+          phone: invitePhone,
+          token: inviteToken,
+          role: inviteRole,
           clubId: req.auth.clubId,
           invitedByUserId: req.auth.id,
           teamId: player.teamId ?? null,
@@ -4198,12 +4207,12 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
       ? await prisma.accountInvite.update({
         where: { id: snapshot.invitationId },
         data: {
-          email: playerEmail,
+          email: invitationEmail,
           firstName: inviteFirstName,
-        lastName: inviteLastName,
-        phone: invitePhone,
-        token: inviteToken,
-        role: inviteRole,
+          lastName: inviteLastName,
+          phone: invitePhone,
+          token: inviteToken,
+          role: inviteRole,
           teamId: player.teamId ?? null,
           ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
           invitedByUserId: req.auth.id,
@@ -4219,12 +4228,12 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
       })
       : await prisma.accountInvite.create({
         data: {
-          email: playerEmail,
+          email: invitationEmail,
           firstName: inviteFirstName,
-        lastName: inviteLastName,
-        phone: invitePhone,
-        token: inviteToken,
-        role: inviteRole,
+          lastName: inviteLastName,
+          phone: invitePhone,
+          token: inviteToken,
+          role: inviteRole,
           clubId: req.auth.clubId,
           invitedByUserId: req.auth.id,
           teamId: player.teamId ?? null,
@@ -4241,12 +4250,14 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
         }
       }))
 
-  await sendPlayerAccountInviteEmail({
-    playerName: playerFullName,
-    inviteEmail: playerEmail,
-    token: invitation.token,
-    expiresAt: invitation.expiresAt,
-  })
+  if (contactEmail) {
+    await sendPlayerAccountInviteEmail({
+      playerName: playerFullName,
+      inviteEmail: contactEmail,
+      token: invitation.token,
+      expiresAt: invitation.expiresAt,
+    })
+  }
 
   const inviteUrl = buildAccountInviteUrl(invitation.token)
 
