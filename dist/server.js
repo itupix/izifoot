@@ -2587,8 +2587,7 @@ app.get('/me/child', authMiddleware, async (req, res) => {
                 name: true,
                 first_name: true,
                 last_name: true,
-                email: true,
-                phone: true,
+                licence: true,
                 teamId: true,
                 is_child: true,
                 parent_first_name: true,
@@ -2617,8 +2616,7 @@ app.get('/me/child', authMiddleware, async (req, res) => {
                 name: true,
                 first_name: true,
                 last_name: true,
-                email: true,
-                phone: true,
+                licence: true,
                 teamId: true,
                 is_child: true,
                 parent_first_name: true,
@@ -2637,7 +2635,12 @@ app.get('/me/child', authMiddleware, async (req, res) => {
     });
     const normalizedPlayer = (0, player_payload_1.normalizePlayerForApi)(linkedPlayer);
     return res.json({
-        ...normalizedPlayer,
+        id: normalizedPlayer.id,
+        name: normalizedPlayer.name ?? null,
+        firstName: normalizedPlayer.firstName ?? null,
+        lastName: normalizedPlayer.lastName ?? null,
+        licence: normalizedPlayer.licence ?? null,
+        teamId: normalizedPlayer.teamId ?? null,
         teamName: linkedTeam?.name ?? null,
     });
 });
