@@ -205,17 +205,21 @@ function normalizePlayerForApi(player) {
     const firstName = firstPresentString(player?.firstName, player?.first_name, split.firstName);
     const lastName = firstPresentString(player?.lastName, player?.last_name, split.lastName);
     const isChild = parseBooleanLike(player?.isChild ?? player?.is_child ?? player?.enfant) || false;
-    const parentFirstName = firstPresentString(player?.parentFirstName, player?.parent_first_name);
-    const parentLastName = firstPresentString(player?.parentLastName, player?.parent_last_name);
     const licence = firstPresentString(player?.licence, player?.license);
+    const email = isChild ? null : firstPresentString(player?.email);
+    const phone = isChild ? null : firstPresentString(player?.phone, player?.telephone);
     return {
         ...player,
         firstName,
         lastName,
         name: composeFullName(firstName, lastName, player?.name),
         isChild,
-        parentFirstName: isChild ? parentFirstName : null,
-        parentLastName: isChild ? parentLastName : null,
+        email: email ?? null,
+        phone: phone ?? null,
+        parentFirstName: null,
+        parentLastName: null,
+        parent_first_name: null,
+        parent_last_name: null,
         licence: licence ?? null,
     };
 }
