@@ -3939,6 +3939,8 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
 
   const seenParentKeys = new Set<string>()
   const parentContacts: Array<{
+    parentId: string | null
+    parentUserId: string | null
     firstName: string | null
     lastName: string | null
     email: string | null
@@ -3946,6 +3948,8 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
     status: string | null
   }> = parentInvites
     .map((invite) => ({
+      parentId: invite.id,
+      parentUserId: invite.user?.id ?? null,
       firstName: (invite.user?.firstName || invite.firstName || '').trim() || null,
       lastName: (invite.user?.lastName || invite.lastName || '').trim() || null,
       email: (invite.user?.email || invite.email || '').trim() || null,
@@ -3964,6 +3968,8 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
   const legacyParentLastName = (normalizedPlayer.parentLastName || normalizedPlayer.parent_last_name || '').trim()
   if ((legacyParentFirstName || legacyParentLastName) && !parentContacts.length) {
     parentContacts.push({
+      parentId: null,
+      parentUserId: null,
       firstName: legacyParentFirstName || null,
       lastName: legacyParentLastName || null,
       email: null,
@@ -4015,6 +4021,91 @@ app.get('/api/players/:id/invitation-status', authMiddleware, async (req: any, r
     invitationId: scopedPlayer.snapshot.invitationId,
   })
 })
+
+const deletePlayerParentHandler = async (req: any, res: any) => {
+  if (!ensureStaff(req, res)) return
+  const { id, parentId } = req.params
+  if (!parentId) return res.status(400).json({ error: 'Parent id is required' })
+
+  const scopedPlayer = await getPlayerInvitationStatusForRequest(req, id)
+  if (!scopedPlayer) return res.status(404).json({ error: 'Player not found' })
+
+  const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(
+    scopedPlayer.player,
+    scopedPlayer.player.clubId || req.auth?.clubId || null
+  )
+  const playerLinkWhere = getPlayerInviteLinkWhere(scopedPlayer.player, linkedPlayerAccountUser?.id)
+  if (!playerLinkWhere) return res.status(404).json({ error: 'Parent link not found' })
+
+  const targetInvite = await prisma.accountInvite.findFirst({
+    where: {
+      id: parentId,
+      ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+      role: 'PARENT',
+      ...playerLinkWhere,
+    },
+    select: {
+      id: true,
+      userId: true,
+      email: true,
+      phone: true,
+    }
+  })
+  if (!targetInvite) return res.status(404).json({ error: 'Parent not found for this player' })
+
+  const identityWhere = targetInvite.userId
+    ? { userId: targetInvite.userId }
+    : (targetInvite.email
+      ? { email: targetInvite.email }
+      : (targetInvite.phone ? { phone: targetInvite.phone } : { id: targetInvite.id }))
+
+  const unlinkInviteData: any = {
+    linkedPlayerUserId: null,
+  }
+  if (ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID) unlinkInviteData.linkedPlayerId = null
+
+  await prisma.$transaction(async (tx) => {
+    await tx.accountInvite.updateMany({
+      where: {
+        ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+        role: 'PARENT',
+        ...playerLinkWhere,
+        ...identityWhere,
+        status: 'PENDING',
+      },
+      data: {
+        ...unlinkInviteData,
+        status: 'CANCELLED',
+      }
+    })
+
+    await tx.accountInvite.updateMany({
+      where: {
+        ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+        role: 'PARENT',
+        ...playerLinkWhere,
+        ...identityWhere,
+        status: { in: ['ACCEPTED', 'EXPIRED', 'CANCELLED'] },
+      },
+      data: unlinkInviteData
+    })
+
+    if (targetInvite.userId && linkedPlayerAccountUser?.id) {
+      await tx.user.updateMany({
+        where: {
+          id: targetInvite.userId,
+          role: 'PARENT',
+          linkedPlayerUserId: linkedPlayerAccountUser.id,
+        },
+        data: { linkedPlayerUserId: null }
+      })
+    }
+  })
+
+  return res.json({ ok: true })
+}
+app.delete('/players/:id/parents/:parentId', authMiddleware, deletePlayerParentHandler)
+app.delete('/api/players/:id/parents/:parentId', authMiddleware, deletePlayerParentHandler)
 
 app.post('/players', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
