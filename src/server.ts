@@ -40,6 +40,7 @@ import { matchEventCreateSchema } from './match-events'
 import { validateMatchUpdatePayloadForTeamFormat } from './match-update-validation'
 import { normalizePlayerForApi, parsePlayerCreatePayload, parsePlayerUpdatePayload } from './player-payload'
 import { resolvePlayerInvitationStatus } from './player-invitation-status'
+import { resolvePlayerAccountInviteLookupRoles, resolvePlayerAccountInviteRole } from './player-account-role'
 import { matchCreatePayloadSchema, matchScorerPayloadSchema } from './match-payload'
 import {
   countPlayedMatchesExcludingCancelled,
@@ -1228,7 +1229,9 @@ async function resolveLinkedPlayerAccountUser(player: any, clubId: string | null
     select: { id: true, role: true, clubId: true }
   })
   if (!linkedUser) return null
-  if (linkedUser.role !== 'PLAYER') return null
+  const allowedRoles = resolvePlayerAccountInviteLookupRoles(Boolean(player?.is_child))
+  const linkedUserRole = linkedUser.role === 'PLAYER' || linkedUser.role === 'PARENT' ? linkedUser.role : null
+  if (!linkedUserRole || !allowedRoles.includes(linkedUserRole)) return null
   if (clubId && linkedUser.clubId && linkedUser.clubId !== clubId) return null
   return linkedUser
 }
@@ -1248,11 +1251,13 @@ async function getPlayerInvitationStatusSnapshot(auth: any, player: any) {
     })
   }
 
+  const inviteRoles = resolvePlayerAccountInviteLookupRoles(Boolean(player?.is_child))
+
   if (clubId) {
     await prisma.accountInvite.updateMany({
       where: {
         clubId,
-        role: 'PLAYER',
+        role: { in: inviteRoles },
         ...linkWhere,
         status: 'PENDING',
         expiresAt: { lt: now }
@@ -1265,7 +1270,7 @@ async function getPlayerInvitationStatusSnapshot(auth: any, player: any) {
     prisma.accountInvite.findFirst({
       where: {
         ...(clubId ? { clubId } : {}),
-        role: 'PLAYER',
+        role: { in: inviteRoles },
         ...linkWhere,
         status: 'PENDING',
         expiresAt: { gte: now }
@@ -1280,7 +1285,7 @@ async function getPlayerInvitationStatusSnapshot(auth: any, player: any) {
     prisma.accountInvite.findFirst({
       where: {
         ...(clubId ? { clubId } : {}),
-        role: 'PLAYER',
+        role: { in: inviteRoles },
         ...linkWhere,
         status: 'ACCEPTED'
       },
@@ -3945,6 +3950,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
       first_name: true,
       last_name: true,
       name: true,
+      is_child: true,
     }
   })
   if (!player) return res.status(404).json({ error: 'Player not found' })
@@ -4013,6 +4019,8 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   const inviteToken = nanoid(48)
   const playerFullName = [player.first_name, player.last_name].filter(Boolean).join(' ').trim() || player.name || null
 
+  const inviteRole = resolvePlayerAccountInviteRole(Boolean(player?.is_child))
+
   const invitation = snapshot.status === 'PENDING' && snapshot.invitationId
     ? await prisma.accountInvite.update({
       where: { id: snapshot.invitationId },
@@ -4021,7 +4029,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
         firstName: player.first_name,
         lastName: player.last_name,
         token: inviteToken,
-        role: 'PLAYER',
+        role: inviteRole,
         teamId: player.teamId ?? null,
         ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
         invitedByUserId: req.auth.id,
@@ -4041,7 +4049,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
         firstName: player.first_name,
         lastName: player.last_name,
         token: inviteToken,
-        role: 'PLAYER',
+        role: inviteRole,
         clubId: req.auth.clubId,
         invitedByUserId: req.auth.id,
         teamId: player.teamId ?? null,

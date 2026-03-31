@@ -31,6 +31,7 @@ const match_events_1 = require("./match-events");
 const match_update_validation_1 = require("./match-update-validation");
 const player_payload_1 = require("./player-payload");
 const player_invitation_status_1 = require("./player-invitation-status");
+const player_account_role_1 = require("./player-account-role");
 const match_payload_1 = require("./match-payload");
 const match_status_1 = require("./match-status");
 const matchday_absence_1 = require("./matchday-absence");
@@ -40,6 +41,9 @@ const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
 const IS_PROD = process.env.NODE_ENV === 'production';
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS || 700);
+const PERF_SAMPLE_WINDOW = Number(process.env.PERF_SAMPLE_WINDOW || 200);
+const PERF_LOG_EVERY = Number(process.env.PERF_LOG_EVERY || 100);
 const DEFAULT_DEV_APP_BASE_URL = 'http://localhost:5173';
 const APP_BASE_URL = process.env.APP_BASE_URL || DEFAULT_DEV_APP_BASE_URL;
 const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`;
@@ -151,6 +155,25 @@ app.use((0, cors_1.default)({
 app.use(express_1.default.json({ limit: '1mb' }));
 app.use((0, cookie_parser_1.default)());
 app.use((0, morgan_1.default)('dev'));
+app.use((req, res, next) => {
+    const startedAt = process.hrtime.bigint();
+    res.on('finish', () => {
+        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1000000;
+        const path = String(req.originalUrl || req.url || '').split('?')[0] || '/';
+        const routeKey = `${req.method} ${path}`;
+        recordRoutePerf(routeKey, durationMs);
+        if (durationMs >= SLOW_REQUEST_MS || res.statusCode >= 500) {
+            const level = res.statusCode >= 500 ? 'error' : 'warn';
+            console[level]('[perf.request]', {
+                method: req.method,
+                path,
+                status: res.statusCode,
+                durationMs: Number(durationMs.toFixed(1)),
+            });
+        }
+    });
+    next();
+});
 // Anti-cache pour l'API (évite les 304 Not Modified sur GET protégés)
 app.set('etag', false);
 app.use((req, res, next) => {
@@ -203,6 +226,39 @@ function readPagination(query, defaults = { limit: 50, maxLimit: 200 }) {
     const limit = Math.min(limitInput ?? defaults.limit, defaults.maxLimit);
     const offset = offsetInput ?? 0;
     return { take: limit, skip: offset, limit, offset };
+}
+function percentile(values, p) {
+    if (!values.length)
+        return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
+    return sorted[idx];
+}
+const routePerfStats = new Map();
+function recordRoutePerf(routeKey, durationMs) {
+    let stat = routePerfStats.get(routeKey);
+    if (!stat) {
+        stat = { count: 0, samples: [] };
+        routePerfStats.set(routeKey, stat);
+    }
+    stat.count += 1;
+    stat.samples.push(durationMs);
+    if (stat.samples.length > PERF_SAMPLE_WINDOW)
+        stat.samples.shift();
+    if (stat.count % PERF_LOG_EVERY === 0) {
+        const sampleCount = stat.samples.length;
+        const sum = stat.samples.reduce((acc, ms) => acc + ms, 0);
+        const avg = sampleCount ? sum / sampleCount : 0;
+        const p95 = percentile(stat.samples, 0.95);
+        const p99 = percentile(stat.samples, 0.99);
+        console.log('[perf.route]', {
+            route: routeKey,
+            sampleCount,
+            p95Ms: Number(p95.toFixed(1)),
+            p99Ms: Number(p99.toFixed(1)),
+            avgMs: Number(avg.toFixed(1)),
+        });
+    }
 }
 // --- Auth helpers ---
 function signToken(userId) {
@@ -445,6 +501,117 @@ async function resolveTeamForWrite(auth, requestedTeamId) {
     const err = new Error('Write access forbidden');
     err.code = 'WRITE_FORBIDDEN';
     throw err;
+}
+const teamMessageCreateBodySchema = zod_1.z.object({
+    content: zod_1.z.string().trim().min(1).max(2000),
+    teamId: zod_1.z.string().trim().min(1).optional(),
+});
+async function resolveReadableTeamForMessaging(auth, requestedTeamId) {
+    if (!auth?.clubId) {
+        const err = new Error('No club attached to account');
+        err.code = 'NO_CLUB';
+        throw err;
+    }
+    const readableTeamIds = getReadableTeamIds(auth);
+    const requested = (requestedTeamId || '').trim() || null;
+    if (requested) {
+        const canRead = auth.role === 'DIRECTION' && !auth.teamId
+            ? true
+            : readableTeamIds.includes(requested);
+        if (!canRead) {
+            const err = new Error('Forbidden team scope');
+            err.code = 'TEAM_FORBIDDEN';
+            throw err;
+        }
+        const team = await prisma.team.findFirst({
+            where: { id: requested, clubId: auth.clubId },
+            select: { id: true, clubId: true },
+        });
+        if (!team) {
+            const err = new Error('Team not found in club');
+            err.code = 'TEAM_FORBIDDEN';
+            throw err;
+        }
+        return team;
+    }
+    if (auth.role === 'DIRECTION' || auth.role === 'COACH') {
+        const activeTeamId = getActiveTeamIdForAuth(auth);
+        if (!activeTeamId) {
+            const err = new Error('Active team selection is required');
+            err.code = 'TEAM_REQUIRED';
+            throw err;
+        }
+        const team = await prisma.team.findFirst({
+            where: { id: activeTeamId, clubId: auth.clubId },
+            select: { id: true, clubId: true },
+        });
+        if (!team) {
+            const err = new Error('Team not found in club');
+            err.code = 'TEAM_FORBIDDEN';
+            throw err;
+        }
+        return team;
+    }
+    if (readableTeamIds.length !== 1) {
+        const err = new Error('Readable team scope missing');
+        err.code = 'TEAM_REQUIRED';
+        throw err;
+    }
+    const team = await prisma.team.findFirst({
+        where: { id: readableTeamIds[0], clubId: auth.clubId },
+        select: { id: true, clubId: true },
+    });
+    if (!team) {
+        const err = new Error('Team not found in club');
+        err.code = 'TEAM_FORBIDDEN';
+        throw err;
+    }
+    return team;
+}
+async function assertCanReadTeamOrThrow(auth, teamId, clubId) {
+    if (!auth?.clubId || auth.clubId !== clubId) {
+        const err = new Error('Forbidden team scope');
+        err.code = 'TEAM_FORBIDDEN';
+        throw err;
+    }
+    if (auth.role === 'DIRECTION' && !auth.teamId)
+        return;
+    const readableTeamIds = getReadableTeamIds(auth);
+    if (!readableTeamIds.includes(teamId)) {
+        const err = new Error('Forbidden team scope');
+        err.code = 'TEAM_FORBIDDEN';
+        throw err;
+    }
+}
+async function computeUnreadTeamMessagesCount(auth) {
+    if (!auth?.id || !auth?.clubId)
+        return 0;
+    const teamIds = auth.role === 'DIRECTION' && !auth.teamId
+        ? (await prisma.team.findMany({
+            where: { clubId: auth.clubId },
+            select: { id: true },
+        })).map((row) => row.id)
+        : getReadableTeamIds(auth);
+    if (!teamIds.length)
+        return 0;
+    const reads = await prisma.teamMessageRead.findMany({
+        where: { userId: auth.id, teamId: { in: teamIds } },
+        select: { teamId: true, lastReadAt: true },
+    });
+    const readByTeamId = new Map(reads.map((row) => [row.teamId, row.lastReadAt]));
+    let count = 0;
+    for (const teamId of teamIds) {
+        const lastReadAt = readByTeamId.get(teamId);
+        count += await prisma.teamMessage.count({
+            where: {
+                clubId: auth.clubId,
+                teamId,
+                authorUserId: { not: auth.id },
+                ...(lastReadAt ? { createdAt: { gt: lastReadAt } } : {}),
+            },
+        });
+    }
+    return count;
 }
 function normalizeScopeInput(scopeOrUserId) {
     if (scopeOrUserId && typeof scopeOrUserId === 'object' && 'role' in scopeOrUserId)
@@ -960,7 +1127,9 @@ async function resolveLinkedPlayerAccountUser(player, clubId) {
     });
     if (!linkedUser)
         return null;
-    if (linkedUser.role !== 'PLAYER')
+    const allowedRoles = (0, player_account_role_1.resolvePlayerAccountInviteLookupRoles)(Boolean(player?.is_child));
+    const linkedUserRole = linkedUser.role === 'PLAYER' || linkedUser.role === 'PARENT' ? linkedUser.role : null;
+    if (!linkedUserRole || !allowedRoles.includes(linkedUserRole))
         return null;
     if (clubId && linkedUser.clubId && linkedUser.clubId !== clubId)
         return null;
@@ -979,11 +1148,12 @@ async function getPlayerInvitationStatusSnapshot(auth, player) {
             latestAcceptedInvite: null,
         });
     }
+    const inviteRoles = (0, player_account_role_1.resolvePlayerAccountInviteLookupRoles)(Boolean(player?.is_child));
     if (clubId) {
         await prisma.accountInvite.updateMany({
             where: {
                 clubId,
-                role: 'PLAYER',
+                role: { in: inviteRoles },
                 ...linkWhere,
                 status: 'PENDING',
                 expiresAt: { lt: now }
@@ -995,7 +1165,7 @@ async function getPlayerInvitationStatusSnapshot(auth, player) {
         prisma.accountInvite.findFirst({
             where: {
                 ...(clubId ? { clubId } : {}),
-                role: 'PLAYER',
+                role: { in: inviteRoles },
                 ...linkWhere,
                 status: 'PENDING',
                 expiresAt: { gte: now }
@@ -1010,7 +1180,7 @@ async function getPlayerInvitationStatusSnapshot(auth, player) {
         prisma.accountInvite.findFirst({
             where: {
                 ...(clubId ? { clubId } : {}),
-                role: 'PLAYER',
+                role: { in: inviteRoles },
                 ...linkWhere,
                 status: 'ACCEPTED'
             },
@@ -1044,8 +1214,7 @@ async function getPlayerInvitationStatusForRequest(req, playerId) {
 async function sendPlayerAccountInviteEmail(params) {
     if (!transporter)
         return;
-    const acceptPath = process.env.INVITE_ACCEPT_PATH || '/invite/accept';
-    const inviteUrl = `${APP_BASE_URL.replace(/\/+$/, '')}${acceptPath}?token=${encodeURIComponent(params.token)}`;
+    const inviteUrl = buildAccountInviteUrl(params.token);
     const displayName = (params.playerName || '').trim();
     const greeting = displayName ? `Bonjour ${displayName},` : 'Bonjour,';
     try {
@@ -1062,6 +1231,10 @@ async function sendPlayerAccountInviteEmail(params) {
     catch (e) {
         console.warn('[players invite] email failed:', e);
     }
+}
+function buildAccountInviteUrl(token) {
+    const acceptPath = process.env.INVITE_ACCEPT_PATH || '/invite/accept';
+    return `${APP_BASE_URL.replace(/\/+$/, '')}${acceptPath}?token=${encodeURIComponent(token)}`;
 }
 // --- Routes ---
 function safeParseJSON(s) {
@@ -2339,6 +2512,9 @@ app.get('/me', async (req, res, next) => {
         return res.json({
             id: null,
             email: null,
+            firstName: null,
+            lastName: null,
+            phone: null,
             isPremium: false,
             planningCount: 0,
             anonymous: true,
@@ -2357,6 +2533,9 @@ app.get('/me', async (req, res, next) => {
     res.json({
         id: user.id,
         email: user.email,
+        firstName: user.firstName ?? null,
+        lastName: user.lastName ?? null,
+        phone: user.phone ?? null,
         isPremium: user.isPremium,
         planningCount,
         role: user.role,
@@ -2364,6 +2543,54 @@ app.get('/me', async (req, res, next) => {
         teamId: user.teamId,
         managedTeamIds: user.managedTeamIds
     });
+});
+app.put('/me/profile', authMiddleware, async (req, res) => {
+    const schema = zod_1.z.object({
+        firstName: zod_1.z.string().trim().min(1).max(80).optional(),
+        lastName: zod_1.z.string().trim().min(1).max(80).optional(),
+        phone: zod_1.z.string().trim().min(3).max(32).nullable().optional(),
+        email: zod_1.z.string().trim().email().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const patch = {};
+    if (parsed.data.firstName !== undefined)
+        patch.firstName = parsed.data.firstName;
+    if (parsed.data.lastName !== undefined)
+        patch.lastName = parsed.data.lastName;
+    if (parsed.data.phone !== undefined)
+        patch.phone = parsed.data.phone;
+    if (parsed.data.email !== undefined)
+        patch.email = normEmail(parsed.data.email);
+    if (Object.keys(patch).length === 0)
+        return res.status(400).json({ error: 'No profile fields provided' });
+    if (patch.email) {
+        const existing = await prisma.user.findUnique({
+            where: { email: patch.email },
+            select: { id: true }
+        });
+        if (existing && existing.id !== req.auth.id) {
+            return res.status(409).json({ error: 'Email already in use' });
+        }
+    }
+    const updated = await prisma.user.update({
+        where: { id: req.auth.id },
+        data: patch,
+        select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            isPremium: true,
+            role: true,
+            clubId: true,
+            teamId: true,
+            managedTeamIds: true,
+        }
+    });
+    res.json(updated);
 });
 app.put('/me/team', authMiddleware, async (req, res) => {
     if (!req.auth?.clubId)
@@ -3520,6 +3747,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
             first_name: true,
             last_name: true,
             name: true,
+            is_child: true,
         }
     });
     if (!player)
@@ -3582,6 +3810,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     const expiresAt = (0, date_fns_1.addDays)(new Date(), parsed.data.expiresInDays ?? 7);
     const inviteToken = (0, nanoid_1.nanoid)(48);
     const playerFullName = [player.first_name, player.last_name].filter(Boolean).join(' ').trim() || player.name || null;
+    const inviteRole = (0, player_account_role_1.resolvePlayerAccountInviteRole)(Boolean(player?.is_child));
     const invitation = snapshot.status === 'PENDING' && snapshot.invitationId
         ? await prisma.accountInvite.update({
             where: { id: snapshot.invitationId },
@@ -3590,7 +3819,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
                 firstName: player.first_name,
                 lastName: player.last_name,
                 token: inviteToken,
-                role: 'PLAYER',
+                role: inviteRole,
                 teamId: player.teamId ?? null,
                 ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
                 invitedByUserId: req.auth.id,
@@ -3610,7 +3839,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
                 firstName: player.first_name,
                 lastName: player.last_name,
                 token: inviteToken,
-                role: 'PLAYER',
+                role: inviteRole,
                 clubId: req.auth.clubId,
                 invitedByUserId: req.auth.id,
                 teamId: player.teamId ?? null,
@@ -3632,12 +3861,50 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
         token: invitation.token,
         expiresAt: invitation.expiresAt,
     });
+    const inviteUrl = buildAccountInviteUrl(invitation.token);
     return res.json({
         status: 'PENDING',
         invitationId: invitation.id,
         sentAt: invitation.updatedAt.toISOString(),
         expiresAt: invitation.expiresAt ? invitation.expiresAt.toISOString() : null,
+        inviteUrl,
     });
+});
+app.get('/players/:id/invite/qr', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const { id } = req.params;
+    const player = await playerFindFirstForUser(prisma, req.auth, {
+        where: { id },
+        select: {
+            id: true,
+            userId: true,
+            clubId: true,
+            teamId: true,
+        }
+    });
+    if (!player)
+        return res.status(404).json({ error: 'Player not found' });
+    const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player);
+    if (snapshot.status !== 'PENDING' || !snapshot.invitationId) {
+        return res.status(404).json({ error: 'No active invitation for this player' });
+    }
+    const invitation = await prisma.accountInvite.findUnique({
+        where: { id: snapshot.invitationId },
+        select: {
+            id: true,
+            token: true,
+            status: true,
+            expiresAt: true,
+        }
+    });
+    if (!invitation || invitation.status !== 'PENDING' || invitation.expiresAt < new Date()) {
+        return res.status(404).json({ error: 'No active invitation for this player' });
+    }
+    const inviteUrl = buildAccountInviteUrl(invitation.token);
+    const png = await qrcode_1.default.toBuffer(inviteUrl, { width: 512 });
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('image/png').send(png);
 });
 // --- Public endpoint to accept invite and set player_token cookie ---
 app.get('/player/accept', async (req, res) => {
@@ -6035,6 +6302,179 @@ app.delete('/diagrams/:id', authMiddleware, async (req, res) => {
         console.error('[DELETE /diagrams/:id] failed', e);
         return res.status(500).json({ error: 'Failed to delete diagram' });
     }
+});
+app.get('/team-messages/unread-count', authMiddleware, async (req, res) => {
+    const count = await computeUnreadTeamMessagesCount(req.auth);
+    return res.json({ count });
+});
+app.get('/team-messages', authMiddleware, async (req, res) => {
+    const queryParsed = zod_1.z.object({
+        teamId: zod_1.z.string().trim().min(1).optional(),
+        limit: zod_1.z.coerce.number().int().min(1).max(100).optional(),
+        offset: zod_1.z.coerce.number().int().min(0).optional(),
+    }).safeParse(req.query);
+    if (!queryParsed.success) {
+        return res.status(400).json({ error: queryParsed.error.issues[0]?.message || queryParsed.error.flatten() });
+    }
+    let team;
+    try {
+        team = await resolveReadableTeamForMessaging(req.auth, queryParsed.data.teamId);
+    }
+    catch (e) {
+        if (e?.code === 'TEAM_REQUIRED')
+            return res.status(400).json({ error: e.message });
+        if (e?.code === 'TEAM_FORBIDDEN')
+            return res.status(403).json({ error: e.message });
+        return res.status(400).json({ error: e.message || 'Invalid team scope' });
+    }
+    const pagination = readPagination(queryParsed.data, { limit: 30, maxLimit: 100 });
+    const items = await prisma.teamMessage.findMany({
+        where: { clubId: team.clubId, teamId: team.id },
+        include: {
+            author: {
+                select: { id: true, firstName: true, lastName: true, role: true },
+            },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: pagination.limit,
+        skip: pagination.offset,
+    });
+    const messageIds = items.map((item) => item.id);
+    const [likes, likedByMeRows] = await Promise.all([
+        messageIds.length
+            ? prisma.teamMessageLike.findMany({
+                where: { messageId: { in: messageIds } },
+                select: { messageId: true },
+            })
+            : Promise.resolve([]),
+        messageIds.length
+            ? prisma.teamMessageLike.findMany({
+                where: { messageId: { in: messageIds }, userId: req.auth.id },
+                select: { messageId: true },
+            })
+            : Promise.resolve([]),
+    ]);
+    const likesCountByMessageId = new Map();
+    for (const like of likes)
+        likesCountByMessageId.set(like.messageId, (likesCountByMessageId.get(like.messageId) || 0) + 1);
+    const likedByMeSet = new Set(likedByMeRows.map((row) => row.messageId));
+    if (req.auth?.id) {
+        const now = new Date();
+        await prisma.teamMessageRead.upsert({
+            where: { teamId_userId: { teamId: team.id, userId: req.auth.id } },
+            create: {
+                teamId: team.id,
+                userId: req.auth.id,
+                lastReadAt: now,
+            },
+            update: { lastReadAt: now },
+        });
+    }
+    return res.json({
+        items: items.map((item) => ({
+            id: item.id,
+            teamId: item.teamId,
+            clubId: item.clubId,
+            content: item.content,
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt,
+            author: item.author ? {
+                id: item.author.id,
+                firstName: item.author.firstName || null,
+                lastName: item.author.lastName || null,
+                role: item.author.role,
+            } : null,
+            likesCount: likesCountByMessageId.get(item.id) || 0,
+            likedByMe: likedByMeSet.has(item.id),
+        })),
+        pagination: { limit: pagination.limit, offset: pagination.offset, returned: items.length },
+    });
+});
+app.post('/team-messages', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    const parsed = teamMessageCreateBodySchema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.issues[0]?.message || parsed.error.flatten() });
+    let team;
+    try {
+        team = await resolveTeamForWrite(req.auth, parsed.data.teamId || undefined);
+    }
+    catch (e) {
+        if (e?.code === 'TEAM_FORBIDDEN')
+            return res.status(403).json({ error: e.message });
+        return res.status(400).json({ error: e.message || 'Invalid team scope' });
+    }
+    const created = await prisma.teamMessage.create({
+        data: {
+            clubId: team.clubId,
+            teamId: team.id,
+            authorUserId: req.auth.id,
+            content: parsed.data.content,
+        },
+        include: {
+            author: {
+                select: { id: true, firstName: true, lastName: true, role: true },
+            },
+        },
+    });
+    return res.status(201).json({
+        id: created.id,
+        teamId: created.teamId,
+        clubId: created.clubId,
+        content: created.content,
+        createdAt: created.createdAt,
+        updatedAt: created.updatedAt,
+        author: created.author ? {
+            id: created.author.id,
+            firstName: created.author.firstName || null,
+            lastName: created.author.lastName || null,
+            role: created.author.role,
+        } : null,
+        likesCount: 0,
+        likedByMe: false,
+    });
+});
+app.post('/team-messages/:id/reactions/like', authMiddleware, async (req, res) => {
+    const message = await prisma.teamMessage.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, teamId: true, clubId: true },
+    });
+    if (!message)
+        return res.status(404).json({ error: 'Message not found' });
+    try {
+        await assertCanReadTeamOrThrow(req.auth, message.teamId, message.clubId);
+    }
+    catch (e) {
+        return res.status(403).json({ error: e.message || 'Forbidden team scope' });
+    }
+    await prisma.teamMessageLike.upsert({
+        where: { messageId_userId: { messageId: message.id, userId: req.auth.id } },
+        create: {
+            messageId: message.id,
+            userId: req.auth.id,
+        },
+        update: {},
+    });
+    const likesCount = await prisma.teamMessageLike.count({ where: { messageId: message.id } });
+    return res.json({ ok: true, likesCount, likedByMe: true });
+});
+app.delete('/team-messages/:id/reactions/like', authMiddleware, async (req, res) => {
+    const message = await prisma.teamMessage.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, teamId: true, clubId: true },
+    });
+    if (!message)
+        return res.status(404).json({ error: 'Message not found' });
+    try {
+        await assertCanReadTeamOrThrow(req.auth, message.teamId, message.clubId);
+    }
+    catch (e) {
+        return res.status(403).json({ error: e.message || 'Forbidden team scope' });
+    }
+    await prisma.teamMessageLike.deleteMany({ where: { messageId: message.id, userId: req.auth.id } });
+    const likesCount = await prisma.teamMessageLike.count({ where: { messageId: message.id } });
+    return res.json({ ok: true, likesCount, likedByMe: false });
 });
 app.get('/tactics', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
