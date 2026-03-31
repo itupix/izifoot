@@ -58,8 +58,8 @@ function composeFullName(firstName, lastName, fallbackName) {
 const basePlayerSchema = zod_1.z.object({
     firstName: zod_1.z.string().min(1),
     lastName: zod_1.z.string().min(1),
-    email: zod_1.z.string().email(),
-    phone: zod_1.z.string().min(1),
+    email: zod_1.z.string(),
+    phone: zod_1.z.string(),
     primary_position: zod_1.z.string().min(1),
     secondary_position: zod_1.z.string().nullable(),
     licence: zod_1.z.string().nullable(),
@@ -93,10 +93,22 @@ function validatePlayerBusinessRules(payload) {
         if (!normalized.parentLastName) {
             throw new zod_1.z.ZodError([{ code: 'custom', path: ['parentLastName'], message: 'Required when isChild is true' }]);
         }
+        // Child profiles should not carry personal contact coordinates.
+        normalized.email = '';
+        normalized.phone = '';
     }
     else {
         normalized.parentFirstName = null;
         normalized.parentLastName = null;
+        if (!normalized.email) {
+            throw new zod_1.z.ZodError([{ code: 'custom', path: ['email'], message: 'Required when isChild is false' }]);
+        }
+        if (!zod_1.z.string().email().safeParse(normalized.email).success) {
+            throw new zod_1.z.ZodError([{ code: 'custom', path: ['email'], message: 'Invalid email' }]);
+        }
+        if (!normalized.phone) {
+            throw new zod_1.z.ZodError([{ code: 'custom', path: ['phone'], message: 'Required when isChild is false' }]);
+        }
     }
     return normalized;
 }

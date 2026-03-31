@@ -48,8 +48,8 @@ function composeFullName(firstName: string | null, lastName: string | null, fall
 const basePlayerSchema = z.object({
   firstName: z.string().min(1),
   lastName: z.string().min(1),
-  email: z.string().email(),
-  phone: z.string().min(1),
+  email: z.string(),
+  phone: z.string(),
   primary_position: z.string().min(1),
   secondary_position: z.string().nullable(),
   licence: z.string().nullable(),
@@ -88,9 +88,22 @@ function validatePlayerBusinessRules(payload: CanonicalPlayerPayload): Canonical
     if (!normalized.parentLastName) {
       throw new z.ZodError([{ code: 'custom', path: ['parentLastName'], message: 'Required when isChild is true' }])
     }
+    // Child profiles should not carry personal contact coordinates.
+    normalized.email = ''
+    normalized.phone = ''
   } else {
     normalized.parentFirstName = null
     normalized.parentLastName = null
+
+    if (!normalized.email) {
+      throw new z.ZodError([{ code: 'custom', path: ['email'], message: 'Required when isChild is false' }])
+    }
+    if (!z.string().email().safeParse(normalized.email).success) {
+      throw new z.ZodError([{ code: 'custom', path: ['email'], message: 'Invalid email' }])
+    }
+    if (!normalized.phone) {
+      throw new z.ZodError([{ code: 'custom', path: ['phone'], message: 'Required when isChild is false' }])
+    }
   }
 
   return normalized

@@ -3815,6 +3815,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         matchdayId: zod_1.z.string().optional(),
         email: zod_1.z.string().email().optional(),
+        phone: zod_1.z.string().trim().min(3).max(32).optional(),
         expiresInDays: zod_1.z.coerce.number().int().min(1).max(30).optional()
     });
     const parsed = schema.safeParse(req.body);
@@ -3838,7 +3839,13 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     });
     if (!player)
         return res.status(404).json({ error: 'Player not found' });
-    const inviteEmail = parsed.data.email || player.email || null;
+    const inviteRole = (0, player_account_role_1.resolvePlayerAccountInviteRole)(Boolean(player?.is_child));
+    const inviteEmail = inviteRole === 'PARENT'
+        ? (parsed.data.email || null)
+        : (parsed.data.email || player.email || null);
+    const invitePhone = inviteRole === 'PARENT'
+        ? ((parsed.data.phone || '').trim() || null)
+        : (player.phone || null);
     if (parsed.data.matchdayId) {
         const base = `${req.protocol}://${req.get('host')}`;
         const presentToken = signRsvpToken(id, parsed.data.matchdayId, 'present');
@@ -3876,13 +3883,15 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     }
     const playerEmail = inviteEmail ? normEmail(inviteEmail) : null;
     if (!playerEmail) {
-        return res.status(400).json({ error: 'Player email is required to send account invitation' });
+        return res.status(400).json({ error: inviteRole === 'PARENT' ? 'Parent email is required to send account invitation' : 'Player email is required to send account invitation' });
+    }
+    if (inviteRole === 'PARENT' && !invitePhone) {
+        return res.status(400).json({ error: 'Parent phone is required to send account invitation' });
     }
     if (!req.auth?.clubId) {
         return res.status(400).json({ error: 'Staff account must be attached to a club' });
     }
     const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(player, req.auth.clubId);
-    const inviteRole = (0, player_account_role_1.resolvePlayerAccountInviteRole)(Boolean(player?.is_child));
     const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player);
     if (inviteRole === 'PLAYER' && snapshot.status === 'ACCEPTED') {
         return res.status(409).json({ error: 'Compte déjà activé' });
@@ -3927,6 +3936,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
                     email: playerEmail,
                     firstName: inviteFirstName,
                     lastName: inviteLastName,
+                    phone: invitePhone,
                     token: inviteToken,
                     role: inviteRole,
                     teamId: player.teamId ?? null,
@@ -3947,6 +3957,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
                     email: playerEmail,
                     firstName: inviteFirstName,
                     lastName: inviteLastName,
+                    phone: invitePhone,
                     token: inviteToken,
                     role: inviteRole,
                     clubId: req.auth.clubId,
@@ -3971,6 +3982,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
                     email: playerEmail,
                     firstName: inviteFirstName,
                     lastName: inviteLastName,
+                    phone: invitePhone,
                     token: inviteToken,
                     role: inviteRole,
                     teamId: player.teamId ?? null,
@@ -3991,6 +4003,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
                     email: playerEmail,
                     firstName: inviteFirstName,
                     lastName: inviteLastName,
+                    phone: invitePhone,
                     token: inviteToken,
                     role: inviteRole,
                     clubId: req.auth.clubId,

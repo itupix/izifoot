@@ -4028,6 +4028,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     matchdayId: z.string().optional(),
     email: z.string().email().optional(),
+    phone: z.string().trim().min(3).max(32).optional(),
     expiresInDays: z.coerce.number().int().min(1).max(30).optional()
   })
   const parsed = schema.safeParse(req.body)
@@ -4049,7 +4050,13 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
     }
   })
   if (!player) return res.status(404).json({ error: 'Player not found' })
-  const inviteEmail = parsed.data.email || (player as any).email || null
+  const inviteRole = resolvePlayerAccountInviteRole(Boolean(player?.is_child))
+  const inviteEmail = inviteRole === 'PARENT'
+    ? (parsed.data.email || null)
+    : (parsed.data.email || (player as any).email || null)
+  const invitePhone = inviteRole === 'PARENT'
+    ? ((parsed.data.phone || '').trim() || null)
+    : ((player as any).phone || null)
 
   if (parsed.data.matchdayId) {
     const base = `${req.protocol}://${req.get('host')}`
@@ -4090,13 +4097,15 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
 
   const playerEmail = inviteEmail ? normEmail(inviteEmail) : null
   if (!playerEmail) {
-    return res.status(400).json({ error: 'Player email is required to send account invitation' })
+    return res.status(400).json({ error: inviteRole === 'PARENT' ? 'Parent email is required to send account invitation' : 'Player email is required to send account invitation' })
+  }
+  if (inviteRole === 'PARENT' && !invitePhone) {
+    return res.status(400).json({ error: 'Parent phone is required to send account invitation' })
   }
   if (!req.auth?.clubId) {
     return res.status(400).json({ error: 'Staff account must be attached to a club' })
   }
   const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(player, req.auth.clubId)
-  const inviteRole = resolvePlayerAccountInviteRole(Boolean(player?.is_child))
 
   const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player)
   if (inviteRole === 'PLAYER' && snapshot.status === 'ACCEPTED') {
@@ -4145,9 +4154,10 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
         data: {
           email: playerEmail,
           firstName: inviteFirstName,
-          lastName: inviteLastName,
-          token: inviteToken,
-          role: inviteRole,
+        lastName: inviteLastName,
+        phone: invitePhone,
+        token: inviteToken,
+        role: inviteRole,
           teamId: player.teamId ?? null,
           ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
           invitedByUserId: req.auth.id,
@@ -4165,9 +4175,10 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
         data: {
           email: playerEmail,
           firstName: inviteFirstName,
-          lastName: inviteLastName,
-          token: inviteToken,
-          role: inviteRole,
+        lastName: inviteLastName,
+        phone: invitePhone,
+        token: inviteToken,
+        role: inviteRole,
           clubId: req.auth.clubId,
           invitedByUserId: req.auth.id,
           teamId: player.teamId ?? null,
@@ -4189,9 +4200,10 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
         data: {
           email: playerEmail,
           firstName: inviteFirstName,
-          lastName: inviteLastName,
-          token: inviteToken,
-          role: inviteRole,
+        lastName: inviteLastName,
+        phone: invitePhone,
+        token: inviteToken,
+        role: inviteRole,
           teamId: player.teamId ?? null,
           ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID ? { linkedPlayerId: player.id } : {}),
           invitedByUserId: req.auth.id,
@@ -4209,9 +4221,10 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
         data: {
           email: playerEmail,
           firstName: inviteFirstName,
-          lastName: inviteLastName,
-          token: inviteToken,
-          role: inviteRole,
+        lastName: inviteLastName,
+        phone: invitePhone,
+        token: inviteToken,
+        role: inviteRole,
           clubId: req.auth.clubId,
           invitedByUserId: req.auth.id,
           teamId: player.teamId ?? null,
