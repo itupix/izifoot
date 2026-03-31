@@ -3887,8 +3887,72 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
   const scopedPlayer = await getPlayerInvitationStatusForRequest(req, id)
   if (!scopedPlayer) return res.status(404).json({ error: 'Player not found' })
   const normalizedPlayer = normalizePlayerForApi(scopedPlayer.player)
+  const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(
+    scopedPlayer.player,
+    scopedPlayer.player.clubId || req.auth?.clubId || null
+  )
+  const parentLinkWhere = getPlayerInviteLinkWhere(scopedPlayer.player, linkedPlayerAccountUser?.id)
+  const parentInvites = parentLinkWhere
+    ? await prisma.accountInvite.findMany({
+      where: {
+        ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+        role: 'PARENT',
+        status: { in: ['PENDING', 'ACCEPTED'] },
+        ...parentLinkWhere,
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        status: true,
+        acceptedAt: true,
+        updatedAt: true,
+        createdAt: true,
+      },
+      orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }, { createdAt: 'desc' }]
+    })
+    : []
+
+  const seenParentKeys = new Set<string>()
+  const parentContacts: Array<{
+    firstName: string | null
+    lastName: string | null
+    email: string | null
+    phone: string | null
+    status: string | null
+  }> = parentInvites
+    .map((invite) => ({
+      firstName: (invite.firstName || '').trim() || null,
+      lastName: (invite.lastName || '').trim() || null,
+      email: (invite.email || '').trim() || null,
+      phone: (invite.phone || '').trim() || null,
+      status: invite.status,
+    }))
+    .filter((parent) => {
+      const key = `${(parent.email || '').toLowerCase()}|${parent.phone || ''}|${(parent.firstName || '').toLowerCase()}|${(parent.lastName || '').toLowerCase()}`
+      if (!key.replace(/\|/g, '')) return false
+      if (seenParentKeys.has(key)) return false
+      seenParentKeys.add(key)
+      return true
+    })
+
+  const legacyParentFirstName = (normalizedPlayer.parentFirstName || normalizedPlayer.parent_first_name || '').trim()
+  const legacyParentLastName = (normalizedPlayer.parentLastName || normalizedPlayer.parent_last_name || '').trim()
+  if ((legacyParentFirstName || legacyParentLastName) && !parentContacts.length) {
+    parentContacts.push({
+      firstName: legacyParentFirstName || null,
+      lastName: legacyParentLastName || null,
+      email: null,
+      phone: null,
+      status: null,
+    })
+  }
+
   res.json({
     ...normalizedPlayer,
+    parentContacts,
     invitationStatus: scopedPlayer.snapshot.status,
     invitation: {
       status: scopedPlayer.snapshot.status,
