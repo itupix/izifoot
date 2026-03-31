@@ -2462,7 +2462,7 @@ app.post('/auth/invitations/accept', async (req, res) => {
                 linkedPlayerUserId: invite.linkedPlayerUserId
             }
         });
-        if (inviteLinkedPlayerId) {
+        if (inviteLinkedPlayerId && invite.role === 'PLAYER') {
             await tx.player.updateMany({
                 where: {
                     id: inviteLinkedPlayerId,
@@ -2547,34 +2547,72 @@ app.get('/me', async (req, res, next) => {
 app.get('/me/child', authMiddleware, async (req, res) => {
     if (req.auth?.role !== 'PARENT')
         return res.json(null);
-    const parentUser = await prisma.user.findUnique({
-        where: { id: req.auth.id },
-        select: { linkedPlayerUserId: true, clubId: true },
-    });
-    const candidateUserIds = [
-        parentUser?.linkedPlayerUserId ?? null,
-        req.auth.id,
-    ].filter((value, index, arr) => Boolean(value) && arr.indexOf(value) === index);
-    if (!candidateUserIds.length)
-        return res.json(null);
-    const linkedPlayer = await prisma.player.findFirst({
-        where: {
-            userId: { in: candidateUserIds },
-            ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
-        },
-        select: {
-            id: true,
-            name: true,
-            first_name: true,
-            last_name: true,
-            email: true,
-            phone: true,
-            teamId: true,
-            is_child: true,
-            parent_first_name: true,
-            parent_last_name: true,
-        }
-    });
+    let linkedPlayerId = null;
+    if (ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID) {
+        const acceptedInvite = await prisma.accountInvite.findFirst({
+            where: {
+                userId: req.auth.id,
+                role: 'PARENT',
+                status: 'ACCEPTED',
+                ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+                linkedPlayerId: { not: null },
+            },
+            select: { linkedPlayerId: true },
+            orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }],
+        });
+        linkedPlayerId = acceptedInvite?.linkedPlayerId ?? null;
+    }
+    let linkedPlayer = null;
+    if (linkedPlayerId) {
+        linkedPlayer = await prisma.player.findFirst({
+            where: {
+                id: linkedPlayerId,
+                ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+            },
+            select: {
+                id: true,
+                name: true,
+                first_name: true,
+                last_name: true,
+                email: true,
+                phone: true,
+                teamId: true,
+                is_child: true,
+                parent_first_name: true,
+                parent_last_name: true,
+            }
+        });
+    }
+    if (!linkedPlayer) {
+        const parentUser = await prisma.user.findUnique({
+            where: { id: req.auth.id },
+            select: { linkedPlayerUserId: true },
+        });
+        const candidateUserIds = [
+            parentUser?.linkedPlayerUserId ?? null,
+            req.auth.id,
+        ].filter((value, index, arr) => Boolean(value) && arr.indexOf(value) === index);
+        if (!candidateUserIds.length)
+            return res.json(null);
+        linkedPlayer = await prisma.player.findFirst({
+            where: {
+                userId: { in: candidateUserIds },
+                ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+            },
+            select: {
+                id: true,
+                name: true,
+                first_name: true,
+                last_name: true,
+                email: true,
+                phone: true,
+                teamId: true,
+                is_child: true,
+                parent_first_name: true,
+                parent_last_name: true,
+            }
+        });
+    }
     if (!linkedPlayer)
         return res.json(null);
     const linkedTeam = await prisma.team.findFirst({
@@ -3794,6 +3832,8 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
             last_name: true,
             name: true,
             is_child: true,
+            parent_first_name: true,
+            parent_last_name: true,
         }
     });
     if (!player)
@@ -3857,13 +3897,19 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     const inviteToken = (0, nanoid_1.nanoid)(48);
     const playerFullName = [player.first_name, player.last_name].filter(Boolean).join(' ').trim() || player.name || null;
     const inviteRole = (0, player_account_role_1.resolvePlayerAccountInviteRole)(Boolean(player?.is_child));
+    const inviteFirstName = inviteRole === 'PARENT'
+        ? ((player.parent_first_name || '').trim() || player.first_name || null)
+        : (player.first_name || null);
+    const inviteLastName = inviteRole === 'PARENT'
+        ? ((player.parent_last_name || '').trim() || player.last_name || null)
+        : (player.last_name || null);
     const invitation = snapshot.status === 'PENDING' && snapshot.invitationId
         ? await prisma.accountInvite.update({
             where: { id: snapshot.invitationId },
             data: {
                 email: playerEmail,
-                firstName: player.first_name,
-                lastName: player.last_name,
+                firstName: inviteFirstName,
+                lastName: inviteLastName,
                 token: inviteToken,
                 role: inviteRole,
                 teamId: player.teamId ?? null,
@@ -3882,8 +3928,8 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
         : await prisma.accountInvite.create({
             data: {
                 email: playerEmail,
-                firstName: player.first_name,
-                lastName: player.last_name,
+                firstName: inviteFirstName,
+                lastName: inviteLastName,
                 token: inviteToken,
                 role: inviteRole,
                 clubId: req.auth.clubId,
