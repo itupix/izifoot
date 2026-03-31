@@ -1,4 +1,4 @@
-UPDATE "player"
+UPDATE "Player"
 SET
   "email" = NULL,
   "phone" = NULL,
