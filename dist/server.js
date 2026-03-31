@@ -3735,19 +3735,6 @@ const getPlayerByIdHandler = async (req, res) => {
         seenParentKeys.add(key);
         return true;
     });
-    const legacyParentFirstName = (normalizedPlayer.parentFirstName || normalizedPlayer.parent_first_name || '').trim();
-    const legacyParentLastName = (normalizedPlayer.parentLastName || normalizedPlayer.parent_last_name || '').trim();
-    if ((legacyParentFirstName || legacyParentLastName) && !parentContacts.length) {
-        parentContacts.push({
-            parentId: null,
-            parentUserId: null,
-            firstName: legacyParentFirstName || null,
-            lastName: legacyParentLastName || null,
-            email: null,
-            phone: null,
-            status: null,
-        });
-    }
     res.json({
         ...normalizedPlayer,
         parentContacts,
@@ -3896,11 +3883,11 @@ app.post('/players', authMiddleware, async (req, res) => {
         last_name: payload.lastName,
         primary_position: payload.primary_position,
         secondary_position: payload.secondary_position,
-        email: payload.email,
-        phone: payload.phone,
+        email: payload.isChild ? null : payload.email,
+        phone: payload.isChild ? null : payload.phone,
         is_child: payload.isChild,
-        parent_first_name: payload.parentFirstName,
-        parent_last_name: payload.parentLastName,
+        parent_first_name: payload.isChild ? null : payload.parentFirstName,
+        parent_last_name: payload.isChild ? null : payload.parentLastName,
         licence: payload.licence,
     };
     const p = await playerCreateForUser(prisma, req.auth, baseData);
@@ -3928,11 +3915,11 @@ const updatePlayerByIdHandler = async (req, res) => {
     patch.name = `${payload.firstName} ${payload.lastName}`.trim();
     patch.primary_position = payload.primary_position;
     patch.secondary_position = payload.secondary_position;
-    patch.email = payload.email;
-    patch.phone = payload.phone;
+    patch.email = payload.isChild ? null : payload.email;
+    patch.phone = payload.isChild ? null : payload.phone;
     patch.is_child = payload.isChild;
-    patch.parent_first_name = payload.parentFirstName;
-    patch.parent_last_name = payload.parentLastName;
+    patch.parent_first_name = payload.isChild ? null : payload.parentFirstName;
+    patch.parent_last_name = payload.isChild ? null : payload.parentLastName;
     patch.licence = payload.licence;
     const updated = await prisma.player.update({ where: { id: existing.id }, data: patch });
     res.json((0, player_payload_1.normalizePlayerForApi)(updated));

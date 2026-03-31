@@ -87,13 +87,9 @@ function validatePlayerBusinessRules(payload) {
         teamId: parsed.data.teamId ? parsed.data.teamId.trim() : null,
     };
     if (normalized.isChild) {
-        if (!normalized.parentFirstName) {
-            throw new zod_1.z.ZodError([{ code: 'custom', path: ['parentFirstName'], message: 'Required when isChild is true' }]);
-        }
-        if (!normalized.parentLastName) {
-            throw new zod_1.z.ZodError([{ code: 'custom', path: ['parentLastName'], message: 'Required when isChild is true' }]);
-        }
-        // Child profiles should not carry personal contact coordinates.
+        // Child profiles should not carry parent identity or personal contact coordinates.
+        normalized.parentFirstName = null;
+        normalized.parentLastName = null;
         normalized.email = '';
         normalized.phone = '';
     }

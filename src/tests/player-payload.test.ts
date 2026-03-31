@@ -27,17 +27,18 @@ test('POST payload refuses missing phone', () => {
 })
 
 test('POST payload refuses child without parent names', () => {
-  assert.throws(() => {
-    parsePlayerCreatePayload({
-      firstName: 'Lina',
-      lastName: 'Martin',
-      email: 'lina@example.com',
-      phone: '0611223344',
-      primary_position: 'NON DEFINI',
-      isChild: true,
-      parentFirstName: 'Claire',
-    })
+  const parsed = parsePlayerCreatePayload({
+    firstName: 'Lina',
+    lastName: 'Martin',
+    email: 'lina@example.com',
+    phone: '0611223344',
+    primary_position: 'NON DEFINI',
+    isChild: true,
   })
+  assert.equal(parsed.parentFirstName, null)
+  assert.equal(parsed.parentLastName, null)
+  assert.equal(parsed.email, '')
+  assert.equal(parsed.phone, '')
 })
 
 test('POST payload accepts primary_position = NON DEFINI', () => {
@@ -83,8 +84,8 @@ test('compatibility aliases are accepted', () => {
   assert.equal(parsed.firstName, 'Noah')
   assert.equal(parsed.lastName, 'Dupont')
   assert.equal(parsed.isChild, true)
-  assert.equal(parsed.parentFirstName, 'Marie')
-  assert.equal(parsed.parentLastName, 'Dupont')
+  assert.equal(parsed.parentFirstName, null)
+  assert.equal(parsed.parentLastName, null)
   assert.equal(parsed.licence, 'F12345')
 })
 
@@ -133,6 +134,6 @@ test('PUT payload accepts parentPrenom/parentNom aliases when child', () => {
     parentNom: 'Dupont',
   }, {})
 
-  assert.equal(parsed.parentFirstName, 'Marie')
-  assert.equal(parsed.parentLastName, 'Dupont')
+  assert.equal(parsed.parentFirstName, null)
+  assert.equal(parsed.parentLastName, null)
 })

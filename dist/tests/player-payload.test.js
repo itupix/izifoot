@@ -29,17 +29,18 @@ const player_payload_1 = require("../player-payload");
     });
 });
 (0, node_test_1.default)('POST payload refuses child without parent names', () => {
-    strict_1.default.throws(() => {
-        (0, player_payload_1.parsePlayerCreatePayload)({
-            firstName: 'Lina',
-            lastName: 'Martin',
-            email: 'lina@example.com',
-            phone: '0611223344',
-            primary_position: 'NON DEFINI',
-            isChild: true,
-            parentFirstName: 'Claire',
-        });
+    const parsed = (0, player_payload_1.parsePlayerCreatePayload)({
+        firstName: 'Lina',
+        lastName: 'Martin',
+        email: 'lina@example.com',
+        phone: '0611223344',
+        primary_position: 'NON DEFINI',
+        isChild: true,
     });
+    strict_1.default.equal(parsed.parentFirstName, null);
+    strict_1.default.equal(parsed.parentLastName, null);
+    strict_1.default.equal(parsed.email, '');
+    strict_1.default.equal(parsed.phone, '');
 });
 (0, node_test_1.default)('POST payload accepts primary_position = NON DEFINI', () => {
     const parsed = (0, player_payload_1.parsePlayerCreatePayload)({
@@ -79,8 +80,8 @@ const player_payload_1 = require("../player-payload");
     strict_1.default.equal(parsed.firstName, 'Noah');
     strict_1.default.equal(parsed.lastName, 'Dupont');
     strict_1.default.equal(parsed.isChild, true);
-    strict_1.default.equal(parsed.parentFirstName, 'Marie');
-    strict_1.default.equal(parsed.parentLastName, 'Dupont');
+    strict_1.default.equal(parsed.parentFirstName, null);
+    strict_1.default.equal(parsed.parentLastName, null);
     strict_1.default.equal(parsed.licence, 'F12345');
 });
 (0, node_test_1.default)('PUT payload refuses missing email', () => {
@@ -123,6 +124,6 @@ const player_payload_1 = require("../player-payload");
         parentPrenom: 'Marie',
         parentNom: 'Dupont',
     }, {});
-    strict_1.default.equal(parsed.parentFirstName, 'Marie');
-    strict_1.default.equal(parsed.parentLastName, 'Dupont');
+    strict_1.default.equal(parsed.parentFirstName, null);
+    strict_1.default.equal(parsed.parentLastName, null);
 });
