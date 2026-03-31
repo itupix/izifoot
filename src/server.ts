@@ -2739,6 +2739,57 @@ app.get('/me', async (req: any, res, next) => {
   })
 })
 
+app.get('/me/child', authMiddleware, async (req: any, res) => {
+  if (req.auth?.role !== 'PARENT') return res.json(null)
+
+  const parentUser = await prisma.user.findUnique({
+    where: { id: req.auth.id },
+    select: { linkedPlayerUserId: true, clubId: true },
+  })
+
+  const candidateUserIds = [
+    parentUser?.linkedPlayerUserId ?? null,
+    req.auth.id,
+  ].filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index)
+
+  if (!candidateUserIds.length) return res.json(null)
+
+  const linkedPlayer = await prisma.player.findFirst({
+    where: {
+      userId: { in: candidateUserIds },
+      ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+    },
+    select: {
+      id: true,
+      name: true,
+      first_name: true,
+      last_name: true,
+      email: true,
+      phone: true,
+      teamId: true,
+      is_child: true,
+      parent_first_name: true,
+      parent_last_name: true,
+    }
+  })
+
+  if (!linkedPlayer) return res.json(null)
+
+  const linkedTeam = await prisma.team.findFirst({
+    where: {
+      id: linkedPlayer.teamId,
+      ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+    },
+    select: { name: true },
+  })
+
+  const normalizedPlayer = normalizePlayerForApi(linkedPlayer)
+  return res.json({
+    ...normalizedPlayer,
+    teamName: linkedTeam?.name ?? null,
+  })
+})
+
 app.put('/me/profile', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     firstName: z.string().trim().min(1).max(80).optional(),
