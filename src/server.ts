@@ -4241,6 +4241,21 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   })
   if (!player) return res.status(404).json({ error: 'Player not found' })
   const inviteRole = resolvePlayerAccountInviteRole(Boolean(player?.is_child))
+
+  if (Boolean(player?.is_child)) {
+    await prisma.player.updateMany({
+      where: {
+        id: player.id,
+        ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+      },
+      data: {
+        email: null,
+        phone: null,
+        parent_first_name: null,
+        parent_last_name: null,
+      }
+    })
+  }
   const inviteEmail = inviteRole === 'PARENT'
     ? (parsed.data.email || null)
     : (parsed.data.email || (player as any).email || null)
