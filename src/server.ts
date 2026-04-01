@@ -13,7 +13,7 @@ import QRCode from 'qrcode'
 import nodemailer from 'nodemailer'
 import { addDays } from 'date-fns'
 import { randomUUID } from 'crypto'
-import { buildMatchdayMetadataPatch, matchdayMetadataSchema, toPublicMatchday } from './matchday-metadata'
+import { HHMM_TIME_REGEX, buildMatchdayMetadataPatch, matchdayMetadataSchema, toPublicMatchday } from './matchday-metadata'
 import {
   attendanceSessionTypeVariants,
   buildTrainingAttendanceSnapshot,
@@ -5032,7 +5032,10 @@ app.post('/trainings/:id/intent', authMiddleware, async (req: any, res) => {
 
 app.post('/trainings', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const schema = z.object({ date: z.string().or(z.date()) })
+  const schema = z.object({
+    date: z.string().or(z.date()),
+    endTime: z.union([z.string().regex(HHMM_TIME_REGEX, 'Invalid time format, expected HH:MM'), z.null()]).optional(),
+  })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
@@ -5044,6 +5047,7 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
   const date = new Date(parsed.data.date as any)
   const t = await trainingCreateForUser(prisma, req.auth, {
     date,
+    endTime: parsed.data.endTime ?? null,
     status: 'PLANNED',
     clubId: team.clubId,
     teamId: team.id
@@ -5055,7 +5059,8 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
 app.put('/trainings/:id', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     date: z.string().or(z.date()).optional(),
-    status: z.enum(['PLANNED', 'CANCELLED']).optional()
+    status: z.enum(['PLANNED', 'CANCELLED']).optional(),
+    endTime: z.union([z.string().regex(HHMM_TIME_REGEX, 'Invalid time format, expected HH:MM'), z.null()]).optional(),
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
@@ -5063,6 +5068,7 @@ app.put('/trainings/:id', authMiddleware, async (req: any, res) => {
   const data: any = {}
   if (parsed.data.date !== undefined) data.date = new Date(parsed.data.date as any)
   if (parsed.data.status !== undefined) data.status = parsed.data.status
+  if (Object.prototype.hasOwnProperty.call(parsed.data, 'endTime')) data.endTime = parsed.data.endTime ?? null
 
   try {
     const existing = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
