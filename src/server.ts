@@ -18,7 +18,10 @@ import {
   attendanceSessionTypeVariants,
   buildTrainingAttendanceSnapshot,
   normalizeAttendanceRow,
+  normalizeTrainingIntentRow,
   persistAttendancePresence,
+  trainingIntentSessionTypeVariants,
+  trainingIntentStoredSessionType,
   trainingAttendancePutBodySchema,
 } from './attendance'
 import {
@@ -750,6 +753,137 @@ async function attendanceSetMatchdayRsvpForUser(db: any, scopeOrUserId: any, mat
     playerId,
     present,
   })
+}
+
+function isTrainingOpenForIntent(training: { date: Date | string, status?: string | null }) {
+  if ((training.status || '').toUpperCase() === 'CANCELLED') return false
+  const trainingDate = new Date(training.date as any)
+  if (Number.isNaN(trainingDate.getTime())) return false
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const trainingDay = new Date(trainingDate.getFullYear(), trainingDate.getMonth(), trainingDate.getDate())
+  return trainingDay.getTime() >= today.getTime()
+}
+
+async function resolveReadOnlyLinkedPlayer(auth: any) {
+  if (!auth?.id || (auth.role !== 'PLAYER' && auth.role !== 'PARENT')) return null
+
+  if (auth.role === 'PLAYER') {
+    return playerFindFirstForUser(prisma, auth, {
+      where: { userId: auth.id },
+      select: { id: true, userId: true, clubId: true, teamId: true },
+    })
+  }
+
+  if (ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID) {
+    const acceptedInvite = await prisma.accountInvite.findFirst({
+      where: {
+        role: 'PARENT',
+        status: 'ACCEPTED',
+        userId: auth.id,
+        ...(auth.clubId ? { clubId: auth.clubId } : {}),
+        linkedPlayerId: { not: null },
+      },
+      select: { linkedPlayerId: true },
+      orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }],
+    })
+
+    if (acceptedInvite?.linkedPlayerId) {
+      const linkedById = await playerFindFirstForUser(prisma, auth, {
+        where: { id: acceptedInvite.linkedPlayerId },
+        select: { id: true, userId: true, clubId: true, teamId: true },
+      })
+      if (linkedById) return linkedById
+    }
+  }
+
+  const parentUser = await prisma.user.findUnique({
+    where: { id: auth.id },
+    select: { linkedPlayerUserId: true },
+  })
+
+  const candidateUserIds = [
+    parentUser?.linkedPlayerUserId ?? null,
+    auth.id,
+  ].filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index)
+
+  if (!candidateUserIds.length) return null
+
+  return playerFindFirstForUser(prisma, auth, {
+    where: { userId: { in: candidateUserIds } },
+    select: { id: true, userId: true, clubId: true, teamId: true },
+  })
+}
+
+async function buildTrainingIntentDecorations(auth: any, trainings: any[], linkedPlayerId?: string | null) {
+  const trainingIds = Array.from(new Set(trainings.map((training) => training.id).filter(Boolean)))
+  if (!trainingIds.length) {
+    return {
+      intentByTrainingAndPlayer: new Map<string, 'PRESENT' | 'ABSENT'>(),
+      summaryByTrainingId: new Map<string, { presentCount: number, absentCount: number, unknownCount: number, totalPlayers: number }>(),
+      myIntentByTrainingId: new Map<string, 'PRESENT' | 'ABSENT' | null>(),
+      canRespondByTrainingId: new Map<string, boolean>(),
+    }
+  }
+
+  const teamIds = Array.from(new Set(trainings.map((training) => training.teamId).filter(Boolean)))
+  const playersByTeamId = new Map<string, string[]>()
+  if (teamIds.length > 0) {
+    const teamPlayers = await playerFindManyForUser(prisma, auth, {
+      where: { teamId: { in: teamIds } },
+      select: { id: true, teamId: true },
+    })
+    for (const player of teamPlayers) {
+      if (!player.teamId) continue
+      const existing = playersByTeamId.get(player.teamId) ?? []
+      existing.push(player.id)
+      playersByTeamId.set(player.teamId, existing)
+    }
+  }
+
+  const intentRows = await attendanceFindManyForUser(prisma, auth, {
+    where: {
+      session_type: { in: trainingIntentSessionTypeVariants() as any },
+      session_id: { in: trainingIds },
+    },
+    select: {
+      session_type: true,
+      session_id: true,
+      playerId: true,
+    },
+  })
+
+  const intentByTrainingAndPlayer = new Map<string, 'PRESENT' | 'ABSENT'>()
+  for (const row of intentRows) {
+    const normalized = normalizeTrainingIntentRow(row)
+    if (!normalized) continue
+    intentByTrainingAndPlayer.set(`${normalized.trainingId}:${normalized.playerId}`, normalized.intent)
+  }
+
+  const summaryByTrainingId = new Map<string, { presentCount: number, absentCount: number, unknownCount: number, totalPlayers: number }>()
+  const myIntentByTrainingId = new Map<string, 'PRESENT' | 'ABSENT' | null>()
+  const canRespondByTrainingId = new Map<string, boolean>()
+
+  for (const training of trainings) {
+    const teamPlayerIds = training.teamId ? (playersByTeamId.get(training.teamId) ?? []) : []
+    let presentCount = 0
+    let absentCount = 0
+    for (const playerId of teamPlayerIds) {
+      const key = `${training.id}:${playerId}`
+      const intent = intentByTrainingAndPlayer.get(key)
+      if (intent === 'PRESENT') presentCount += 1
+      if (intent === 'ABSENT') absentCount += 1
+    }
+    const totalPlayers = teamPlayerIds.length
+    const unknownCount = Math.max(0, totalPlayers - presentCount - absentCount)
+    summaryByTrainingId.set(training.id, { presentCount, absentCount, unknownCount, totalPlayers })
+
+    const myIntent = linkedPlayerId ? (intentByTrainingAndPlayer.get(`${training.id}:${linkedPlayerId}`) ?? null) : null
+    myIntentByTrainingId.set(training.id, myIntent)
+    canRespondByTrainingId.set(training.id, Boolean(linkedPlayerId) && isTrainingOpenForIntent(training))
+  }
+
+  return { intentByTrainingAndPlayer, summaryByTrainingId, myIntentByTrainingId, canRespondByTrainingId }
 }
 
 async function resolveAttendanceScopeFromSession(auth: any, session_type: 'TRAINING' | 'PLATEAU', session_id: string) {
@@ -3643,6 +3777,8 @@ app.use(async (req: any, res: any, next: any) => {
     const auth = await resolveUserAuthContext(payload.sub)
     if (!auth) return res.status(401).json({ error: 'Unauthorized' })
     if (isReadOnlyRole(auth)) {
+      const allowTrainingIntentWrite = req.method === 'POST' && /^\/trainings\/[^/]+\/intent$/.test(req.path)
+      if (allowTrainingIntentWrite) return next()
       return res.status(403).json({ error: 'Read-only account: write access is not allowed' })
     }
   } catch {
@@ -4744,9 +4880,24 @@ app.get('/trainings', authMiddleware, async (req: any, res) => {
     take: pagination.take,
     skip: pagination.skip,
   })
+
+  const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
+  const decorations = await buildTrainingIntentDecorations(req.auth, trainings, linkedPlayer?.id ?? null)
+  const items = trainings.map((training: any) => ({
+    ...training,
+    intentSummary: decorations.summaryByTrainingId.get(training.id) ?? {
+      presentCount: 0,
+      absentCount: 0,
+      unknownCount: 0,
+      totalPlayers: 0,
+    },
+    myTrainingIntent: decorations.myIntentByTrainingId.get(training.id) ?? null,
+    canSetTrainingIntent: decorations.canRespondByTrainingId.get(training.id) ?? false,
+  }))
+
   res.json({
-    items: trainings,
-    pagination: { limit: pagination.limit, offset: pagination.offset, returned: trainings.length }
+    items,
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: items.length }
   })
 })
 
@@ -4756,11 +4907,126 @@ app.get('/trainings/:id', authMiddleware, async (req: any, res) => {
   try {
     const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id } })
     if (!training) return res.status(404).json({ error: 'Training not found' })
-    res.json(training)
+    const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
+    const decorations = await buildTrainingIntentDecorations(req.auth, [training], linkedPlayer?.id ?? null)
+    res.json({
+      ...training,
+      intentSummary: decorations.summaryByTrainingId.get(training.id) ?? {
+        presentCount: 0,
+        absentCount: 0,
+        unknownCount: 0,
+        totalPlayers: 0,
+      },
+      myTrainingIntent: decorations.myIntentByTrainingId.get(training.id) ?? null,
+      canSetTrainingIntent: decorations.canRespondByTrainingId.get(training.id) ?? false,
+    })
   } catch (e: any) {
     console.error('[GET /trainings/:id] failed', e)
     return res.status(500).json({ error: 'Failed to fetch training' })
   }
+})
+
+app.get('/trainings/:id/intent', authMiddleware, async (req: any, res) => {
+  const { id } = req.params
+  const training = await trainingFindFirstForUser(prisma, req.auth, {
+    where: { id },
+    select: { id: true, date: true, status: true, teamId: true, clubId: true },
+  })
+  if (!training) return res.status(404).json({ error: 'Training not found' })
+
+  const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
+  const decorations = await buildTrainingIntentDecorations(req.auth, [training], linkedPlayer?.id ?? null)
+  const summary = decorations.summaryByTrainingId.get(training.id) ?? {
+    presentCount: 0,
+    absentCount: 0,
+    unknownCount: 0,
+    totalPlayers: 0,
+  }
+  const myIntent = decorations.myIntentByTrainingId.get(training.id) ?? null
+  const canRespond = decorations.canRespondByTrainingId.get(training.id) ?? false
+
+  const includePerPlayerItems = req.auth?.role === 'DIRECTION' || req.auth?.role === 'COACH'
+
+  const teamPlayers = includePerPlayerItems && training.teamId
+    ? await playerFindManyForUser(prisma, req.auth, {
+      where: { teamId: training.teamId },
+      select: { id: true },
+    })
+    : []
+
+  const playerItems = includePerPlayerItems
+    ? teamPlayers.map((player: any) => {
+      const intent = decorations.intentByTrainingAndPlayer.get(`${training.id}:${player.id}`)
+      return {
+        playerId: player.id,
+        intent: intent ?? 'UNKNOWN',
+      }
+    })
+    : undefined
+
+  return res.json({
+    trainingId: training.id,
+    summary,
+    myIntent,
+    canRespond,
+    ...(playerItems ? { items: playerItems } : {}),
+  })
+})
+
+app.post('/trainings/:id/intent', authMiddleware, async (req: any, res) => {
+  if (req.auth?.role !== 'PARENT' && req.auth?.role !== 'PLAYER') {
+    return res.status(403).json({ error: 'Only parent and player accounts can set training intent' })
+  }
+
+  const schema = z.object({
+    present: z.boolean(),
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const training = await trainingFindFirstForUser(prisma, req.auth, {
+    where: { id: req.params.id },
+    select: { id: true, date: true, status: true, teamId: true, clubId: true },
+  })
+  if (!training) return res.status(404).json({ error: 'Training not found' })
+  if (!isTrainingOpenForIntent(training)) {
+    return res.status(409).json({ error: 'Training is passed or cancelled' })
+  }
+
+  const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
+  if (!linkedPlayer) return res.status(404).json({ error: 'Linked player not found for this account' })
+  if (training.teamId && linkedPlayer.teamId && linkedPlayer.teamId !== training.teamId) {
+    return res.status(403).json({ error: 'Linked player does not belong to this training team' })
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.attendance.deleteMany({
+      where: {
+        session_type: { in: trainingIntentSessionTypeVariants() as any },
+        session_id: training.id,
+        playerId: linkedPlayer.id,
+        ...(training.clubId ? { clubId: training.clubId } : {}),
+      }
+    })
+
+    await tx.attendance.create({
+      data: {
+        userId: req.auth.id,
+        clubId: training.clubId ?? null,
+        teamId: training.teamId ?? null,
+        session_type: trainingIntentStoredSessionType(parsed.data.present),
+        session_id: training.id,
+        playerId: linkedPlayer.id,
+        trainingId: training.id,
+      }
+    })
+  })
+
+  return res.json({
+    trainingId: training.id,
+    playerId: linkedPlayer.id,
+    intent: parsed.data.present ? 'PRESENT' : 'ABSENT',
+  })
 })
 
 

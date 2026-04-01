@@ -1,6 +1,8 @@
 import { z } from 'zod'
 
 export type AttendanceSessionType = 'TRAINING' | 'PLATEAU'
+export type TrainingIntentSessionType = 'TRAINING_INTENT'
+export type TrainingIntentValue = 'PRESENT' | 'ABSENT'
 
 export type AttendancePresenceParams = {
   session_type: AttendanceSessionType
@@ -19,6 +21,25 @@ export function attendanceStoredSessionType(sessionType: AttendanceSessionType, 
 
 export function attendanceSessionTypeVariants(sessionType: AttendanceSessionType) {
   return [sessionType, `${sessionType}_ABSENT`]
+}
+
+export function trainingIntentStoredSessionType(present: boolean) {
+  return present ? 'TRAINING_INTENT' : 'TRAINING_INTENT_ABSENT'
+}
+
+export function trainingIntentSessionTypeVariants() {
+  return ['TRAINING_INTENT', 'TRAINING_INTENT_ABSENT']
+}
+
+export function normalizeTrainingIntentRow(row: any): { playerId: string, trainingId: string, intent: TrainingIntentValue } | null {
+  if (!row?.playerId || !row?.session_id) return null
+  if (row.session_type === 'TRAINING_INTENT') {
+    return { playerId: row.playerId, trainingId: row.session_id, intent: 'PRESENT' }
+  }
+  if (row.session_type === 'TRAINING_INTENT_ABSENT') {
+    return { playerId: row.playerId, trainingId: row.session_id, intent: 'ABSENT' }
+  }
+  return null
 }
 
 export function normalizeAttendanceRow(row: any) {
