@@ -5088,13 +5088,67 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
     if (Number.isNaN(itemDate.getTime())) return false
     return Boolean(item.endTime) || isMeaningfulStartTime(itemDate)
   }) || sameWeekdayTrainings[0] || null
+
+  const PARIS_TZ = 'Europe/Paris'
+  const parisDateParts = (value: Date) => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: PARIS_TZ,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(value)
+    const read = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value || 0)
+    return {
+      year: read('year'),
+      month: read('month'),
+      day: read('day'),
+      hour: read('hour'),
+      minute: read('minute'),
+    }
+  }
+
+  const parisOffsetMinutesAt = (utcDate: Date) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: PARIS_TZ,
+      timeZoneName: 'shortOffset',
+      hour: '2-digit',
+      hour12: false,
+    }).formatToParts(utcDate)
+    const token = parts.find((part) => part.type === 'timeZoneName')?.value || 'GMT+0'
+    const match = token.match(/(?:GMT|UTC)([+-]\d{1,2})(?::?(\d{2}))?/i)
+    if (!match) return 0
+    const rawHours = Number(match[1] || 0)
+    const rawMinutes = Number(match[2] || 0)
+    const sign = rawHours < 0 ? -1 : 1
+    return rawHours * 60 + sign * rawMinutes
+  }
+
+  const parisLocalToUtc = (year: number, month: number, day: number, hour: number, minute: number) => {
+    const baseUtcMillis = Date.UTC(year, month - 1, day, hour, minute, 0, 0)
+    let candidateUtcMillis = baseUtcMillis
+    for (let i = 0; i < 2; i += 1) {
+      const offsetMinutes = parisOffsetMinutesAt(new Date(candidateUtcMillis))
+      candidateUtcMillis = baseUtcMillis - offsetMinutes * 60_000
+    }
+    return new Date(candidateUtcMillis)
+  }
+
   const dateWithDefaultSchedule = (() => {
     if (!previousTraining?.date) return date
     const previousDate = new Date(previousTraining.date)
     if (Number.isNaN(previousDate.getTime())) return date
-    const next = new Date(date)
-    next.setUTCHours(previousDate.getUTCHours(), previousDate.getUTCMinutes(), 0, 0)
-    return next
+    const targetParis = parisDateParts(date)
+    const sourceParis = parisDateParts(previousDate)
+    return parisLocalToUtc(
+      targetParis.year,
+      targetParis.month,
+      targetParis.day,
+      sourceParis.hour,
+      sourceParis.minute,
+    )
   })()
 
   const t = await trainingCreateForUser(prisma, req.auth, {
