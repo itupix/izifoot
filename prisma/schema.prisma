@@ -36,6 +36,7 @@ model User {
   diagrams                Diagram[]
   trainingRoleAssignments TrainingRoleAssignment[]
   sentTeamMessages        TeamMessage[]
+  directMessagesSent      DirectMessage[]
   teamMessageLikes        TeamMessageLike[]
   teamMessageReads        TeamMessageRead[]
 }
@@ -119,6 +120,23 @@ model TeamMessageRead {
   @@index([userId, teamId])
 }
 
+model DirectMessage {
+  id           String   @id @default(cuid())
+  clubId       String
+  teamId       String
+  playerId     String
+  senderUserId String
+  sender       User     @relation(fields: [senderUserId], references: [id], onDelete: Cascade)
+  player       Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  content      String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([clubId, teamId, createdAt(sort: Desc)])
+  @@index([teamId, playerId, createdAt(sort: Desc)])
+  @@index([playerId, createdAt(sort: Desc)])
+}
+
 model AccountInvite {
   id                 String              @id @default(cuid())
   token              String              @unique
@@ -192,6 +210,7 @@ model Player {
   scorers                 Scorer[]                 @relation("ScorerPlayer")
   assistedScorers         Scorer[]                 @relation("ScorerAssist")
   Attendance              Attendance[]
+  directMessages          DirectMessage[]
   MatchTeamPlayer         MatchTeamPlayer[]
   trainingRoleAssignments TrainingRoleAssignment[]
   email                   String?

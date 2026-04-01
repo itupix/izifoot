@@ -561,6 +561,37 @@ const teamMessageCreateBodySchema = z.object({
   teamId: z.string().trim().min(1).optional(),
 })
 
+const directMessageCreateBodySchema = z.object({
+  content: z.string().trim().min(1).max(2000),
+})
+
+type ConversationKind = 'ANNOUNCEMENTS' | 'COACH'
+
+function conversationIdForAnnouncements(teamId: string) {
+  return `announcements:${teamId}`
+}
+
+function conversationIdForCoach(teamId: string, playerId: string) {
+  return `coach:${teamId}:${playerId}`
+}
+
+function parseConversationId(raw: string): { kind: ConversationKind, teamId: string, playerId?: string } | null {
+  const value = String(raw || '').trim()
+  if (!value) return null
+
+  const announcementsMatch = value.match(/^announcements:([a-zA-Z0-9_-]+)$/)
+  if (announcementsMatch) {
+    return { kind: 'ANNOUNCEMENTS', teamId: announcementsMatch[1] }
+  }
+
+  const coachMatch = value.match(/^coach:([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+)$/)
+  if (coachMatch) {
+    return { kind: 'COACH', teamId: coachMatch[1], playerId: coachMatch[2] }
+  }
+
+  return null
+}
+
 async function resolveReadableTeamForMessaging(auth: any, requestedTeamId?: string | null) {
   if (!auth?.clubId) {
     const err: any = new Error('No club attached to account')
@@ -813,6 +844,71 @@ async function resolveReadOnlyLinkedPlayer(auth: any) {
     where: { userId: { in: candidateUserIds } },
     select: { id: true, userId: true, clubId: true, teamId: true },
   })
+}
+
+async function resolveCoachConversationPlayer(auth: any, team: { id: string, clubId: string }, playerId: string) {
+  if (!playerId) return null
+  const player = await playerFindFirstForUser(prisma, auth, {
+    where: { id: playerId, teamId: team.id },
+    select: {
+      id: true,
+      teamId: true,
+      clubId: true,
+      userId: true,
+      name: true,
+      first_name: true,
+      last_name: true,
+      is_child: true,
+    },
+  })
+  if (!player) return null
+
+  if (auth.role === 'COACH' || auth.role === 'DIRECTION') return player
+
+  const linkedPlayer = await resolveReadOnlyLinkedPlayer(auth)
+  if (!linkedPlayer) return null
+  if (linkedPlayer.id !== player.id) return null
+  if (linkedPlayer.teamId && linkedPlayer.teamId !== team.id) return null
+  return player
+}
+
+async function listAcceptedParentUsersByPlayerIds(clubId: string, playerIds: string[]) {
+  if (!clubId || playerIds.length === 0) return new Map<string, any[]>()
+
+  const invites = await prisma.accountInvite.findMany({
+    where: {
+      clubId,
+      role: 'PARENT',
+      status: 'ACCEPTED',
+      linkedPlayerId: { in: playerIds },
+      userId: { not: null },
+    },
+    select: {
+      linkedPlayerId: true,
+      userId: true,
+      firstName: true,
+      lastName: true,
+      user: {
+        select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+      },
+    },
+  })
+
+  const map = new Map<string, any[]>()
+  for (const invite of invites) {
+    if (!invite.linkedPlayerId) continue
+    const current = map.get(invite.linkedPlayerId) || []
+    current.push({
+      id: invite.user?.id || invite.userId,
+      firstName: invite.user?.firstName || invite.firstName || null,
+      lastName: invite.user?.lastName || invite.lastName || null,
+      email: invite.user?.email || null,
+      phone: invite.user?.phone || null,
+      role: 'PARENT',
+    })
+    map.set(invite.linkedPlayerId, current)
+  }
+  return map
 }
 
 async function buildTrainingIntentDecorations(auth: any, trainings: any[], linkedPlayerId?: string | null) {
@@ -7334,6 +7430,274 @@ app.delete('/diagrams/:id', authMiddleware, async (req: any, res) => {
     console.error('[DELETE /diagrams/:id] failed', e)
     return res.status(500).json({ error: 'Failed to delete diagram' })
   }
+})
+
+app.get('/messages/conversations', authMiddleware, async (req: any, res) => {
+  const queryParsed = z.object({
+    teamId: z.string().trim().min(1).optional(),
+  }).safeParse(req.query)
+  if (!queryParsed.success) {
+    return res.status(400).json({ error: queryParsed.error.issues[0]?.message || queryParsed.error.flatten() })
+  }
+
+  let team: { id: string, clubId: string }
+  try {
+    if (req.auth?.role === 'PLAYER' || req.auth?.role === 'PARENT') {
+      const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
+      if (!linkedPlayer?.teamId) return res.status(404).json({ error: 'Linked player not found' })
+      team = await resolveReadableTeamForMessaging(req.auth, linkedPlayer.teamId)
+    } else {
+      team = await resolveReadableTeamForMessaging(req.auth, queryParsed.data.teamId)
+    }
+  } catch (e: any) {
+    if (e?.code === 'TEAM_REQUIRED') return res.status(400).json({ error: e.message })
+    if (e?.code === 'TEAM_FORBIDDEN') return res.status(403).json({ error: e.message })
+    return res.status(400).json({ error: e.message || 'Invalid team scope' })
+  }
+
+  const announcementLatest = await prisma.teamMessage.findFirst({
+    where: { clubId: team.clubId, teamId: team.id },
+    include: { author: { select: { id: true, firstName: true, lastName: true, role: true } } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  })
+
+  const formatDisplayName = (person: any) => {
+    const full = `${person?.firstName || ''} ${person?.lastName || ''}`.trim()
+    return full || person?.name || 'Membre'
+  }
+
+  const announcementConversation = {
+    id: conversationIdForAnnouncements(team.id),
+    type: 'ANNOUNCEMENTS',
+    title: 'Annonces',
+    subtitle: 'Canal staff vers joueurs et parents',
+    lastMessagePreview: announcementLatest?.content || null,
+    lastMessageAt: announcementLatest?.createdAt || null,
+  }
+
+  if (req.auth?.role === 'PLAYER' || req.auth?.role === 'PARENT') {
+    const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
+    if (!linkedPlayer?.id) return res.json({ items: [announcementConversation] })
+
+    const directLatest = await prisma.directMessage.findFirst({
+      where: { clubId: team.clubId, teamId: team.id, playerId: linkedPlayer.id },
+      include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    })
+
+    const coachUsers = await prisma.user.findMany({
+      where: {
+        clubId: team.clubId,
+        OR: [
+          { role: 'DIRECTION' },
+          { role: 'COACH', teamId: team.id },
+          { role: 'COACH', managedTeamIds: { has: team.id } },
+        ],
+      },
+      select: { id: true, firstName: true, lastName: true },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+      take: 5,
+    })
+
+    const coachSubtitle = coachUsers.length
+      ? coachUsers.map((user) => formatDisplayName(user)).join(', ')
+      : 'Équipe encadrante'
+
+    const coachConversation = {
+      id: conversationIdForCoach(team.id, linkedPlayer.id),
+      type: 'COACH',
+      title: 'Coach',
+      subtitle: coachSubtitle,
+      lastMessagePreview: directLatest?.content || null,
+      lastMessageAt: directLatest?.createdAt || null,
+    }
+
+    return res.json({ items: [coachConversation, announcementConversation] })
+  }
+
+  const players = await playerFindManyForUser(prisma, req.auth, {
+    where: { teamId: team.id },
+    select: { id: true, name: true, first_name: true, last_name: true, is_child: true },
+    orderBy: [{ last_name: 'asc' }, { first_name: 'asc' }, { name: 'asc' }],
+  })
+
+  const parentUsersByPlayerId = await listAcceptedParentUsersByPlayerIds(team.clubId, players.map((player: any) => player.id))
+  const directLatestRows = players.length
+    ? await prisma.directMessage.findMany({
+      where: { clubId: team.clubId, teamId: team.id, playerId: { in: players.map((player: any) => player.id) } },
+      include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    })
+    : []
+  const directLatestByPlayerId = new Map<string, any>()
+  for (const row of directLatestRows) {
+    if (!directLatestByPlayerId.has(row.playerId)) directLatestByPlayerId.set(row.playerId, row)
+  }
+
+  const coachConversations = players.map((player: any) => {
+    const latest = directLatestByPlayerId.get(player.id) || null
+    const firstName = player.first_name || null
+    const lastName = player.last_name || null
+    const title = `${firstName || ''} ${lastName || ''}`.trim() || player.name || 'Joueur'
+    const parents = parentUsersByPlayerId.get(player.id) || []
+    const subtitle = parents.length
+      ? `Parents: ${parents.map((parent) => formatDisplayName(parent)).join(', ')}`
+      : 'Aucun parent lié'
+    return {
+      id: conversationIdForCoach(team.id, player.id),
+      type: 'COACH',
+      title,
+      subtitle,
+      lastMessagePreview: latest?.content || null,
+      lastMessageAt: latest?.createdAt || null,
+    }
+  })
+
+  return res.json({
+    items: [announcementConversation, ...coachConversations],
+  })
+})
+
+app.get('/messages/conversations/:id/messages', authMiddleware, async (req: any, res) => {
+  const parsedId = parseConversationId(req.params.id)
+  if (!parsedId) return res.status(400).json({ error: 'Invalid conversation id' })
+
+  let team: { id: string, clubId: string }
+  try {
+    team = await resolveReadableTeamForMessaging(req.auth, parsedId.teamId)
+  } catch (e: any) {
+    if (e?.code === 'TEAM_REQUIRED') return res.status(400).json({ error: e.message })
+    if (e?.code === 'TEAM_FORBIDDEN') return res.status(403).json({ error: e.message })
+    return res.status(400).json({ error: e.message || 'Invalid team scope' })
+  }
+
+  if (parsedId.kind === 'ANNOUNCEMENTS') {
+    const rows = await prisma.teamMessage.findMany({
+      where: { clubId: team.clubId, teamId: team.id },
+      include: { author: { select: { id: true, firstName: true, lastName: true, role: true } } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    })
+    return res.json({
+      conversation: {
+        id: conversationIdForAnnouncements(team.id),
+        type: 'ANNOUNCEMENTS',
+        title: 'Annonces',
+      },
+      items: rows.map((row) => ({
+        id: row.id,
+        content: row.content,
+        createdAt: row.createdAt,
+        sender: row.author ? {
+          id: row.author.id,
+          firstName: row.author.firstName || null,
+          lastName: row.author.lastName || null,
+          role: row.author.role,
+        } : null,
+      })),
+    })
+  }
+
+  const player = await resolveCoachConversationPlayer(req.auth, team, parsedId.playerId || '')
+  if (!player) return res.status(403).json({ error: 'Forbidden conversation scope' })
+
+  const rows = await prisma.directMessage.findMany({
+    where: { clubId: team.clubId, teamId: team.id, playerId: player.id },
+    include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  })
+
+  const title = `${player.first_name || ''} ${player.last_name || ''}`.trim() || player.name || 'Coach'
+  return res.json({
+    conversation: {
+      id: conversationIdForCoach(team.id, player.id),
+      type: 'COACH',
+      title: (req.auth?.role === 'PLAYER' || req.auth?.role === 'PARENT') ? 'Coach' : title,
+    },
+    items: rows.map((row) => ({
+      id: row.id,
+      content: row.content,
+      createdAt: row.createdAt,
+      sender: row.sender ? {
+        id: row.sender.id,
+        firstName: row.sender.firstName || null,
+        lastName: row.sender.lastName || null,
+        role: row.sender.role,
+      } : null,
+    })),
+  })
+})
+
+app.post('/messages/conversations/:id/messages', authMiddleware, async (req: any, res) => {
+  const parsedId = parseConversationId(req.params.id)
+  if (!parsedId) return res.status(400).json({ error: 'Invalid conversation id' })
+  const parsedBody = directMessageCreateBodySchema.safeParse(req.body)
+  if (!parsedBody.success) return res.status(400).json({ error: parsedBody.error.issues[0]?.message || parsedBody.error.flatten() })
+
+  if (parsedId.kind === 'ANNOUNCEMENTS') {
+    if (!ensureStaff(req, res)) return
+    let team: { id: string, clubId: string }
+    try {
+      team = await resolveTeamForWrite(req.auth, parsedId.teamId)
+    } catch (e: any) {
+      if (e?.code === 'TEAM_FORBIDDEN') return res.status(403).json({ error: e.message })
+      return res.status(400).json({ error: e.message || 'Invalid team scope' })
+    }
+    const created = await prisma.teamMessage.create({
+      data: {
+        clubId: team.clubId,
+        teamId: team.id,
+        authorUserId: req.auth.id,
+        content: parsedBody.data.content,
+      },
+      include: { author: { select: { id: true, firstName: true, lastName: true, role: true } } },
+    })
+    return res.status(201).json({
+      id: created.id,
+      content: created.content,
+      createdAt: created.createdAt,
+      sender: created.author ? {
+        id: created.author.id,
+        firstName: created.author.firstName || null,
+        lastName: created.author.lastName || null,
+        role: created.author.role,
+      } : null,
+    })
+  }
+
+  let team: { id: string, clubId: string }
+  try {
+    team = await resolveReadableTeamForMessaging(req.auth, parsedId.teamId)
+  } catch (e: any) {
+    if (e?.code === 'TEAM_REQUIRED') return res.status(400).json({ error: e.message })
+    if (e?.code === 'TEAM_FORBIDDEN') return res.status(403).json({ error: e.message })
+    return res.status(400).json({ error: e.message || 'Invalid team scope' })
+  }
+
+  const player = await resolveCoachConversationPlayer(req.auth, team, parsedId.playerId || '')
+  if (!player) return res.status(403).json({ error: 'Forbidden conversation scope' })
+
+  const created = await prisma.directMessage.create({
+    data: {
+      clubId: team.clubId,
+      teamId: team.id,
+      playerId: player.id,
+      senderUserId: req.auth.id,
+      content: parsedBody.data.content,
+    },
+    include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+  })
+
+  return res.status(201).json({
+    id: created.id,
+    content: created.content,
+    createdAt: created.createdAt,
+    sender: created.sender ? {
+      id: created.sender.id,
+      firstName: created.sender.firstName || null,
+      lastName: created.sender.lastName || null,
+      role: created.sender.role,
+    } : null,
+  })
 })
 
 app.get('/team-messages/unread-count', authMiddleware, async (req: any, res) => {
