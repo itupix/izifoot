@@ -5045,9 +5045,35 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
     return res.status(400).json({ error: e.message })
   }
   const date = new Date(parsed.data.date as any)
+  if (Number.isNaN(date.getTime())) return res.status(400).json({ error: 'Invalid date' })
+
+  const recentTeamTrainings = await trainingFindManyForUser(prisma, req.auth, {
+    where: { teamId: team.id },
+    orderBy: { date: 'desc' },
+    take: 200,
+    select: { date: true, endTime: true },
+  })
+
+  const targetWeekday = date.getUTCDay()
+  const previousTraining = recentTeamTrainings.find((item: any) => {
+    const itemDate = new Date(item.date)
+    if (Number.isNaN(itemDate.getTime())) return false
+    return itemDate.getUTCDay() === targetWeekday
+  }) || null
+  const dateWithDefaultSchedule = (() => {
+    if (!previousTraining?.date) return date
+    const previousDate = new Date(previousTraining.date)
+    if (Number.isNaN(previousDate.getTime())) return date
+    const next = new Date(date)
+    next.setUTCHours(previousDate.getUTCHours(), previousDate.getUTCMinutes(), 0, 0)
+    return next
+  })()
+
   const t = await trainingCreateForUser(prisma, req.auth, {
-    date,
-    endTime: parsed.data.endTime ?? null,
+    date: dateWithDefaultSchedule,
+    endTime: Object.prototype.hasOwnProperty.call(parsed.data, 'endTime')
+      ? (parsed.data.endTime ?? null)
+      : (previousTraining?.endTime ?? null),
     status: 'PLANNED',
     clubId: team.clubId,
     teamId: team.id
