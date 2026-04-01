@@ -5054,12 +5054,40 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
     select: { date: true, endTime: true },
   })
 
-  const targetWeekday = date.getUTCDay()
-  const previousTraining = recentTeamTrainings.find((item: any) => {
+  const weekdayInParis = (value: Date) => {
+    const token = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Paris',
+      weekday: 'short',
+    }).format(value)
+    const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
+    return map[token] ?? value.getUTCDay()
+  }
+
+  const isMeaningfulStartTime = (value: Date) => {
+    const hoursInParis = Number(new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Paris',
+      hour: '2-digit',
+      hour12: false,
+    }).format(value))
+    const minutesInParis = Number(new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Paris',
+      minute: '2-digit',
+    }).format(value))
+    return hoursInParis !== 0 || minutesInParis !== 0
+  }
+
+  const targetWeekday = weekdayInParis(date)
+  const sameWeekdayTrainings = recentTeamTrainings.filter((item: any) => {
     const itemDate = new Date(item.date)
     if (Number.isNaN(itemDate.getTime())) return false
-    return itemDate.getUTCDay() === targetWeekday
-  }) || null
+    return weekdayInParis(itemDate) === targetWeekday
+  })
+
+  const previousTraining = sameWeekdayTrainings.find((item: any) => {
+    const itemDate = new Date(item.date)
+    if (Number.isNaN(itemDate.getTime())) return false
+    return Boolean(item.endTime) || isMeaningfulStartTime(itemDate)
+  }) || sameWeekdayTrainings[0] || null
   const dateWithDefaultSchedule = (() => {
     if (!previousTraining?.date) return date
     const previousDate = new Date(previousTraining.date)
