@@ -13,6 +13,7 @@ import QRCode from 'qrcode'
 import nodemailer from 'nodemailer'
 import { addDays } from 'date-fns'
 import { createPrivateKey, randomUUID } from 'crypto'
+import http2 from 'http2'
 import { HHMM_TIME_REGEX, buildMatchdayMetadataPatch, matchdayMetadataSchema, toPublicMatchday } from './matchday-metadata'
 import {
   attendanceSessionTypeVariants,
@@ -1511,41 +1512,70 @@ async function disablePushDeviceToken(token: string) {
   }
 }
 
+async function apnsRequest(host: string, deviceToken: string, authToken: string, payload: { title: string, body: string, data?: Record<string, any> }) {
+  return await new Promise<{ ok: boolean, status: number, reason: string | null }>((resolve) => {
+    const client = http2.connect(`https://${host}`)
+    client.on('error', () => {
+      try { client.close() } catch {}
+      resolve({ ok: false, status: 0, reason: 'transport_error' })
+    })
+
+    const req = client.request({
+      ':method': 'POST',
+      ':path': `/3/device/${encodeURIComponent(deviceToken)}`,
+      authorization: `bearer ${authToken}`,
+      'apns-topic': APNS_BUNDLE_ID,
+      'apns-push-type': 'alert',
+      'content-type': 'application/json',
+    })
+
+    let status = 0
+    let raw = ''
+    req.setEncoding('utf8')
+    req.on('response', (headers) => {
+      const received = headers[':status']
+      status = typeof received === 'number' ? received : Number(received || 0)
+    })
+    req.on('data', (chunk) => { raw += chunk })
+    req.on('error', () => {
+      try { req.close() } catch {}
+      try { client.close() } catch {}
+      resolve({ ok: false, status: status || 0, reason: 'transport_error' })
+    })
+    req.on('end', () => {
+      try { client.close() } catch {}
+      if (status >= 200 && status < 300) {
+        return resolve({ ok: true, status, reason: null })
+      }
+      let reason: string | null = null
+      try {
+        reason = JSON.parse(raw || '{}')?.reason || null
+      } catch {
+        reason = raw || null
+      }
+      resolve({ ok: false, status, reason: reason || 'unknown' })
+    })
+
+    req.end(JSON.stringify({
+      aps: {
+        alert: {
+          title: payload.title,
+          body: payload.body,
+        },
+        sound: 'default',
+      },
+      ...(payload.data || {}),
+    }))
+  })
+}
+
 async function sendPushToDeviceToken(token: string, payload: { title: string, body: string, data?: Record<string, any> }) {
   const authToken = getApnsJwtToken()
   if (!authToken || !APNS_BUNDLE_ID) return false
   try {
     const sendOnce = async (host: string) => {
-      const endpoint = `https://${host}/3/device/${encodeURIComponent(token)}`
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          authorization: `bearer ${authToken}`,
-          'apns-topic': APNS_BUNDLE_ID,
-          'apns-push-type': 'alert',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          aps: {
-            alert: {
-              title: payload.title,
-              body: payload.body,
-            },
-            sound: 'default',
-          },
-          ...(payload.data || {}),
-        }),
-      })
-      if (response.ok) return { ok: true as const, host, status: response.status, reason: null as string | null }
-      const responseText = await response.text().catch(() => '')
-      const reason = (() => {
-        try {
-          return JSON.parse(responseText || '{}')?.reason || null
-        } catch {
-          return null
-        }
-      })()
-      return { ok: false as const, host, status: response.status, reason: reason || responseText || 'unknown' }
+      const response = await apnsRequest(host, token, authToken, payload)
+      return { ...response, host }
     }
 
     const first = await sendOnce(APNS_PRIMARY_HOST)
