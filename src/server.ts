@@ -12,7 +12,7 @@ import { nanoid } from 'nanoid'
 import QRCode from 'qrcode'
 import nodemailer from 'nodemailer'
 import { addDays } from 'date-fns'
-import { randomUUID } from 'crypto'
+import { createPrivateKey, randomUUID } from 'crypto'
 import { HHMM_TIME_REGEX, buildMatchdayMetadataPatch, matchdayMetadataSchema, toPublicMatchday } from './matchday-metadata'
 import {
   attendanceSessionTypeVariants,
@@ -911,6 +911,81 @@ async function listAcceptedParentUsersByPlayerIds(clubId: string, playerIds: str
   return map
 }
 
+async function listReadOnlyUserIdsForTeam(_clubId: string, teamId: string) {
+  const teamPlayers = await prisma.player.findMany({
+    where: {
+      teamId,
+    },
+    select: {
+      id: true,
+      userId: true,
+    },
+  })
+
+  const recipientIds = new Set<string>()
+  const playerIds: string[] = []
+  for (const player of teamPlayers) {
+    playerIds.push(player.id)
+    if (player.userId) recipientIds.add(player.userId)
+  }
+
+  const parentsByPlayerId = await listAcceptedParentUsersByPlayerIds(_clubId, playerIds)
+  for (const parentRows of parentsByPlayerId.values()) {
+    for (const parent of parentRows) {
+      if (parent?.id) recipientIds.add(parent.id)
+    }
+  }
+
+  return Array.from(recipientIds)
+}
+
+async function notifyDirectMessageRecipients(params: {
+  senderAuth: any
+  team: { id: string, clubId: string }
+  conversationId: string
+}) {
+  const readOnlyRecipients = await listReadOnlyUserIdsForTeam(params.team.clubId, params.team.id)
+  const playerScopedRecipients = new Set<string>()
+  for (const userId of readOnlyRecipients) playerScopedRecipients.add(userId)
+
+  if (params.senderAuth?.role === 'COACH' || params.senderAuth?.role === 'DIRECTION') {
+    const filtered = Array.from(playerScopedRecipients).filter((id) => id !== params.senderAuth.id)
+    await sendPushToUsers(filtered, {
+      title: 'Nouveau message',
+      body: 'Vous avez reçu un message du staff.',
+      data: {
+        type: 'MESSAGE',
+        conversationId: params.conversationId,
+        teamId: params.team.id,
+      },
+    })
+    return
+  }
+
+  const staff = await prisma.user.findMany({
+    where: {
+      clubId: params.team.clubId,
+      OR: [
+        { role: 'DIRECTION' },
+        { role: 'COACH', managedTeamIds: { has: params.team.id } },
+      ],
+    },
+    select: { id: true },
+  })
+  const staffRecipientIds = staff
+    .map((row) => row.id)
+    .filter((id) => id && id !== params.senderAuth?.id)
+  await sendPushToUsers(staffRecipientIds, {
+    title: 'Nouveau message',
+    body: 'Un parent ou joueur vous a envoyé un message.',
+    data: {
+      type: 'MESSAGE',
+      conversationId: params.conversationId,
+      teamId: params.team.id,
+    },
+  })
+}
+
 async function buildTrainingIntentDecorations(auth: any, trainings: any[], linkedPlayerId?: string | null) {
   const trainingIds = Array.from(new Set(trainings.map((training) => training.id).filter(Boolean)))
   if (!trainingIds.length) {
@@ -1368,6 +1443,139 @@ try {
 } catch (e: any) {
   console.warn('[smtp] Failed to initialize transporter. Email notifications disabled.', e?.message || e)
   transporter = null
+}
+
+const APNS_KEY_ID = (process.env.APNS_KEY_ID || '').trim()
+const APNS_TEAM_ID = (process.env.APNS_TEAM_ID || '').trim()
+const APNS_BUNDLE_ID = (process.env.APNS_BUNDLE_ID || '').trim()
+const APNS_PRIVATE_KEY_RAW = (process.env.APNS_PRIVATE_KEY || '').trim()
+const APNS_USE_SANDBOX = String(process.env.APNS_USE_SANDBOX || '').toLowerCase() === 'true'
+const APNS_HOST = APNS_USE_SANDBOX ? 'api.sandbox.push.apple.com' : 'api.push.apple.com'
+
+let apnsPrivateKey: ReturnType<typeof createPrivateKey> | null = null
+let apnsJwtCache: { token: string, issuedAtSec: number } | null = null
+
+function parseApnsPrivateKey(raw: string): string {
+  if (!raw) return ''
+  const normalized = raw.replace(/\\n/g, '\n').trim()
+  if (normalized.includes('-----BEGIN')) return normalized
+  try {
+    return Buffer.from(normalized, 'base64').toString('utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+try {
+  if (APNS_KEY_ID && APNS_TEAM_ID && APNS_BUNDLE_ID && APNS_PRIVATE_KEY_RAW) {
+    const apnsPem = parseApnsPrivateKey(APNS_PRIVATE_KEY_RAW)
+    if (apnsPem) {
+      apnsPrivateKey = createPrivateKey({ key: apnsPem, format: 'pem' })
+      console.log(`[apns] Enabled (${APNS_USE_SANDBOX ? 'sandbox' : 'production'})`)
+    } else {
+      console.warn('[apns] Invalid APNS_PRIVATE_KEY format. Push notifications disabled.')
+    }
+  } else {
+    console.warn('[apns] Missing APNS env vars. Push notifications disabled.')
+  }
+} catch (e: any) {
+  console.warn('[apns] Failed to initialize APNs key. Push notifications disabled.', e?.message || e)
+  apnsPrivateKey = null
+}
+
+function getApnsJwtToken(): string | null {
+  if (!apnsPrivateKey || !APNS_KEY_ID || !APNS_TEAM_ID) return null
+  const nowSec = Math.floor(Date.now() / 1000)
+  if (apnsJwtCache && (nowSec - apnsJwtCache.issuedAtSec) < 50 * 60) {
+    return apnsJwtCache.token
+  }
+
+  const token = jwt.sign({}, apnsPrivateKey as any, {
+    algorithm: 'ES256',
+    issuer: APNS_TEAM_ID,
+    header: { alg: 'ES256', kid: APNS_KEY_ID },
+  })
+  apnsJwtCache = { token, issuedAtSec: nowSec }
+  return token
+}
+
+async function disablePushDeviceToken(token: string) {
+  try {
+    await prisma.pushDevice.updateMany({
+      where: { token },
+      data: { enabled: false },
+    })
+  } catch {
+    // best effort
+  }
+}
+
+async function sendPushToDeviceToken(token: string, payload: { title: string, body: string, data?: Record<string, any> }) {
+  const authToken = getApnsJwtToken()
+  if (!authToken || !APNS_BUNDLE_ID) return false
+  try {
+    const endpoint = `https://${APNS_HOST}/3/device/${encodeURIComponent(token)}`
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `bearer ${authToken}`,
+        'apns-topic': APNS_BUNDLE_ID,
+        'apns-push-type': 'alert',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        aps: {
+          alert: {
+            title: payload.title,
+            body: payload.body,
+          },
+          sound: 'default',
+        },
+        ...(payload.data || {}),
+      }),
+    })
+
+    if (response.ok) return true
+
+    const responseText = await response.text().catch(() => '')
+    const reason = (() => {
+      try {
+        return JSON.parse(responseText || '{}')?.reason || null
+      } catch {
+        return null
+      }
+    })()
+    if (reason === 'Unregistered' || reason === 'BadDeviceToken' || reason === 'DeviceTokenNotForTopic') {
+      await disablePushDeviceToken(token)
+    }
+    console.warn('[apns] send failed', { status: response.status, reason: reason || responseText || 'unknown' })
+    return false
+  } catch (e: any) {
+    console.warn('[apns] transport failure', e?.message || e)
+    return false
+  }
+}
+
+async function sendPushToUsers(userIds: string[], payload: { title: string, body: string, data?: Record<string, any> }) {
+  try {
+    const uniqueUserIds = Array.from(new Set(userIds.filter(Boolean)))
+    if (!uniqueUserIds.length) return
+    if (!apnsPrivateKey) return
+
+    const devices = await prisma.pushDevice.findMany({
+      where: {
+        userId: { in: uniqueUserIds },
+        platform: 'IOS',
+        enabled: true,
+      },
+      select: { token: true },
+    })
+    if (!devices.length) return
+
+    await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, payload)))
+  } catch (e: any) {
+    console.warn('[apns] user dispatch failed', e?.message || e)
+  }
 }
 
 // --- Waitlist helpers (in‑memory) ---
@@ -3191,6 +3399,47 @@ app.put('/me/profile', authMiddleware, async (req: any, res) => {
   }
 
   res.json(updated)
+})
+
+app.post('/me/push-token', authMiddleware, async (req: any, res) => {
+  const schema = z.object({
+    token: z.string().trim().min(16).max(512),
+    platform: z.enum(['IOS']).optional(),
+    enabled: z.boolean().optional(),
+  })
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+
+  const now = new Date()
+  const token = parsed.data.token.trim()
+  const enabled = parsed.data.enabled ?? true
+
+  if (!enabled) {
+    await prisma.pushDevice.updateMany({
+      where: { userId: req.auth.id, token },
+      data: { enabled: false, lastSeenAt: now },
+    })
+    return res.json({ ok: true })
+  }
+
+  await prisma.pushDevice.upsert({
+    where: { token },
+    create: {
+      userId: req.auth.id,
+      platform: 'IOS',
+      token,
+      enabled: true,
+      lastSeenAt: now,
+    },
+    update: {
+      userId: req.auth.id,
+      platform: 'IOS',
+      enabled: true,
+      lastSeenAt: now,
+    },
+  })
+
+  return res.json({ ok: true })
 })
 
 app.put('/me/team', authMiddleware, async (req: any, res) => {
@@ -5256,6 +5505,30 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
     clubId: team.clubId,
     teamId: team.id
   })
+
+  const readOnlyRecipients = await listReadOnlyUserIdsForTeam(team.clubId, team.id)
+  const teamInfo = await prisma.team.findFirst({
+    where: { id: team.id, clubId: team.clubId },
+    select: { name: true },
+  })
+  const trainingDateLabel = new Intl.DateTimeFormat('fr-FR', {
+    timeZone: 'Europe/Paris',
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(t.date))
+  await sendPushToUsers(readOnlyRecipients, {
+    title: 'Nouvel entraînement',
+    body: `${teamInfo?.name || 'Votre équipe'} • ${trainingDateLabel}`,
+    data: {
+      type: 'TRAINING_CREATED',
+      trainingId: t.id,
+      teamId: team.id,
+    },
+  })
+
   res.json(t)
 })
 
@@ -7651,6 +7924,17 @@ app.post('/messages/conversations/:id/messages', authMiddleware, async (req: any
       },
       include: { author: { select: { id: true, firstName: true, lastName: true, role: true } } },
     })
+    const recipientIds = (await listReadOnlyUserIdsForTeam(team.clubId, team.id))
+      .filter((userId) => userId !== req.auth.id)
+    await sendPushToUsers(recipientIds, {
+      title: 'Nouvelle annonce',
+      body: parsedBody.data.content.length > 120 ? `${parsedBody.data.content.slice(0, 117)}...` : parsedBody.data.content,
+      data: {
+        type: 'MESSAGE',
+        conversationId: conversationIdForAnnouncements(team.id),
+        teamId: team.id,
+      },
+    })
     return res.status(201).json({
       id: created.id,
       content: created.content,
@@ -7685,6 +7969,12 @@ app.post('/messages/conversations/:id/messages', authMiddleware, async (req: any
       content: parsedBody.data.content,
     },
     include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+  })
+
+  await notifyDirectMessageRecipients({
+    senderAuth: req.auth,
+    team,
+    conversationId: conversationIdForCoach(team.id, player.id),
   })
 
   return res.status(201).json({

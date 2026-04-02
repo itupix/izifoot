@@ -39,6 +39,7 @@ model User {
   directMessagesSent      DirectMessage[]
   teamMessageLikes        TeamMessageLike[]
   teamMessageReads        TeamMessageRead[]
+  pushDevices             PushDevice[]
 }
 
 enum UserRole {
@@ -461,4 +462,18 @@ model Tactic {
 
   @@index([teamId])
   @@index([teamId, updatedAt(sort: Desc)])
+}
+
+model PushDevice {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform   String   @db.VarChar(16)
+  token      String   @unique
+  enabled    Boolean  @default(true)
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId, platform, enabled])
 }
