@@ -1450,7 +1450,8 @@ const APNS_TEAM_ID = (process.env.APNS_TEAM_ID || '').trim()
 const APNS_BUNDLE_ID = (process.env.APNS_BUNDLE_ID || '').trim()
 const APNS_PRIVATE_KEY_RAW = (process.env.APNS_PRIVATE_KEY || '').trim()
 const APNS_USE_SANDBOX = String(process.env.APNS_USE_SANDBOX || '').toLowerCase() === 'true'
-const APNS_HOST = APNS_USE_SANDBOX ? 'api.sandbox.push.apple.com' : 'api.push.apple.com'
+const APNS_PRIMARY_HOST = APNS_USE_SANDBOX ? 'api.sandbox.push.apple.com' : 'api.push.apple.com'
+const APNS_SECONDARY_HOST = APNS_USE_SANDBOX ? 'api.push.apple.com' : 'api.sandbox.push.apple.com'
 
 let apnsPrivateKey: ReturnType<typeof createPrivateKey> | null = null
 let apnsJwtCache: { token: string, issuedAtSec: number } | null = null
@@ -1514,41 +1515,61 @@ async function sendPushToDeviceToken(token: string, payload: { title: string, bo
   const authToken = getApnsJwtToken()
   if (!authToken || !APNS_BUNDLE_ID) return false
   try {
-    const endpoint = `https://${APNS_HOST}/3/device/${encodeURIComponent(token)}`
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        authorization: `bearer ${authToken}`,
-        'apns-topic': APNS_BUNDLE_ID,
-        'apns-push-type': 'alert',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        aps: {
-          alert: {
-            title: payload.title,
-            body: payload.body,
-          },
-          sound: 'default',
+    const sendOnce = async (host: string) => {
+      const endpoint = `https://${host}/3/device/${encodeURIComponent(token)}`
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          authorization: `bearer ${authToken}`,
+          'apns-topic': APNS_BUNDLE_ID,
+          'apns-push-type': 'alert',
+          'content-type': 'application/json',
         },
-        ...(payload.data || {}),
-      }),
-    })
+        body: JSON.stringify({
+          aps: {
+            alert: {
+              title: payload.title,
+              body: payload.body,
+            },
+            sound: 'default',
+          },
+          ...(payload.data || {}),
+        }),
+      })
+      if (response.ok) return { ok: true as const, host, status: response.status, reason: null as string | null }
+      const responseText = await response.text().catch(() => '')
+      const reason = (() => {
+        try {
+          return JSON.parse(responseText || '{}')?.reason || null
+        } catch {
+          return null
+        }
+      })()
+      return { ok: false as const, host, status: response.status, reason: reason || responseText || 'unknown' }
+    }
 
-    if (response.ok) return true
+    const first = await sendOnce(APNS_PRIMARY_HOST)
+    if (first.ok) return true
 
-    const responseText = await response.text().catch(() => '')
-    const reason = (() => {
-      try {
-        return JSON.parse(responseText || '{}')?.reason || null
-      } catch {
-        return null
+    const shouldRetryOnOtherHost =
+      first.reason === 'BadDeviceToken' ||
+      first.reason === 'DeviceTokenNotForTopic' ||
+      first.reason === 'Unregistered'
+
+    if (shouldRetryOnOtherHost) {
+      const second = await sendOnce(APNS_SECONDARY_HOST)
+      if (second.ok) return true
+      if (second.reason === 'Unregistered' || second.reason === 'BadDeviceToken' || second.reason === 'DeviceTokenNotForTopic') {
+        await disablePushDeviceToken(token)
       }
-    })()
-    if (reason === 'Unregistered' || reason === 'BadDeviceToken' || reason === 'DeviceTokenNotForTopic') {
+      console.warn('[apns] send failed on both hosts', { first, second })
+      return false
+    }
+
+    if (first.reason === 'Unregistered' || first.reason === 'BadDeviceToken' || first.reason === 'DeviceTokenNotForTopic') {
       await disablePushDeviceToken(token)
     }
-    console.warn('[apns] send failed', { status: response.status, reason: reason || responseText || 'unknown' })
+    console.warn('[apns] send failed', first)
     return false
   } catch (e: any) {
     console.warn('[apns] transport failure', e?.message || e)
