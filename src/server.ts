@@ -1552,7 +1552,7 @@ async function disablePushDeviceToken(token: string) {
   }
 }
 
-async function apnsRequest(host: string, topic: string, deviceToken: string, authToken: string, payload: { title: string, body: string, data?: Record<string, any> }) {
+async function apnsRequest(host: string, topic: string, deviceToken: string, authToken: string, payload: { title: string, body: string, badge?: number, data?: Record<string, any> }) {
   return await new Promise<{ ok: boolean, status: number, reason: string | null }>((resolve) => {
     const client = http2.connect(`https://${host}`)
     client.on('error', () => {
@@ -1603,13 +1603,14 @@ async function apnsRequest(host: string, topic: string, deviceToken: string, aut
           body: payload.body,
         },
         sound: 'default',
+        ...(payload.badge !== undefined ? { badge: payload.badge } : {}),
       },
       ...(payload.data || {}),
     }))
   })
 }
 
-async function sendPushToDeviceToken(token: string, payload: { title: string, body: string, data?: Record<string, any> }): Promise<boolean> {
+async function sendPushToDeviceToken(token: string, payload: { title: string, body: string, badge?: number, data?: Record<string, any> }): Promise<boolean> {
   const authToken = getApnsJwtToken()
   if (!authToken || APNS_BUNDLE_IDS.length === 0) return false
   try {
@@ -1657,17 +1658,36 @@ async function sendPushToUsers(userIds: string[], payload: { title: string, body
     if (!uniqueUserIds.length) return
     if (!apnsPrivateKey) return
 
+    const badgeByUserId = new Map<string, number>()
+    if ((payload.data?.type || '') === 'MESSAGE') {
+      await Promise.all(uniqueUserIds.map(async (userId) => {
+        try {
+          const updated = await prisma.user.update({
+            where: { id: userId },
+            data: { pushBadgeCount: { increment: 1 } },
+            select: { pushBadgeCount: true },
+          })
+          badgeByUserId.set(userId, updated.pushBadgeCount)
+        } catch {
+          // Non-blocking for push delivery.
+        }
+      }))
+    }
+
     const devices = await prisma.pushDevice.findMany({
       where: {
         userId: { in: uniqueUserIds },
         platform: 'IOS',
         enabled: true,
       },
-      select: { token: true },
+      select: { token: true, userId: true },
     })
     if (!devices.length) return
 
-    const results = await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, payload)))
+    const results = await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, {
+      ...payload,
+      badge: badgeByUserId.get(device.userId),
+    })))
     const okCount = results.filter((item) => item.status === 'fulfilled' && item.value === true).length
     const failCount = results.length - okCount
     if (failCount > 0) {
@@ -3545,6 +3565,14 @@ app.post('/me/push-token', authMiddleware, async (req: any, res) => {
     },
   })
 
+  return res.json({ ok: true })
+})
+
+app.post('/me/push-badge/reset', authMiddleware, async (req: any, res) => {
+  await prisma.user.update({
+    where: { id: req.auth.id },
+    data: { pushBadgeCount: 0 },
+  })
   return res.json({ ok: true })
 })
 

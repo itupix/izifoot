@@ -22,6 +22,7 @@ model User {
   team                    Team?                    @relation(fields: [teamId], references: [id])
   managedTeamIds          String[]                 @default([])
   linkedPlayerUserId      String?
+  pushBadgeCount          Int                      @default(0)
   createdAt               DateTime                 @default(now())
   accountInvitesSent      AccountInvite[]          @relation("InviteSender")
   acceptedInvite          AccountInvite?           @relation("InviteAcceptedUser")

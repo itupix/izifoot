@@ -1488,6 +1488,7 @@ async function apnsRequest(host, topic, deviceToken, authToken, payload) {
                     body: payload.body,
                 },
                 sound: 'default',
+                ...(payload.badge !== undefined ? { badge: payload.badge } : {}),
             },
             ...(payload.data || {}),
         }));
@@ -1540,17 +1541,36 @@ async function sendPushToUsers(userIds, payload) {
             return;
         if (!apnsPrivateKey)
             return;
+        const badgeByUserId = new Map();
+        if ((payload.data?.type || '') === 'MESSAGE') {
+            await Promise.all(uniqueUserIds.map(async (userId) => {
+                try {
+                    const updated = await prisma.user.update({
+                        where: { id: userId },
+                        data: { pushBadgeCount: { increment: 1 } },
+                        select: { pushBadgeCount: true },
+                    });
+                    badgeByUserId.set(userId, updated.pushBadgeCount);
+                }
+                catch {
+                    // Non-blocking for push delivery.
+                }
+            }));
+        }
         const devices = await prisma.pushDevice.findMany({
             where: {
                 userId: { in: uniqueUserIds },
                 platform: 'IOS',
                 enabled: true,
             },
-            select: { token: true },
+            select: { token: true, userId: true },
         });
         if (!devices.length)
             return;
-        const results = await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, payload)));
+        const results = await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, {
+            ...payload,
+            badge: badgeByUserId.get(device.userId),
+        })));
         const okCount = results.filter((item) => item.status === 'fulfilled' && item.value === true).length;
         const failCount = results.length - okCount;
         if (failCount > 0) {
@@ -3320,6 +3340,13 @@ app.post('/me/push-token', authMiddleware, async (req, res) => {
             enabled: true,
             lastSeenAt: now,
         },
+    });
+    return res.json({ ok: true });
+});
+app.post('/me/push-badge/reset', authMiddleware, async (req, res) => {
+    await prisma.user.update({
+        where: { id: req.auth.id },
+        data: { pushBadgeCount: 0 },
     });
     return res.json({ ok: true });
 });
