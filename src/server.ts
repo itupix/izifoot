@@ -940,9 +940,13 @@ async function listReadOnlyUserIdsForTeam(_clubId: string, teamId: string) {
 
   const recipientIds = new Set<string>()
   const playerIds: string[] = []
+  const playerUserIds = new Set<string>()
   for (const player of teamPlayers) {
     playerIds.push(player.id)
-    if (player.userId) recipientIds.add(player.userId)
+    if (player.userId) {
+      recipientIds.add(player.userId)
+      playerUserIds.add(player.userId)
+    }
   }
 
   const parentsByPlayerId = await listAcceptedParentUsersByPlayerIds(_clubId, playerIds)
@@ -955,6 +959,19 @@ async function listReadOnlyUserIdsForTeam(_clubId: string, teamId: string) {
   // Fallback for legacy parent links where linkedPlayerId can be missing on accepted invites.
   const fallbackParentUserIds = await listAcceptedParentUserIdsByTeam(_clubId, teamId)
   for (const parentUserId of fallbackParentUserIds) recipientIds.add(parentUserId)
+
+  // Additional fallback for legacy parent accounts linked only through User.linkedPlayerUserId.
+  if (playerUserIds.size > 0) {
+    const linkedParents = await prisma.user.findMany({
+      where: {
+        clubId: _clubId,
+        role: 'PARENT',
+        linkedPlayerUserId: { in: Array.from(playerUserIds) },
+      },
+      select: { id: true },
+    })
+    for (const parent of linkedParents) recipientIds.add(parent.id)
+  }
 
   return Array.from(recipientIds)
 }
