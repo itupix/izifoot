@@ -3,6 +3,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.trainingAttendancePutBodySchema = void 0;
 exports.attendanceStoredSessionType = attendanceStoredSessionType;
 exports.attendanceSessionTypeVariants = attendanceSessionTypeVariants;
+exports.trainingIntentStoredSessionType = trainingIntentStoredSessionType;
+exports.trainingIntentSessionTypeVariants = trainingIntentSessionTypeVariants;
+exports.normalizeTrainingIntentRow = normalizeTrainingIntentRow;
 exports.normalizeAttendanceRow = normalizeAttendanceRow;
 exports.dedupeStringList = dedupeStringList;
 exports.buildTrainingAttendanceSnapshot = buildTrainingAttendanceSnapshot;
@@ -16,6 +19,23 @@ function attendanceStoredSessionType(sessionType, present) {
 }
 function attendanceSessionTypeVariants(sessionType) {
     return [sessionType, `${sessionType}_ABSENT`];
+}
+function trainingIntentStoredSessionType(present) {
+    return present ? 'TRAINING_INTENT' : 'TRAINING_INTENT_ABSENT';
+}
+function trainingIntentSessionTypeVariants() {
+    return ['TRAINING_INTENT', 'TRAINING_INTENT_ABSENT'];
+}
+function normalizeTrainingIntentRow(row) {
+    if (!row?.playerId || !row?.session_id)
+        return null;
+    if (row.session_type === 'TRAINING_INTENT') {
+        return { playerId: row.playerId, trainingId: row.session_id, intent: 'PRESENT' };
+    }
+    if (row.session_type === 'TRAINING_INTENT_ABSENT') {
+        return { playerId: row.playerId, trainingId: row.session_id, intent: 'ABSENT' };
+    }
+    return null;
 }
 function normalizeAttendanceRow(row) {
     if (row.session_type === 'TRAINING_ABSENT') {

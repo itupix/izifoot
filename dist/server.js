@@ -18,6 +18,7 @@ const qrcode_1 = __importDefault(require("qrcode"));
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const date_fns_1 = require("date-fns");
 const crypto_1 = require("crypto");
+const http2_1 = __importDefault(require("http2"));
 const matchday_metadata_1 = require("./matchday-metadata");
 const attendance_1 = require("./attendance");
 const training_role_assignments_1 = require("./training-role-assignments");
@@ -506,6 +507,29 @@ const teamMessageCreateBodySchema = zod_1.z.object({
     content: zod_1.z.string().trim().min(1).max(2000),
     teamId: zod_1.z.string().trim().min(1).optional(),
 });
+const directMessageCreateBodySchema = zod_1.z.object({
+    content: zod_1.z.string().trim().min(1).max(2000),
+});
+function conversationIdForAnnouncements(teamId) {
+    return `announcements:${teamId}`;
+}
+function conversationIdForCoach(teamId, playerId) {
+    return `coach:${teamId}:${playerId}`;
+}
+function parseConversationId(raw) {
+    const value = String(raw || '').trim();
+    if (!value)
+        return null;
+    const announcementsMatch = value.match(/^announcements:([a-zA-Z0-9_-]+)$/);
+    if (announcementsMatch) {
+        return { kind: 'ANNOUNCEMENTS', teamId: announcementsMatch[1] };
+    }
+    const coachMatch = value.match(/^coach:([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+)$/);
+    if (coachMatch) {
+        return { kind: 'COACH', teamId: coachMatch[1], playerId: coachMatch[2] };
+    }
+    return null;
+}
 async function resolveReadableTeamForMessaging(auth, requestedTeamId) {
     if (!auth?.clubId) {
         const err = new Error('No club attached to account');
@@ -683,6 +707,282 @@ async function attendanceSetMatchdayRsvpForUser(db, scopeOrUserId, matchdayId, p
         playerId,
         present,
     });
+}
+function isTrainingOpenForIntent(training) {
+    if ((training.status || '').toUpperCase() === 'CANCELLED')
+        return false;
+    const trainingDate = new Date(training.date);
+    if (Number.isNaN(trainingDate.getTime()))
+        return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const trainingDay = new Date(trainingDate.getFullYear(), trainingDate.getMonth(), trainingDate.getDate());
+    return trainingDay.getTime() >= today.getTime();
+}
+async function resolveReadOnlyLinkedPlayer(auth) {
+    if (!auth?.id || (auth.role !== 'PLAYER' && auth.role !== 'PARENT'))
+        return null;
+    if (auth.role === 'PLAYER') {
+        return playerFindFirstForUser(prisma, auth, {
+            where: { userId: auth.id },
+            select: { id: true, userId: true, clubId: true, teamId: true },
+        });
+    }
+    if (ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID) {
+        const acceptedInvite = await prisma.accountInvite.findFirst({
+            where: {
+                role: 'PARENT',
+                status: 'ACCEPTED',
+                userId: auth.id,
+                ...(auth.clubId ? { clubId: auth.clubId } : {}),
+                linkedPlayerId: { not: null },
+            },
+            select: { linkedPlayerId: true },
+            orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }],
+        });
+        if (acceptedInvite?.linkedPlayerId) {
+            const linkedById = await playerFindFirstForUser(prisma, auth, {
+                where: { id: acceptedInvite.linkedPlayerId },
+                select: { id: true, userId: true, clubId: true, teamId: true },
+            });
+            if (linkedById)
+                return linkedById;
+        }
+    }
+    const parentUser = await prisma.user.findUnique({
+        where: { id: auth.id },
+        select: { linkedPlayerUserId: true },
+    });
+    const candidateUserIds = [
+        parentUser?.linkedPlayerUserId ?? null,
+        auth.id,
+    ].filter((value, index, arr) => Boolean(value) && arr.indexOf(value) === index);
+    if (!candidateUserIds.length)
+        return null;
+    return playerFindFirstForUser(prisma, auth, {
+        where: { userId: { in: candidateUserIds } },
+        select: { id: true, userId: true, clubId: true, teamId: true },
+    });
+}
+async function resolveCoachConversationPlayer(auth, team, playerId) {
+    if (!playerId)
+        return null;
+    const player = await playerFindFirstForUser(prisma, auth, {
+        where: { id: playerId, teamId: team.id },
+        select: {
+            id: true,
+            teamId: true,
+            clubId: true,
+            userId: true,
+            name: true,
+            first_name: true,
+            last_name: true,
+            is_child: true,
+        },
+    });
+    if (!player)
+        return null;
+    if (auth.role === 'COACH' || auth.role === 'DIRECTION')
+        return player;
+    const linkedPlayer = await resolveReadOnlyLinkedPlayer(auth);
+    if (!linkedPlayer)
+        return null;
+    if (linkedPlayer.id !== player.id)
+        return null;
+    if (linkedPlayer.teamId && linkedPlayer.teamId !== team.id)
+        return null;
+    return player;
+}
+async function listAcceptedParentUsersByPlayerIds(clubId, playerIds) {
+    if (!clubId || playerIds.length === 0)
+        return new Map();
+    const invites = await prisma.accountInvite.findMany({
+        where: {
+            clubId,
+            role: 'PARENT',
+            status: 'ACCEPTED',
+            linkedPlayerId: { in: playerIds },
+            userId: { not: null },
+        },
+        select: {
+            linkedPlayerId: true,
+            userId: true,
+            firstName: true,
+            lastName: true,
+            user: {
+                select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+            },
+        },
+    });
+    const map = new Map();
+    for (const invite of invites) {
+        if (!invite.linkedPlayerId)
+            continue;
+        const current = map.get(invite.linkedPlayerId) || [];
+        current.push({
+            id: invite.user?.id || invite.userId,
+            firstName: invite.user?.firstName || invite.firstName || null,
+            lastName: invite.user?.lastName || invite.lastName || null,
+            email: invite.user?.email || null,
+            phone: invite.user?.phone || null,
+            role: 'PARENT',
+        });
+        map.set(invite.linkedPlayerId, current);
+    }
+    return map;
+}
+async function listAcceptedParentUserIdsByTeam(clubId, teamId) {
+    if (!clubId || !teamId)
+        return [];
+    const invites = await prisma.accountInvite.findMany({
+        where: {
+            clubId,
+            teamId,
+            role: 'PARENT',
+            status: 'ACCEPTED',
+            userId: { not: null },
+        },
+        select: { userId: true },
+    });
+    return Array.from(new Set(invites.map((invite) => invite.userId).filter((value) => Boolean(value))));
+}
+async function listReadOnlyUserIdsForTeam(_clubId, teamId) {
+    const teamPlayers = await prisma.player.findMany({
+        where: {
+            teamId,
+        },
+        select: {
+            id: true,
+            userId: true,
+        },
+    });
+    const recipientIds = new Set();
+    const playerIds = [];
+    for (const player of teamPlayers) {
+        playerIds.push(player.id);
+        if (player.userId)
+            recipientIds.add(player.userId);
+    }
+    const parentsByPlayerId = await listAcceptedParentUsersByPlayerIds(_clubId, playerIds);
+    for (const parentRows of parentsByPlayerId.values()) {
+        for (const parent of parentRows) {
+            if (parent?.id)
+                recipientIds.add(parent.id);
+        }
+    }
+    // Fallback for legacy parent links where linkedPlayerId can be missing on accepted invites.
+    const fallbackParentUserIds = await listAcceptedParentUserIdsByTeam(_clubId, teamId);
+    for (const parentUserId of fallbackParentUserIds)
+        recipientIds.add(parentUserId);
+    return Array.from(recipientIds);
+}
+async function notifyDirectMessageRecipients(params) {
+    const readOnlyRecipients = await listReadOnlyUserIdsForTeam(params.team.clubId, params.team.id);
+    const playerScopedRecipients = new Set();
+    for (const userId of readOnlyRecipients)
+        playerScopedRecipients.add(userId);
+    if (params.senderAuth?.role === 'COACH' || params.senderAuth?.role === 'DIRECTION') {
+        const filtered = Array.from(playerScopedRecipients).filter((id) => id !== params.senderAuth.id);
+        await sendPushToUsers(filtered, {
+            title: 'Nouveau message',
+            body: 'Vous avez reçu un message du staff.',
+            data: {
+                type: 'MESSAGE',
+                conversationId: params.conversationId,
+                teamId: params.team.id,
+            },
+        });
+        return;
+    }
+    const staff = await prisma.user.findMany({
+        where: {
+            clubId: params.team.clubId,
+            OR: [
+                { role: 'DIRECTION' },
+                { role: 'COACH', managedTeamIds: { has: params.team.id } },
+            ],
+        },
+        select: { id: true },
+    });
+    const staffRecipientIds = staff
+        .map((row) => row.id)
+        .filter((id) => id && id !== params.senderAuth?.id);
+    await sendPushToUsers(staffRecipientIds, {
+        title: 'Nouveau message',
+        body: 'Un parent ou joueur vous a envoyé un message.',
+        data: {
+            type: 'MESSAGE',
+            conversationId: params.conversationId,
+            teamId: params.team.id,
+        },
+    });
+}
+async function buildTrainingIntentDecorations(auth, trainings, linkedPlayerId) {
+    const trainingIds = Array.from(new Set(trainings.map((training) => training.id).filter(Boolean)));
+    if (!trainingIds.length) {
+        return {
+            intentByTrainingAndPlayer: new Map(),
+            summaryByTrainingId: new Map(),
+            myIntentByTrainingId: new Map(),
+            canRespondByTrainingId: new Map(),
+        };
+    }
+    const teamIds = Array.from(new Set(trainings.map((training) => training.teamId).filter(Boolean)));
+    const playersByTeamId = new Map();
+    if (teamIds.length > 0) {
+        const teamPlayers = await playerFindManyForUser(prisma, auth, {
+            where: { teamId: { in: teamIds } },
+            select: { id: true, teamId: true },
+        });
+        for (const player of teamPlayers) {
+            if (!player.teamId)
+                continue;
+            const existing = playersByTeamId.get(player.teamId) ?? [];
+            existing.push(player.id);
+            playersByTeamId.set(player.teamId, existing);
+        }
+    }
+    const intentRows = await attendanceFindManyForUser(prisma, auth, {
+        where: {
+            session_type: { in: (0, attendance_1.trainingIntentSessionTypeVariants)() },
+            session_id: { in: trainingIds },
+        },
+        select: {
+            session_type: true,
+            session_id: true,
+            playerId: true,
+        },
+    });
+    const intentByTrainingAndPlayer = new Map();
+    for (const row of intentRows) {
+        const normalized = (0, attendance_1.normalizeTrainingIntentRow)(row);
+        if (!normalized)
+            continue;
+        intentByTrainingAndPlayer.set(`${normalized.trainingId}:${normalized.playerId}`, normalized.intent);
+    }
+    const summaryByTrainingId = new Map();
+    const myIntentByTrainingId = new Map();
+    const canRespondByTrainingId = new Map();
+    for (const training of trainings) {
+        const teamPlayerIds = training.teamId ? (playersByTeamId.get(training.teamId) ?? []) : [];
+        let presentCount = 0;
+        let absentCount = 0;
+        for (const playerId of teamPlayerIds) {
+            const key = `${training.id}:${playerId}`;
+            const intent = intentByTrainingAndPlayer.get(key);
+            if (intent === 'PRESENT')
+                presentCount += 1;
+            if (intent === 'ABSENT')
+                absentCount += 1;
+        }
+        const totalPlayers = teamPlayerIds.length;
+        const unknownCount = Math.max(0, totalPlayers - presentCount - absentCount);
+        summaryByTrainingId.set(training.id, { presentCount, absentCount, unknownCount, totalPlayers });
+        const myIntent = linkedPlayerId ? (intentByTrainingAndPlayer.get(`${training.id}:${linkedPlayerId}`) ?? null) : null;
+        myIntentByTrainingId.set(training.id, myIntent);
+        canRespondByTrainingId.set(training.id, Boolean(linkedPlayerId) && isTrainingOpenForIntent(training));
+    }
+    return { intentByTrainingAndPlayer, summaryByTrainingId, myIntentByTrainingId, canRespondByTrainingId };
 }
 async function resolveAttendanceScopeFromSession(auth, session_type, session_id) {
     if (session_type === 'TRAINING') {
@@ -1039,6 +1339,207 @@ try {
 catch (e) {
     console.warn('[smtp] Failed to initialize transporter. Email notifications disabled.', e?.message || e);
     transporter = null;
+}
+const APNS_KEY_ID = (process.env.APNS_KEY_ID || '').trim();
+const APNS_TEAM_ID = (process.env.APNS_TEAM_ID || '').trim();
+const APNS_BUNDLE_ID = (process.env.APNS_BUNDLE_ID || '').trim();
+const APNS_PRIVATE_KEY_RAW = (process.env.APNS_PRIVATE_KEY || '').trim();
+const APNS_USE_SANDBOX = String(process.env.APNS_USE_SANDBOX || '').toLowerCase() === 'true';
+const APNS_PRIMARY_HOST = APNS_USE_SANDBOX ? 'api.sandbox.push.apple.com' : 'api.push.apple.com';
+const APNS_SECONDARY_HOST = APNS_USE_SANDBOX ? 'api.push.apple.com' : 'api.sandbox.push.apple.com';
+let apnsPrivateKey = null;
+let apnsJwtCache = null;
+function parseApnsPrivateKey(raw) {
+    if (!raw)
+        return '';
+    const normalized = raw.replace(/\\n/g, '\n').trim();
+    if (normalized.includes('-----BEGIN'))
+        return normalized;
+    try {
+        return Buffer.from(normalized, 'base64').toString('utf8').trim();
+    }
+    catch {
+        return '';
+    }
+}
+try {
+    if (APNS_KEY_ID && APNS_TEAM_ID && APNS_BUNDLE_ID && APNS_PRIVATE_KEY_RAW) {
+        const apnsPem = parseApnsPrivateKey(APNS_PRIVATE_KEY_RAW);
+        if (apnsPem) {
+            apnsPrivateKey = (0, crypto_1.createPrivateKey)({ key: apnsPem, format: 'pem' });
+            console.log(`[apns] Enabled (${APNS_USE_SANDBOX ? 'sandbox' : 'production'})`);
+        }
+        else {
+            console.warn('[apns] Invalid APNS_PRIVATE_KEY format. Push notifications disabled.');
+        }
+    }
+    else {
+        console.warn('[apns] Missing APNS env vars. Push notifications disabled.');
+    }
+}
+catch (e) {
+    console.warn('[apns] Failed to initialize APNs key. Push notifications disabled.', e?.message || e);
+    apnsPrivateKey = null;
+}
+function getApnsJwtToken() {
+    if (!apnsPrivateKey || !APNS_KEY_ID || !APNS_TEAM_ID)
+        return null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (apnsJwtCache && (nowSec - apnsJwtCache.issuedAtSec) < 50 * 60) {
+        return apnsJwtCache.token;
+    }
+    const token = jsonwebtoken_1.default.sign({}, apnsPrivateKey, {
+        algorithm: 'ES256',
+        issuer: APNS_TEAM_ID,
+        header: { alg: 'ES256', kid: APNS_KEY_ID },
+    });
+    apnsJwtCache = { token, issuedAtSec: nowSec };
+    return token;
+}
+async function disablePushDeviceToken(token) {
+    try {
+        await prisma.pushDevice.updateMany({
+            where: { token },
+            data: { enabled: false },
+        });
+    }
+    catch {
+        // best effort
+    }
+}
+async function apnsRequest(host, deviceToken, authToken, payload) {
+    return await new Promise((resolve) => {
+        const client = http2_1.default.connect(`https://${host}`);
+        client.on('error', () => {
+            try {
+                client.close();
+            }
+            catch { }
+            resolve({ ok: false, status: 0, reason: 'transport_error' });
+        });
+        const req = client.request({
+            ':method': 'POST',
+            ':path': `/3/device/${encodeURIComponent(deviceToken)}`,
+            authorization: `bearer ${authToken}`,
+            'apns-topic': APNS_BUNDLE_ID,
+            'apns-push-type': 'alert',
+            'content-type': 'application/json',
+        });
+        let status = 0;
+        let raw = '';
+        req.setEncoding('utf8');
+        req.on('response', (headers) => {
+            const received = headers[':status'];
+            status = typeof received === 'number' ? received : Number(received || 0);
+        });
+        req.on('data', (chunk) => { raw += chunk; });
+        req.on('error', () => {
+            try {
+                req.close();
+            }
+            catch { }
+            try {
+                client.close();
+            }
+            catch { }
+            resolve({ ok: false, status: status || 0, reason: 'transport_error' });
+        });
+        req.on('end', () => {
+            try {
+                client.close();
+            }
+            catch { }
+            if (status >= 200 && status < 300) {
+                return resolve({ ok: true, status, reason: null });
+            }
+            let reason = null;
+            try {
+                reason = JSON.parse(raw || '{}')?.reason || null;
+            }
+            catch {
+                reason = raw || null;
+            }
+            resolve({ ok: false, status, reason: reason || 'unknown' });
+        });
+        req.end(JSON.stringify({
+            aps: {
+                alert: {
+                    title: payload.title,
+                    body: payload.body,
+                },
+                sound: 'default',
+            },
+            ...(payload.data || {}),
+        }));
+    });
+}
+async function sendPushToDeviceToken(token, payload) {
+    const authToken = getApnsJwtToken();
+    if (!authToken || !APNS_BUNDLE_ID)
+        return false;
+    try {
+        const sendOnce = async (host) => {
+            const response = await apnsRequest(host, token, authToken, payload);
+            return { ...response, host };
+        };
+        const first = await sendOnce(APNS_PRIMARY_HOST);
+        if (first.ok)
+            return true;
+        const shouldRetryOnOtherHost = first.reason === 'BadDeviceToken' ||
+            first.reason === 'DeviceTokenNotForTopic' ||
+            first.reason === 'Unregistered';
+        if (shouldRetryOnOtherHost) {
+            const second = await sendOnce(APNS_SECONDARY_HOST);
+            if (second.ok)
+                return true;
+            if (second.reason === 'Unregistered' || second.reason === 'BadDeviceToken' || second.reason === 'DeviceTokenNotForTopic') {
+                await disablePushDeviceToken(token);
+            }
+            console.warn('[apns] send failed on both hosts', { first, second });
+            return false;
+        }
+        if (first.reason === 'Unregistered' || first.reason === 'BadDeviceToken' || first.reason === 'DeviceTokenNotForTopic') {
+            await disablePushDeviceToken(token);
+        }
+        console.warn('[apns] send failed', first);
+        return false;
+    }
+    catch (e) {
+        console.warn('[apns] transport failure', e?.message || e);
+        return false;
+    }
+}
+async function sendPushToUsers(userIds, payload) {
+    try {
+        const uniqueUserIds = Array.from(new Set(userIds.filter(Boolean)));
+        if (!uniqueUserIds.length)
+            return;
+        if (!apnsPrivateKey)
+            return;
+        const devices = await prisma.pushDevice.findMany({
+            where: {
+                userId: { in: uniqueUserIds },
+                platform: 'IOS',
+                enabled: true,
+            },
+            select: { token: true },
+        });
+        if (!devices.length)
+            return;
+        const results = await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, payload)));
+        const okCount = results.filter((item) => item.status === 'fulfilled' && item.value === true).length;
+        const failCount = results.length - okCount;
+        console.log('[apns] dispatch summary', {
+            users: uniqueUserIds.length,
+            devices: devices.length,
+            ok: okCount,
+            failed: failCount,
+            type: payload.data?.type || 'UNKNOWN',
+        });
+    }
+    catch (e) {
+        console.warn('[apns] user dispatch failed', e?.message || e);
+    }
 }
 // --- Waitlist helpers (in‑memory) ---
 const waitlistSeen = new Map(); // email -> timestamp
@@ -2542,8 +3043,10 @@ app.get('/me', async (req, res, next) => {
     const user = await prisma.user.findUnique({ where: { id: req.userId }, include: { plannings: true } });
     if (!user)
         return res.status(404).json({ error: 'User not found' });
-    const parentAcceptedInvite = user.role === 'PARENT'
-        ? await prisma.accountInvite.findFirst({
+    const needsParentProfileHydration = user.role === 'PARENT' && (!user.firstName || !user.lastName || !user.phone);
+    let parentAcceptedInvite = null;
+    if (needsParentProfileHydration) {
+        parentAcceptedInvite = await prisma.accountInvite.findFirst({
             where: {
                 role: 'PARENT',
                 status: 'ACCEPTED',
@@ -2559,11 +3062,26 @@ app.get('/me', async (req, res, next) => {
                 phone: true,
             },
             orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }]
-        })
-        : null;
+        });
+    }
     const resolvedFirstName = firstPresentString(user.firstName, parentAcceptedInvite?.firstName);
     const resolvedLastName = firstPresentString(user.lastName, parentAcceptedInvite?.lastName);
     const resolvedPhone = firstPresentString(user.phone, parentAcceptedInvite?.phone);
+    if (needsParentProfileHydration && parentAcceptedInvite && (resolvedFirstName || resolvedLastName || resolvedPhone)) {
+        const profilePatch = {};
+        if (!user.firstName && resolvedFirstName)
+            profilePatch.firstName = resolvedFirstName;
+        if (!user.lastName && resolvedLastName)
+            profilePatch.lastName = resolvedLastName;
+        if (!user.phone && resolvedPhone)
+            profilePatch.phone = resolvedPhone;
+        if (Object.keys(profilePatch).length > 0) {
+            await prisma.user.update({
+                where: { id: user.id },
+                data: profilePatch,
+            });
+        }
+    }
     const planningCount = user.plannings.length;
     res.json({
         id: user.id,
@@ -2673,7 +3191,12 @@ app.put('/me/profile', authMiddleware, async (req, res) => {
         phone: zod_1.z.string().trim().min(3).max(32).nullable().optional(),
         email: zod_1.z.string().trim().email().optional(),
     });
-    const parsed = schema.safeParse(req.body);
+    const parsed = schema.safeParse({
+        firstName: req.body?.firstName ?? req.body?.first_name ?? req.body?.prenom,
+        lastName: req.body?.lastName ?? req.body?.last_name ?? req.body?.nom,
+        phone: req.body?.phone ?? req.body?.telephone,
+        email: req.body?.email ?? req.body?.mail,
+    });
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
     const patch = {};
@@ -2712,7 +3235,69 @@ app.put('/me/profile', authMiddleware, async (req, res) => {
             managedTeamIds: true,
         }
     });
+    if (updated.role === 'PARENT') {
+        const invitePatch = {};
+        if (parsed.data.firstName !== undefined)
+            invitePatch.firstName = parsed.data.firstName;
+        if (parsed.data.lastName !== undefined)
+            invitePatch.lastName = parsed.data.lastName;
+        if (parsed.data.phone !== undefined)
+            invitePatch.phone = parsed.data.phone;
+        if (Object.keys(invitePatch).length > 0) {
+            await prisma.accountInvite.updateMany({
+                where: {
+                    role: 'PARENT',
+                    status: 'ACCEPTED',
+                    ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+                    OR: [
+                        { userId: req.auth.id },
+                        { email: updated.email },
+                    ],
+                },
+                data: invitePatch,
+            });
+        }
+    }
     res.json(updated);
+});
+app.post('/me/push-token', authMiddleware, async (req, res) => {
+    const schema = zod_1.z.object({
+        token: zod_1.z.string().trim().min(16).max(512),
+        platform: zod_1.z.enum(['IOS']).optional(),
+        enabled: zod_1.z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const now = new Date();
+    const token = parsed.data.token.trim();
+    const enabled = parsed.data.enabled ?? true;
+    if (!enabled) {
+        await prisma.pushDevice.updateMany({
+            where: { userId: req.auth.id, token },
+            data: { enabled: false, lastSeenAt: now },
+        });
+        console.log('[apns] token disabled', { userId: req.auth.id, tokenPrefix: token.slice(0, 12) });
+        return res.json({ ok: true });
+    }
+    await prisma.pushDevice.upsert({
+        where: { token },
+        create: {
+            userId: req.auth.id,
+            platform: 'IOS',
+            token,
+            enabled: true,
+            lastSeenAt: now,
+        },
+        update: {
+            userId: req.auth.id,
+            platform: 'IOS',
+            enabled: true,
+            lastSeenAt: now,
+        },
+    });
+    console.log('[apns] token upserted', { userId: req.auth.id, tokenPrefix: token.slice(0, 12) });
+    return res.json({ ok: true });
 });
 app.put('/me/team', authMiddleware, async (req, res) => {
     if (!req.auth?.clubId)
@@ -3378,6 +3963,9 @@ app.use(async (req, res, next) => {
         if (!auth)
             return res.status(401).json({ error: 'Unauthorized' });
         if (isReadOnlyRole(auth)) {
+            const allowTrainingIntentWrite = req.method === 'POST' && /^\/trainings\/[^/]+\/intent$/.test(req.path);
+            if (allowTrainingIntentWrite)
+                return next();
             return res.status(403).json({ error: 'Read-only account: write access is not allowed' });
         }
     }
@@ -4461,9 +5049,22 @@ app.get('/trainings', authMiddleware, async (req, res) => {
         take: pagination.take,
         skip: pagination.skip,
     });
+    const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth);
+    const decorations = await buildTrainingIntentDecorations(req.auth, trainings, linkedPlayer?.id ?? null);
+    const items = trainings.map((training) => ({
+        ...training,
+        intentSummary: decorations.summaryByTrainingId.get(training.id) ?? {
+            presentCount: 0,
+            absentCount: 0,
+            unknownCount: 0,
+            totalPlayers: 0,
+        },
+        myTrainingIntent: decorations.myIntentByTrainingId.get(training.id) ?? null,
+        canSetTrainingIntent: decorations.canRespondByTrainingId.get(training.id) ?? false,
+    }));
     res.json({
-        items: trainings,
-        pagination: { limit: pagination.limit, offset: pagination.offset, returned: trainings.length }
+        items,
+        pagination: { limit: pagination.limit, offset: pagination.offset, returned: items.length }
     });
 });
 // Get single training
@@ -4473,17 +5074,126 @@ app.get('/trainings/:id', authMiddleware, async (req, res) => {
         const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id } });
         if (!training)
             return res.status(404).json({ error: 'Training not found' });
-        res.json(training);
+        const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth);
+        const decorations = await buildTrainingIntentDecorations(req.auth, [training], linkedPlayer?.id ?? null);
+        res.json({
+            ...training,
+            intentSummary: decorations.summaryByTrainingId.get(training.id) ?? {
+                presentCount: 0,
+                absentCount: 0,
+                unknownCount: 0,
+                totalPlayers: 0,
+            },
+            myTrainingIntent: decorations.myIntentByTrainingId.get(training.id) ?? null,
+            canSetTrainingIntent: decorations.canRespondByTrainingId.get(training.id) ?? false,
+        });
     }
     catch (e) {
         console.error('[GET /trainings/:id] failed', e);
         return res.status(500).json({ error: 'Failed to fetch training' });
     }
 });
+app.get('/trainings/:id/intent', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const training = await trainingFindFirstForUser(prisma, req.auth, {
+        where: { id },
+        select: { id: true, date: true, status: true, teamId: true, clubId: true },
+    });
+    if (!training)
+        return res.status(404).json({ error: 'Training not found' });
+    const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth);
+    const decorations = await buildTrainingIntentDecorations(req.auth, [training], linkedPlayer?.id ?? null);
+    const summary = decorations.summaryByTrainingId.get(training.id) ?? {
+        presentCount: 0,
+        absentCount: 0,
+        unknownCount: 0,
+        totalPlayers: 0,
+    };
+    const myIntent = decorations.myIntentByTrainingId.get(training.id) ?? null;
+    const canRespond = decorations.canRespondByTrainingId.get(training.id) ?? false;
+    const includePerPlayerItems = req.auth?.role === 'DIRECTION' || req.auth?.role === 'COACH';
+    const teamPlayers = includePerPlayerItems && training.teamId
+        ? await playerFindManyForUser(prisma, req.auth, {
+            where: { teamId: training.teamId },
+            select: { id: true },
+        })
+        : [];
+    const playerItems = includePerPlayerItems
+        ? teamPlayers.map((player) => {
+            const intent = decorations.intentByTrainingAndPlayer.get(`${training.id}:${player.id}`);
+            return {
+                playerId: player.id,
+                intent: intent ?? 'UNKNOWN',
+            };
+        })
+        : undefined;
+    return res.json({
+        trainingId: training.id,
+        summary,
+        myIntent,
+        canRespond,
+        ...(playerItems ? { items: playerItems } : {}),
+    });
+});
+app.post('/trainings/:id/intent', authMiddleware, async (req, res) => {
+    if (req.auth?.role !== 'PARENT' && req.auth?.role !== 'PLAYER') {
+        return res.status(403).json({ error: 'Only parent and player accounts can set training intent' });
+    }
+    const schema = zod_1.z.object({
+        present: zod_1.z.boolean(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success)
+        return res.status(400).json({ error: parsed.error.flatten() });
+    const training = await trainingFindFirstForUser(prisma, req.auth, {
+        where: { id: req.params.id },
+        select: { id: true, date: true, status: true, teamId: true, clubId: true },
+    });
+    if (!training)
+        return res.status(404).json({ error: 'Training not found' });
+    if (!isTrainingOpenForIntent(training)) {
+        return res.status(409).json({ error: 'Training is passed or cancelled' });
+    }
+    const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth);
+    if (!linkedPlayer)
+        return res.status(404).json({ error: 'Linked player not found for this account' });
+    if (training.teamId && linkedPlayer.teamId && linkedPlayer.teamId !== training.teamId) {
+        return res.status(403).json({ error: 'Linked player does not belong to this training team' });
+    }
+    await prisma.$transaction(async (tx) => {
+        await tx.attendance.deleteMany({
+            where: {
+                session_type: { in: (0, attendance_1.trainingIntentSessionTypeVariants)() },
+                session_id: training.id,
+                playerId: linkedPlayer.id,
+                ...(training.clubId ? { clubId: training.clubId } : {}),
+            }
+        });
+        await tx.attendance.create({
+            data: {
+                userId: req.auth.id,
+                clubId: training.clubId ?? null,
+                teamId: training.teamId ?? null,
+                session_type: (0, attendance_1.trainingIntentStoredSessionType)(parsed.data.present),
+                session_id: training.id,
+                playerId: linkedPlayer.id,
+                trainingId: training.id,
+            }
+        });
+    });
+    return res.json({
+        trainingId: training.id,
+        playerId: linkedPlayer.id,
+        intent: parsed.data.present ? 'PRESENT' : 'ABSENT',
+    });
+});
 app.post('/trainings', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
-    const schema = zod_1.z.object({ date: zod_1.z.string().or(zod_1.z.date()) });
+    const schema = zod_1.z.object({
+        date: zod_1.z.string().or(zod_1.z.date()),
+        endTime: zod_1.z.union([zod_1.z.string().regex(matchday_metadata_1.HHMM_TIME_REGEX, 'Invalid time format, expected HH:MM'), zod_1.z.null()]).optional(),
+    });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
@@ -4495,11 +5205,132 @@ app.post('/trainings', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: e.message });
     }
     const date = new Date(parsed.data.date);
+    if (Number.isNaN(date.getTime()))
+        return res.status(400).json({ error: 'Invalid date' });
+    const recentTeamTrainings = await trainingFindManyForUser(prisma, req.auth, {
+        where: { teamId: team.id },
+        orderBy: { date: 'desc' },
+        take: 200,
+        select: { date: true, endTime: true },
+    });
+    const weekdayInParis = (value) => {
+        const token = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Europe/Paris',
+            weekday: 'short',
+        }).format(value);
+        const map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+        return map[token] ?? value.getUTCDay();
+    };
+    const isMeaningfulStartTime = (value) => {
+        const hoursInParis = Number(new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Europe/Paris',
+            hour: '2-digit',
+            hour12: false,
+        }).format(value));
+        const minutesInParis = Number(new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Europe/Paris',
+            minute: '2-digit',
+        }).format(value));
+        return hoursInParis !== 0 || minutesInParis !== 0;
+    };
+    const targetWeekday = weekdayInParis(date);
+    const sameWeekdayTrainings = recentTeamTrainings.filter((item) => {
+        const itemDate = new Date(item.date);
+        if (Number.isNaN(itemDate.getTime()))
+            return false;
+        return weekdayInParis(itemDate) === targetWeekday;
+    });
+    const previousTraining = sameWeekdayTrainings.find((item) => {
+        const itemDate = new Date(item.date);
+        if (Number.isNaN(itemDate.getTime()))
+            return false;
+        return Boolean(item.endTime) || isMeaningfulStartTime(itemDate);
+    }) || sameWeekdayTrainings[0] || null;
+    const PARIS_TZ = 'Europe/Paris';
+    const parisDateParts = (value) => {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone: PARIS_TZ,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        }).formatToParts(value);
+        const read = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+        return {
+            year: read('year'),
+            month: read('month'),
+            day: read('day'),
+            hour: read('hour'),
+            minute: read('minute'),
+        };
+    };
+    const parisOffsetMinutesAt = (utcDate) => {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: PARIS_TZ,
+            timeZoneName: 'shortOffset',
+            hour: '2-digit',
+            hour12: false,
+        }).formatToParts(utcDate);
+        const token = parts.find((part) => part.type === 'timeZoneName')?.value || 'GMT+0';
+        const match = token.match(/(?:GMT|UTC)([+-]\d{1,2})(?::?(\d{2}))?/i);
+        if (!match)
+            return 0;
+        const rawHours = Number(match[1] || 0);
+        const rawMinutes = Number(match[2] || 0);
+        const sign = rawHours < 0 ? -1 : 1;
+        return rawHours * 60 + sign * rawMinutes;
+    };
+    const parisLocalToUtc = (year, month, day, hour, minute) => {
+        const baseUtcMillis = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+        let candidateUtcMillis = baseUtcMillis;
+        for (let i = 0; i < 2; i += 1) {
+            const offsetMinutes = parisOffsetMinutesAt(new Date(candidateUtcMillis));
+            candidateUtcMillis = baseUtcMillis - offsetMinutes * 60000;
+        }
+        return new Date(candidateUtcMillis);
+    };
+    const dateWithDefaultSchedule = (() => {
+        if (!previousTraining?.date)
+            return date;
+        const previousDate = new Date(previousTraining.date);
+        if (Number.isNaN(previousDate.getTime()))
+            return date;
+        const targetParis = parisDateParts(date);
+        const sourceParis = parisDateParts(previousDate);
+        return parisLocalToUtc(targetParis.year, targetParis.month, targetParis.day, sourceParis.hour, sourceParis.minute);
+    })();
     const t = await trainingCreateForUser(prisma, req.auth, {
-        date,
+        date: dateWithDefaultSchedule,
+        endTime: Object.prototype.hasOwnProperty.call(parsed.data, 'endTime')
+            ? (parsed.data.endTime ?? null)
+            : (previousTraining?.endTime ?? null),
         status: 'PLANNED',
         clubId: team.clubId,
         teamId: team.id
+    });
+    const readOnlyRecipients = await listReadOnlyUserIdsForTeam(team.clubId, team.id);
+    const teamInfo = await prisma.team.findFirst({
+        where: { id: team.id, clubId: team.clubId },
+        select: { name: true },
+    });
+    const trainingDateLabel = new Intl.DateTimeFormat('fr-FR', {
+        timeZone: 'Europe/Paris',
+        weekday: 'long',
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+    }).format(new Date(t.date));
+    await sendPushToUsers(readOnlyRecipients, {
+        title: 'Nouvel entraînement',
+        body: `${teamInfo?.name || 'Votre équipe'} • ${trainingDateLabel}`,
+        data: {
+            type: 'TRAINING_CREATED',
+            trainingId: t.id,
+            teamId: team.id,
+        },
     });
     res.json(t);
 });
@@ -4507,7 +5338,8 @@ app.post('/trainings', authMiddleware, async (req, res) => {
 app.put('/trainings/:id', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         date: zod_1.z.string().or(zod_1.z.date()).optional(),
-        status: zod_1.z.enum(['PLANNED', 'CANCELLED']).optional()
+        status: zod_1.z.enum(['PLANNED', 'CANCELLED']).optional(),
+        endTime: zod_1.z.union([zod_1.z.string().regex(matchday_metadata_1.HHMM_TIME_REGEX, 'Invalid time format, expected HH:MM'), zod_1.z.null()]).optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -4517,6 +5349,8 @@ app.put('/trainings/:id', authMiddleware, async (req, res) => {
         data.date = new Date(parsed.data.date);
     if (parsed.data.status !== undefined)
         data.status = parsed.data.status;
+    if (Object.prototype.hasOwnProperty.call(parsed.data, 'endTime'))
+        data.endTime = parsed.data.endTime ?? null;
     try {
         const existing = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
         if (!existing)
@@ -6663,6 +7497,284 @@ app.delete('/diagrams/:id', authMiddleware, async (req, res) => {
         console.error('[DELETE /diagrams/:id] failed', e);
         return res.status(500).json({ error: 'Failed to delete diagram' });
     }
+});
+app.get('/messages/conversations', authMiddleware, async (req, res) => {
+    const queryParsed = zod_1.z.object({
+        teamId: zod_1.z.string().trim().min(1).optional(),
+    }).safeParse(req.query);
+    if (!queryParsed.success) {
+        return res.status(400).json({ error: queryParsed.error.issues[0]?.message || queryParsed.error.flatten() });
+    }
+    let team;
+    try {
+        if (req.auth?.role === 'PLAYER' || req.auth?.role === 'PARENT') {
+            const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth);
+            if (!linkedPlayer?.teamId)
+                return res.status(404).json({ error: 'Linked player not found' });
+            team = await resolveReadableTeamForMessaging(req.auth, linkedPlayer.teamId);
+        }
+        else {
+            team = await resolveReadableTeamForMessaging(req.auth, queryParsed.data.teamId);
+        }
+    }
+    catch (e) {
+        if (e?.code === 'TEAM_REQUIRED')
+            return res.status(400).json({ error: e.message });
+        if (e?.code === 'TEAM_FORBIDDEN')
+            return res.status(403).json({ error: e.message });
+        return res.status(400).json({ error: e.message || 'Invalid team scope' });
+    }
+    const announcementLatest = await prisma.teamMessage.findFirst({
+        where: { clubId: team.clubId, teamId: team.id },
+        include: { author: { select: { id: true, firstName: true, lastName: true, role: true } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    const formatDisplayName = (person) => {
+        const full = `${person?.firstName || ''} ${person?.lastName || ''}`.trim();
+        return full || person?.name || 'Membre';
+    };
+    const announcementConversation = {
+        id: conversationIdForAnnouncements(team.id),
+        type: 'ANNOUNCEMENTS',
+        title: 'Annonces',
+        subtitle: 'Canal staff vers joueurs et parents',
+        lastMessagePreview: announcementLatest?.content || null,
+        lastMessageAt: announcementLatest?.createdAt || null,
+    };
+    if (req.auth?.role === 'PLAYER' || req.auth?.role === 'PARENT') {
+        const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth);
+        if (!linkedPlayer?.id)
+            return res.json({ items: [announcementConversation] });
+        const directLatest = await prisma.directMessage.findFirst({
+            where: { clubId: team.clubId, teamId: team.id, playerId: linkedPlayer.id },
+            include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        });
+        const coachUsers = await prisma.user.findMany({
+            where: {
+                clubId: team.clubId,
+                OR: [
+                    { role: 'DIRECTION' },
+                    { role: 'COACH', teamId: team.id },
+                    { role: 'COACH', managedTeamIds: { has: team.id } },
+                ],
+            },
+            select: { id: true, firstName: true, lastName: true },
+            orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+            take: 5,
+        });
+        const coachSubtitle = coachUsers.length
+            ? coachUsers.map((user) => formatDisplayName(user)).join(', ')
+            : 'Équipe encadrante';
+        const coachConversation = {
+            id: conversationIdForCoach(team.id, linkedPlayer.id),
+            type: 'COACH',
+            title: 'Coach',
+            subtitle: coachSubtitle,
+            lastMessagePreview: directLatest?.content || null,
+            lastMessageAt: directLatest?.createdAt || null,
+        };
+        return res.json({ items: [coachConversation, announcementConversation] });
+    }
+    const players = await playerFindManyForUser(prisma, req.auth, {
+        where: { teamId: team.id },
+        select: { id: true, name: true, first_name: true, last_name: true, is_child: true },
+        orderBy: [{ last_name: 'asc' }, { first_name: 'asc' }, { name: 'asc' }],
+    });
+    const parentUsersByPlayerId = await listAcceptedParentUsersByPlayerIds(team.clubId, players.map((player) => player.id));
+    const directLatestRows = players.length
+        ? await prisma.directMessage.findMany({
+            where: { clubId: team.clubId, teamId: team.id, playerId: { in: players.map((player) => player.id) } },
+            include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        })
+        : [];
+    const directLatestByPlayerId = new Map();
+    for (const row of directLatestRows) {
+        if (!directLatestByPlayerId.has(row.playerId))
+            directLatestByPlayerId.set(row.playerId, row);
+    }
+    const coachConversations = players.map((player) => {
+        const latest = directLatestByPlayerId.get(player.id) || null;
+        const firstName = player.first_name || null;
+        const lastName = player.last_name || null;
+        const title = `${firstName || ''} ${lastName || ''}`.trim() || player.name || 'Joueur';
+        const parents = parentUsersByPlayerId.get(player.id) || [];
+        const subtitle = parents.length
+            ? `Parents: ${parents.map((parent) => formatDisplayName(parent)).join(', ')}`
+            : 'Aucun parent lié';
+        return {
+            id: conversationIdForCoach(team.id, player.id),
+            type: 'COACH',
+            title,
+            subtitle,
+            lastMessagePreview: latest?.content || null,
+            lastMessageAt: latest?.createdAt || null,
+        };
+    });
+    return res.json({
+        items: [announcementConversation, ...coachConversations],
+    });
+});
+app.get('/messages/conversations/:id/messages', authMiddleware, async (req, res) => {
+    const parsedId = parseConversationId(req.params.id);
+    if (!parsedId)
+        return res.status(400).json({ error: 'Invalid conversation id' });
+    let team;
+    try {
+        team = await resolveReadableTeamForMessaging(req.auth, parsedId.teamId);
+    }
+    catch (e) {
+        if (e?.code === 'TEAM_REQUIRED')
+            return res.status(400).json({ error: e.message });
+        if (e?.code === 'TEAM_FORBIDDEN')
+            return res.status(403).json({ error: e.message });
+        return res.status(400).json({ error: e.message || 'Invalid team scope' });
+    }
+    if (parsedId.kind === 'ANNOUNCEMENTS') {
+        const rows = await prisma.teamMessage.findMany({
+            where: { clubId: team.clubId, teamId: team.id },
+            include: { author: { select: { id: true, firstName: true, lastName: true, role: true } } },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        });
+        return res.json({
+            conversation: {
+                id: conversationIdForAnnouncements(team.id),
+                type: 'ANNOUNCEMENTS',
+                title: 'Annonces',
+            },
+            items: rows.map((row) => ({
+                id: row.id,
+                content: row.content,
+                createdAt: row.createdAt,
+                sender: row.author ? {
+                    id: row.author.id,
+                    firstName: row.author.firstName || null,
+                    lastName: row.author.lastName || null,
+                    role: row.author.role,
+                } : null,
+            })),
+        });
+    }
+    const player = await resolveCoachConversationPlayer(req.auth, team, parsedId.playerId || '');
+    if (!player)
+        return res.status(403).json({ error: 'Forbidden conversation scope' });
+    const rows = await prisma.directMessage.findMany({
+        where: { clubId: team.clubId, teamId: team.id, playerId: player.id },
+        include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const title = `${player.first_name || ''} ${player.last_name || ''}`.trim() || player.name || 'Coach';
+    return res.json({
+        conversation: {
+            id: conversationIdForCoach(team.id, player.id),
+            type: 'COACH',
+            title: (req.auth?.role === 'PLAYER' || req.auth?.role === 'PARENT') ? 'Coach' : title,
+        },
+        items: rows.map((row) => ({
+            id: row.id,
+            content: row.content,
+            createdAt: row.createdAt,
+            sender: row.sender ? {
+                id: row.sender.id,
+                firstName: row.sender.firstName || null,
+                lastName: row.sender.lastName || null,
+                role: row.sender.role,
+            } : null,
+        })),
+    });
+});
+app.post('/messages/conversations/:id/messages', authMiddleware, async (req, res) => {
+    const parsedId = parseConversationId(req.params.id);
+    if (!parsedId)
+        return res.status(400).json({ error: 'Invalid conversation id' });
+    const parsedBody = directMessageCreateBodySchema.safeParse(req.body);
+    if (!parsedBody.success)
+        return res.status(400).json({ error: parsedBody.error.issues[0]?.message || parsedBody.error.flatten() });
+    if (parsedId.kind === 'ANNOUNCEMENTS') {
+        if (!ensureStaff(req, res))
+            return;
+        let team;
+        try {
+            team = await resolveTeamForWrite(req.auth, parsedId.teamId);
+        }
+        catch (e) {
+            if (e?.code === 'TEAM_FORBIDDEN')
+                return res.status(403).json({ error: e.message });
+            return res.status(400).json({ error: e.message || 'Invalid team scope' });
+        }
+        const created = await prisma.teamMessage.create({
+            data: {
+                clubId: team.clubId,
+                teamId: team.id,
+                authorUserId: req.auth.id,
+                content: parsedBody.data.content,
+            },
+            include: { author: { select: { id: true, firstName: true, lastName: true, role: true } } },
+        });
+        const recipientIds = (await listReadOnlyUserIdsForTeam(team.clubId, team.id))
+            .filter((userId) => userId !== req.auth.id);
+        await sendPushToUsers(recipientIds, {
+            title: 'Nouvelle annonce',
+            body: parsedBody.data.content.length > 120 ? `${parsedBody.data.content.slice(0, 117)}...` : parsedBody.data.content,
+            data: {
+                type: 'MESSAGE',
+                conversationId: conversationIdForAnnouncements(team.id),
+                teamId: team.id,
+            },
+        });
+        return res.status(201).json({
+            id: created.id,
+            content: created.content,
+            createdAt: created.createdAt,
+            sender: created.author ? {
+                id: created.author.id,
+                firstName: created.author.firstName || null,
+                lastName: created.author.lastName || null,
+                role: created.author.role,
+            } : null,
+        });
+    }
+    let team;
+    try {
+        team = await resolveReadableTeamForMessaging(req.auth, parsedId.teamId);
+    }
+    catch (e) {
+        if (e?.code === 'TEAM_REQUIRED')
+            return res.status(400).json({ error: e.message });
+        if (e?.code === 'TEAM_FORBIDDEN')
+            return res.status(403).json({ error: e.message });
+        return res.status(400).json({ error: e.message || 'Invalid team scope' });
+    }
+    const player = await resolveCoachConversationPlayer(req.auth, team, parsedId.playerId || '');
+    if (!player)
+        return res.status(403).json({ error: 'Forbidden conversation scope' });
+    const created = await prisma.directMessage.create({
+        data: {
+            clubId: team.clubId,
+            teamId: team.id,
+            playerId: player.id,
+            senderUserId: req.auth.id,
+            content: parsedBody.data.content,
+        },
+        include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
+    });
+    await notifyDirectMessageRecipients({
+        senderAuth: req.auth,
+        team,
+        conversationId: conversationIdForCoach(team.id, player.id),
+    });
+    return res.status(201).json({
+        id: created.id,
+        content: created.content,
+        createdAt: created.createdAt,
+        sender: created.sender ? {
+            id: created.sender.id,
+            firstName: created.sender.firstName || null,
+            lastName: created.sender.lastName || null,
+            role: created.sender.role,
+        } : null,
+    });
 });
 app.get('/team-messages/unread-count', authMiddleware, async (req, res) => {
     const count = await computeUnreadTeamMessagesCount(req.auth);
