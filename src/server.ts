@@ -1609,23 +1609,9 @@ async function apnsRequest(host: string, topic: string, deviceToken: string, aut
   })
 }
 
-type PushSendResult = {
-  ok: boolean
-  tokenPrefix: string
-  attempts: Array<{ host: string, topic: string, ok: boolean, status: number, reason: string | null }>
-  finalReason: string | null
-}
-
-async function sendPushToDeviceToken(token: string, payload: { title: string, body: string, data?: Record<string, any> }): Promise<PushSendResult> {
+async function sendPushToDeviceToken(token: string, payload: { title: string, body: string, data?: Record<string, any> }): Promise<boolean> {
   const authToken = getApnsJwtToken()
-  if (!authToken || APNS_BUNDLE_IDS.length === 0) {
-    return {
-      ok: false,
-      tokenPrefix: token.slice(0, 12),
-      attempts: [],
-      finalReason: 'apns_not_configured',
-    }
-  }
+  if (!authToken || APNS_BUNDLE_IDS.length === 0) return false
   try {
     const sendOnce = async (host: string, topic: string) => {
       const response = await apnsRequest(host, topic, token, authToken, payload)
@@ -1636,15 +1622,7 @@ async function sendPushToDeviceToken(token: string, payload: { title: string, bo
     for (const topic of APNS_BUNDLE_IDS) {
       const first = await sendOnce(APNS_PRIMARY_HOST, topic)
       attempts.push(first)
-      if (first.ok) {
-        attempts.push(first)
-        return {
-          ok: true,
-          tokenPrefix: token.slice(0, 12),
-          attempts,
-          finalReason: null,
-        }
-      }
+      if (first.ok) return true
 
       const shouldRetryOnOtherHost =
         first.reason === 'BadDeviceToken' ||
@@ -1654,14 +1632,7 @@ async function sendPushToDeviceToken(token: string, payload: { title: string, bo
       if (shouldRetryOnOtherHost) {
         const second = await sendOnce(APNS_SECONDARY_HOST, topic)
         attempts.push(second)
-        if (second.ok) {
-          return {
-            ok: true,
-            tokenPrefix: token.slice(0, 12),
-            attempts,
-            finalReason: null,
-          }
-        }
+        if (second.ok) return true
       }
     }
 
@@ -1673,36 +1644,18 @@ async function sendPushToDeviceToken(token: string, payload: { title: string, bo
       tokenPrefix: token.slice(0, 12),
       attempts,
     })
-    return {
-      ok: false,
-      tokenPrefix: token.slice(0, 12),
-      attempts,
-      finalReason: last?.reason || 'unknown',
-    }
+    return false
   } catch (e: any) {
     console.warn('[apns] transport failure', e?.message || e)
-    return {
-      ok: false,
-      tokenPrefix: token.slice(0, 12),
-      attempts: [],
-      finalReason: e?.message || 'transport_error',
-    }
+    return false
   }
 }
 
 async function sendPushToUsers(userIds: string[], payload: { title: string, body: string, data?: Record<string, any> }) {
   try {
     const uniqueUserIds = Array.from(new Set(userIds.filter(Boolean)))
-    if (!uniqueUserIds.length) {
-      const summary = { users: 0, devices: 0, ok: 0, failed: 0, skipped: 'no_users' as const }
-      console.log('[apns] dispatch summary', { ...summary, type: payload.data?.type || 'UNKNOWN' })
-      return summary
-    }
-    if (!apnsPrivateKey) {
-      const summary = { users: uniqueUserIds.length, devices: 0, ok: 0, failed: 0, skipped: 'apns_not_configured' as const }
-      console.log('[apns] dispatch summary', { ...summary, type: payload.data?.type || 'UNKNOWN' })
-      return summary
-    }
+    if (!uniqueUserIds.length) return
+    if (!apnsPrivateKey) return
 
     const devices = await prisma.pushDevice.findMany({
       where: {
@@ -1712,26 +1665,22 @@ async function sendPushToUsers(userIds: string[], payload: { title: string, body
       },
       select: { token: true },
     })
-    if (!devices.length) {
-      const summary = { users: uniqueUserIds.length, devices: 0, ok: 0, failed: 0, skipped: 'no_devices' as const }
-      console.log('[apns] dispatch summary', { ...summary, type: payload.data?.type || 'UNKNOWN' })
-      return summary
-    }
+    if (!devices.length) return
 
     const results = await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, payload)))
-    const okCount = results.filter((item) => item.status === 'fulfilled' && item.value.ok).length
+    const okCount = results.filter((item) => item.status === 'fulfilled' && item.value === true).length
     const failCount = results.length - okCount
-    console.log('[apns] dispatch summary', {
-      users: uniqueUserIds.length,
-      devices: devices.length,
-      ok: okCount,
-      failed: failCount,
-      type: payload.data?.type || 'UNKNOWN',
-    })
-    return { users: uniqueUserIds.length, devices: devices.length, ok: okCount, failed: failCount, skipped: null }
+    if (failCount > 0) {
+      console.warn('[apns] partial dispatch failure', {
+        users: uniqueUserIds.length,
+        devices: devices.length,
+        ok: okCount,
+        failed: failCount,
+        type: payload.data?.type || 'UNKNOWN',
+      })
+    }
   } catch (e: any) {
     console.warn('[apns] user dispatch failed', e?.message || e)
-    return { users: 0, devices: 0, ok: 0, failed: 0, skipped: 'exception' }
   }
 }
 
@@ -3576,7 +3525,6 @@ app.post('/me/push-token', authMiddleware, async (req: any, res) => {
       where: { userId: req.auth.id, token },
       data: { enabled: false, lastSeenAt: now },
     })
-    console.log('[apns] token disabled', { userId: req.auth.id, tokenPrefix: token.slice(0, 12) })
     return res.json({ ok: true })
   }
 
@@ -3597,62 +3545,7 @@ app.post('/me/push-token', authMiddleware, async (req: any, res) => {
     },
   })
 
-  console.log('[apns] token upserted', { userId: req.auth.id, tokenPrefix: token.slice(0, 12) })
-
   return res.json({ ok: true })
-})
-
-app.get('/me/push-debug', authMiddleware, async (req: any, res) => {
-  const devices = await prisma.pushDevice.findMany({
-    where: { userId: req.auth.id },
-    select: {
-      id: true,
-      platform: true,
-      enabled: true,
-      token: true,
-      lastSeenAt: true,
-      updatedAt: true,
-    },
-    orderBy: { updatedAt: 'desc' },
-  })
-  return res.json({
-    userId: req.auth.id,
-    apnsConfigured: Boolean(apnsPrivateKey),
-    apnsTopics: APNS_BUNDLE_IDS,
-    devices: devices.map((device) => ({
-      id: device.id,
-      platform: device.platform,
-      enabled: device.enabled,
-      tokenPrefix: device.token.slice(0, 12),
-      lastSeenAt: device.lastSeenAt,
-      updatedAt: device.updatedAt,
-    })),
-  })
-})
-
-app.post('/me/push-test', authMiddleware, async (req: any, res) => {
-  const devices = await prisma.pushDevice.findMany({
-    where: {
-      userId: req.auth.id,
-      platform: 'IOS',
-      enabled: true,
-    },
-    select: { token: true },
-  })
-  const details = await Promise.all(devices.map((device) => sendPushToDeviceToken(device.token, {
-    title: 'Test notification',
-    body: 'Notification de test Izifoot',
-    data: { type: 'PUSH_TEST' },
-  })))
-  const okCount = details.filter((item) => item.ok).length
-  const summary = {
-    users: 1,
-    devices: devices.length,
-    ok: okCount,
-    failed: Math.max(0, devices.length - okCount),
-    skipped: devices.length === 0 ? 'no_devices' : null,
-  }
-  return res.json({ ok: true, summary, details })
 })
 
 app.put('/me/team', authMiddleware, async (req: any, res) => {

@@ -858,10 +858,13 @@ async function listReadOnlyUserIdsForTeam(_clubId, teamId) {
     });
     const recipientIds = new Set();
     const playerIds = [];
+    const playerUserIds = new Set();
     for (const player of teamPlayers) {
         playerIds.push(player.id);
-        if (player.userId)
+        if (player.userId) {
             recipientIds.add(player.userId);
+            playerUserIds.add(player.userId);
+        }
     }
     const parentsByPlayerId = await listAcceptedParentUsersByPlayerIds(_clubId, playerIds);
     for (const parentRows of parentsByPlayerId.values()) {
@@ -874,6 +877,19 @@ async function listReadOnlyUserIdsForTeam(_clubId, teamId) {
     const fallbackParentUserIds = await listAcceptedParentUserIdsByTeam(_clubId, teamId);
     for (const parentUserId of fallbackParentUserIds)
         recipientIds.add(parentUserId);
+    // Additional fallback for legacy parent accounts linked only through User.linkedPlayerUserId.
+    if (playerUserIds.size > 0) {
+        const linkedParents = await prisma.user.findMany({
+            where: {
+                clubId: _clubId,
+                role: 'PARENT',
+                linkedPlayerUserId: { in: Array.from(playerUserIds) },
+            },
+            select: { id: true },
+        });
+        for (const parent of linkedParents)
+            recipientIds.add(parent.id);
+    }
     return Array.from(recipientIds);
 }
 async function notifyDirectMessageRecipients(params) {
@@ -1520,16 +1536,10 @@ async function sendPushToDeviceToken(token, payload) {
 async function sendPushToUsers(userIds, payload) {
     try {
         const uniqueUserIds = Array.from(new Set(userIds.filter(Boolean)));
-        if (!uniqueUserIds.length) {
-            const summary = { users: 0, devices: 0, ok: 0, failed: 0, skipped: 'no_users' };
-            console.log('[apns] dispatch summary', { ...summary, type: payload.data?.type || 'UNKNOWN' });
-            return summary;
-        }
-        if (!apnsPrivateKey) {
-            const summary = { users: uniqueUserIds.length, devices: 0, ok: 0, failed: 0, skipped: 'apns_not_configured' };
-            console.log('[apns] dispatch summary', { ...summary, type: payload.data?.type || 'UNKNOWN' });
-            return summary;
-        }
+        if (!uniqueUserIds.length)
+            return;
+        if (!apnsPrivateKey)
+            return;
         const devices = await prisma.pushDevice.findMany({
             where: {
                 userId: { in: uniqueUserIds },
@@ -1538,26 +1548,23 @@ async function sendPushToUsers(userIds, payload) {
             },
             select: { token: true },
         });
-        if (!devices.length) {
-            const summary = { users: uniqueUserIds.length, devices: 0, ok: 0, failed: 0, skipped: 'no_devices' };
-            console.log('[apns] dispatch summary', { ...summary, type: payload.data?.type || 'UNKNOWN' });
-            return summary;
-        }
+        if (!devices.length)
+            return;
         const results = await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, payload)));
         const okCount = results.filter((item) => item.status === 'fulfilled' && item.value === true).length;
         const failCount = results.length - okCount;
-        console.log('[apns] dispatch summary', {
-            users: uniqueUserIds.length,
-            devices: devices.length,
-            ok: okCount,
-            failed: failCount,
-            type: payload.data?.type || 'UNKNOWN',
-        });
-        return { users: uniqueUserIds.length, devices: devices.length, ok: okCount, failed: failCount, skipped: null };
+        if (failCount > 0) {
+            console.warn('[apns] partial dispatch failure', {
+                users: uniqueUserIds.length,
+                devices: devices.length,
+                ok: okCount,
+                failed: failCount,
+                type: payload.data?.type || 'UNKNOWN',
+            });
+        }
     }
     catch (e) {
         console.warn('[apns] user dispatch failed', e?.message || e);
-        return { users: 0, devices: 0, ok: 0, failed: 0, skipped: 'exception' };
     }
 }
 // --- Waitlist helpers (in‑memory) ---
@@ -3296,7 +3303,6 @@ app.post('/me/push-token', authMiddleware, async (req, res) => {
             where: { userId: req.auth.id, token },
             data: { enabled: false, lastSeenAt: now },
         });
-        console.log('[apns] token disabled', { userId: req.auth.id, tokenPrefix: token.slice(0, 12) });
         return res.json({ ok: true });
     }
     await prisma.pushDevice.upsert({
@@ -3315,43 +3321,7 @@ app.post('/me/push-token', authMiddleware, async (req, res) => {
             lastSeenAt: now,
         },
     });
-    console.log('[apns] token upserted', { userId: req.auth.id, tokenPrefix: token.slice(0, 12) });
     return res.json({ ok: true });
-});
-app.get('/me/push-debug', authMiddleware, async (req, res) => {
-    const devices = await prisma.pushDevice.findMany({
-        where: { userId: req.auth.id },
-        select: {
-            id: true,
-            platform: true,
-            enabled: true,
-            token: true,
-            lastSeenAt: true,
-            updatedAt: true,
-        },
-        orderBy: { updatedAt: 'desc' },
-    });
-    return res.json({
-        userId: req.auth.id,
-        apnsConfigured: Boolean(apnsPrivateKey),
-        apnsTopics: APNS_BUNDLE_IDS,
-        devices: devices.map((device) => ({
-            id: device.id,
-            platform: device.platform,
-            enabled: device.enabled,
-            tokenPrefix: device.token.slice(0, 12),
-            lastSeenAt: device.lastSeenAt,
-            updatedAt: device.updatedAt,
-        })),
-    });
-});
-app.post('/me/push-test', authMiddleware, async (req, res) => {
-    const summary = await sendPushToUsers([req.auth.id], {
-        title: 'Test notification',
-        body: 'Notification de test Izifoot',
-        data: { type: 'PUSH_TEST' },
-    });
-    return res.json({ ok: true, summary });
 });
 app.put('/me/team', authMiddleware, async (req, res) => {
     if (!req.auth?.clubId)
@@ -7943,6 +7913,17 @@ app.post('/team-messages', authMiddleware, async (req, res) => {
             author: {
                 select: { id: true, firstName: true, lastName: true, role: true },
             },
+        },
+    });
+    const recipientIds = (await listReadOnlyUserIdsForTeam(team.clubId, team.id))
+        .filter((userId) => userId !== req.auth.id);
+    await sendPushToUsers(recipientIds, {
+        title: 'Nouvelle annonce',
+        body: created.content.length > 120 ? `${created.content.slice(0, 117)}...` : created.content,
+        data: {
+            type: 'MESSAGE',
+            conversationId: conversationIdForAnnouncements(team.id),
+            teamId: team.id,
         },
     });
     return res.status(201).json({
