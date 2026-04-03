@@ -912,6 +912,21 @@ async function listAcceptedParentUsersByPlayerIds(clubId: string, playerIds: str
   return map
 }
 
+async function listAcceptedParentUserIdsByTeam(clubId: string, teamId: string) {
+  if (!clubId || !teamId) return []
+  const invites = await prisma.accountInvite.findMany({
+    where: {
+      clubId,
+      teamId,
+      role: 'PARENT',
+      status: 'ACCEPTED',
+      userId: { not: null },
+    },
+    select: { userId: true },
+  })
+  return Array.from(new Set(invites.map((invite) => invite.userId).filter((value): value is string => Boolean(value))))
+}
+
 async function listReadOnlyUserIdsForTeam(_clubId: string, teamId: string) {
   const teamPlayers = await prisma.player.findMany({
     where: {
@@ -936,6 +951,10 @@ async function listReadOnlyUserIdsForTeam(_clubId: string, teamId: string) {
       if (parent?.id) recipientIds.add(parent.id)
     }
   }
+
+  // Fallback for legacy parent links where linkedPlayerId can be missing on accepted invites.
+  const fallbackParentUserIds = await listAcceptedParentUserIdsByTeam(_clubId, teamId)
+  for (const parentUserId of fallbackParentUserIds) recipientIds.add(parentUserId)
 
   return Array.from(recipientIds)
 }
@@ -1623,7 +1642,16 @@ async function sendPushToUsers(userIds: string[], payload: { title: string, body
     })
     if (!devices.length) return
 
-    await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, payload)))
+    const results = await Promise.allSettled(devices.map((device) => sendPushToDeviceToken(device.token, payload)))
+    const okCount = results.filter((item) => item.status === 'fulfilled' && item.value === true).length
+    const failCount = results.length - okCount
+    console.log('[apns] dispatch summary', {
+      users: uniqueUserIds.length,
+      devices: devices.length,
+      ok: okCount,
+      failed: failCount,
+      type: payload.data?.type || 'UNKNOWN',
+    })
   } catch (e: any) {
     console.warn('[apns] user dispatch failed', e?.message || e)
   }
@@ -3470,6 +3498,7 @@ app.post('/me/push-token', authMiddleware, async (req: any, res) => {
       where: { userId: req.auth.id, token },
       data: { enabled: false, lastSeenAt: now },
     })
+    console.log('[apns] token disabled', { userId: req.auth.id, tokenPrefix: token.slice(0, 12) })
     return res.json({ ok: true })
   }
 
@@ -3489,6 +3518,8 @@ app.post('/me/push-token', authMiddleware, async (req: any, res) => {
       lastSeenAt: now,
     },
   })
+
+  console.log('[apns] token upserted', { userId: req.auth.id, tokenPrefix: token.slice(0, 12) })
 
   return res.json({ ok: true })
 })
