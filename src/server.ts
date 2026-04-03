@@ -8321,6 +8321,18 @@ app.post('/team-messages', authMiddleware, async (req: any, res) => {
     },
   })
 
+  const recipientIds = (await listReadOnlyUserIdsForTeam(team.clubId, team.id))
+    .filter((userId) => userId !== req.auth.id)
+  await sendPushToUsers(recipientIds, {
+    title: 'Nouvelle annonce',
+    body: created.content.length > 120 ? `${created.content.slice(0, 117)}...` : created.content,
+    data: {
+      type: 'MESSAGE',
+      conversationId: conversationIdForAnnouncements(team.id),
+      teamId: team.id,
+    },
+  })
+
   return res.status(201).json({
     id: created.id,
     teamId: created.teamId,
