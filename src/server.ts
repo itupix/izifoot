@@ -6996,7 +6996,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
     || req.query.forceClearRotationKey === 'true'
     || req.body?.forceClearRotationKey === true
   const schema = z.object({
-    type: z.enum(['ENTRAINEMENT', 'PLATEAU']).optional(),
+    type: z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI']).optional(),
     status: z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
     played: z.boolean().optional(),
     matchdayId: z.string().nullable().optional(),

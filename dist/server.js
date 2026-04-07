@@ -6709,7 +6709,7 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
         || req.query.forceClearRotationKey === 'true'
         || req.body?.forceClearRotationKey === true;
     const schema = zod_1.z.object({
-        type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']).optional(),
+        type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI']).optional(),
         status: zod_1.z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
         played: zod_1.z.boolean().optional(),
         matchdayId: zod_1.z.string().nullable().optional(),

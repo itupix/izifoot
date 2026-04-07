@@ -27,7 +27,7 @@ export const matchSidesPayloadSchema = z.object({
 })
 
 export const matchCreatePayloadSchema = z.object({
-  type: z.enum(['ENTRAINEMENT', 'PLATEAU']),
+  type: z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI']),
   status: z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
   played: z.boolean().optional(),
   matchdayId: z.string().optional(),

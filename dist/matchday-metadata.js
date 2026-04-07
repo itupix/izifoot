@@ -13,6 +13,9 @@ exports.matchdayMetadataSchema = zod_1.z.object({
     address: zod_1.z.union([zod_1.z.string(), zod_1.z.null()]).optional(),
     startTime: nullableHHMMSchema.optional(),
     meetingTime: nullableHHMMSchema.optional(),
+    competitionType: zod_1.z.enum(['PLATEAU', 'MATCH', 'TOURNOI']).optional(),
+    tournamentHasGroupStage: zod_1.z.boolean().nullable().optional(),
+    tournamentKnockoutMode: zod_1.z.enum(['NONE', 'SINGLE', 'HOME_AWAY']).nullable().optional(),
 });
 function buildMatchdayMetadataPatch(data) {
     const patch = {};
@@ -22,6 +25,12 @@ function buildMatchdayMetadataPatch(data) {
         patch.startTime = data.startTime ?? null;
     if (Object.prototype.hasOwnProperty.call(data, 'meetingTime'))
         patch.meetingTime = data.meetingTime ?? null;
+    if (Object.prototype.hasOwnProperty.call(data, 'competitionType') && data.competitionType)
+        patch.competitionType = data.competitionType;
+    if (Object.prototype.hasOwnProperty.call(data, 'tournamentHasGroupStage'))
+        patch.tournamentHasGroupStage = data.tournamentHasGroupStage ?? null;
+    if (Object.prototype.hasOwnProperty.call(data, 'tournamentKnockoutMode'))
+        patch.tournamentKnockoutMode = data.tournamentKnockoutMode ?? null;
     return patch;
 }
 function toPublicMatchday(matchday) {
@@ -32,5 +41,8 @@ function toPublicMatchday(matchday) {
         address: matchday.address ?? null,
         startTime: matchday.startTime ?? null,
         meetingTime: matchday.meetingTime ?? null,
+        competitionType: matchday.competitionType ?? 'PLATEAU',
+        tournamentHasGroupStage: matchday.tournamentHasGroupStage ?? null,
+        tournamentKnockoutMode: matchday.tournamentKnockoutMode ?? null,
     };
 }

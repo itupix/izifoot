@@ -27,7 +27,7 @@ exports.matchSidesPayloadSchema = zod_1.z.object({
     }).default({ starters: [], subs: [] })
 });
 exports.matchCreatePayloadSchema = zod_1.z.object({
-    type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU']),
+    type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI']),
     status: zod_1.z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
     played: zod_1.z.boolean().optional(),
     matchdayId: zod_1.z.string().optional(),
