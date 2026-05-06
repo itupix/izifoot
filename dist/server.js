@@ -31,6 +31,7 @@ const match_eligibility_1 = require("./match-eligibility");
 const match_events_1 = require("./match-events");
 const match_update_validation_1 = require("./match-update-validation");
 const player_payload_1 = require("./player-payload");
+const player_route_aliases_1 = require("./player-route-aliases");
 const player_invitation_status_1 = require("./player-invitation-status");
 const player_account_role_1 = require("./player-account-role");
 const match_payload_1 = require("./match-payload");
@@ -4321,7 +4322,7 @@ app.post('/drills', authMiddleware, async (req, res) => {
 // Models used: Player, Training, Matchday, Attendance, Match, MatchTeam, MatchTeamPlayer, Scorer
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 // ---- Players ----
-app.get('/players', authMiddleware, async (req, res) => {
+const listPlayersHandler = async (req, res) => {
     if (!ensureStaff(req, res))
         return;
     const pagination = readPagination(req.query, { limit: 100, maxLimit: 300 });
@@ -4334,7 +4335,10 @@ app.get('/players', authMiddleware, async (req, res) => {
         items: players.map((player) => (0, player_payload_1.normalizePlayerForApi)(player)),
         pagination: { limit: pagination.limit, offset: pagination.offset, returned: players.length }
     });
-});
+};
+for (const route of player_route_aliases_1.playerCollectionRouteAliases) {
+    app.get(route, authMiddleware, listPlayersHandler);
+}
 const getPlayerByIdHandler = async (req, res) => {
     if (!ensureStaff(req, res))
         return;
@@ -4407,10 +4411,9 @@ const getPlayerByIdHandler = async (req, res) => {
         }
     });
 };
-app.get('/players/:id', authMiddleware, getPlayerByIdHandler);
-app.get('/effectif/:id', authMiddleware, getPlayerByIdHandler);
-app.get('/api/players/:id', authMiddleware, getPlayerByIdHandler);
-app.get('/api/effectif/:id', authMiddleware, getPlayerByIdHandler);
+for (const route of player_route_aliases_1.playerDetailRouteAliases) {
+    app.get(route, authMiddleware, getPlayerByIdHandler);
+}
 app.get('/players/:id/invitation-status', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
@@ -4517,7 +4520,7 @@ const deletePlayerParentHandler = async (req, res) => {
 };
 app.delete('/players/:id/parents/:parentId', authMiddleware, deletePlayerParentHandler);
 app.delete('/api/players/:id/parents/:parentId', authMiddleware, deletePlayerParentHandler);
-app.post('/players', authMiddleware, async (req, res) => {
+const createPlayerHandler = async (req, res) => {
     if (!ensureStaff(req, res))
         return;
     let payload;
@@ -4553,7 +4556,10 @@ app.post('/players', authMiddleware, async (req, res) => {
     };
     const p = await playerCreateForUser(prisma, req.auth, baseData);
     res.json((0, player_payload_1.normalizePlayerForApi)(p));
-});
+};
+for (const route of player_route_aliases_1.playerCollectionRouteAliases) {
+    app.post(route, authMiddleware, createPlayerHandler);
+}
 const updatePlayerByIdHandler = async (req, res) => {
     if (!ensureStaff(req, res))
         return;
@@ -4585,10 +4591,9 @@ const updatePlayerByIdHandler = async (req, res) => {
     const updated = await prisma.player.update({ where: { id: existing.id }, data: patch });
     res.json((0, player_payload_1.normalizePlayerForApi)(updated));
 };
-app.put('/players/:id', authMiddleware, updatePlayerByIdHandler);
-app.put('/effectif/:id', authMiddleware, updatePlayerByIdHandler);
-app.put('/api/players/:id', authMiddleware, updatePlayerByIdHandler);
-app.put('/api/effectif/:id', authMiddleware, updatePlayerByIdHandler);
+for (const route of player_route_aliases_1.playerDetailRouteAliases) {
+    app.put(route, authMiddleware, updatePlayerByIdHandler);
+}
 // --- Player invite JWT and playerAuth ---
 function signPlayerInvite(playerId, matchdayId, email) {
     return jsonwebtoken_1.default.sign({ aud: 'player_invite', pid: playerId, mid: matchdayId || null, em: email || null }, JWT_SECRET, { expiresIn: '30d' });
@@ -5088,10 +5093,9 @@ const deletePlayerByIdHandler = async (req, res) => {
         return res.status(409).json({ error: 'Cannot delete player due to related data' });
     }
 };
-app.delete('/players/:id', authMiddleware, deletePlayerByIdHandler);
-app.delete('/effectif/:id', authMiddleware, deletePlayerByIdHandler);
-app.delete('/api/players/:id', authMiddleware, deletePlayerByIdHandler);
-app.delete('/api/effectif/:id', authMiddleware, deletePlayerByIdHandler);
+for (const route of player_route_aliases_1.playerDetailRouteAliases) {
+    app.delete(route, authMiddleware, deletePlayerByIdHandler);
+}
 // ---- Trainings ----
 app.get('/trainings', authMiddleware, async (req, res) => {
     const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 });

@@ -43,6 +43,7 @@ import { buildEligiblePlayerIdsFromMatchdayAttendance } from './match-eligibilit
 import { matchEventCreateSchema } from './match-events'
 import { validateMatchUpdatePayloadForTeamFormat } from './match-update-validation'
 import { normalizePlayerForApi, parsePlayerCreatePayload, parsePlayerUpdatePayload } from './player-payload'
+import { playerCollectionRouteAliases, playerDetailRouteAliases } from './player-route-aliases'
 import { resolvePlayerInvitationStatus } from './player-invitation-status'
 import { resolvePlayerAccountInviteLookupRoles, resolvePlayerAccountInviteRole } from './player-account-role'
 import { matchCreatePayloadSchema, matchScorerPayloadSchema } from './match-payload'
@@ -4565,7 +4566,7 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 
 // ---- Players ----
-app.get('/players', authMiddleware, async (req: any, res) => {
+const listPlayersHandler = async (req: any, res: any) => {
   if (!ensureStaff(req, res)) return
   const pagination = readPagination(req.query, { limit: 100, maxLimit: 300 })
   const players = await playerFindManyForUser(prisma, req.auth, {
@@ -4577,7 +4578,11 @@ app.get('/players', authMiddleware, async (req: any, res) => {
     items: players.map((player: any) => normalizePlayerForApi(player)),
     pagination: { limit: pagination.limit, offset: pagination.offset, returned: players.length }
   })
-})
+}
+
+for (const route of playerCollectionRouteAliases) {
+  app.get(route, authMiddleware, listPlayersHandler)
+}
 
 const getPlayerByIdHandler = async (req: any, res: any) => {
   if (!ensureStaff(req, res)) return
@@ -4661,10 +4666,9 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
   })
 }
 
-app.get('/players/:id', authMiddleware, getPlayerByIdHandler)
-app.get('/effectif/:id', authMiddleware, getPlayerByIdHandler)
-app.get('/api/players/:id', authMiddleware, getPlayerByIdHandler)
-app.get('/api/effectif/:id', authMiddleware, getPlayerByIdHandler)
+for (const route of playerDetailRouteAliases) {
+  app.get(route, authMiddleware, getPlayerByIdHandler)
+}
 
 app.get('/players/:id/invitation-status', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
@@ -4778,7 +4782,7 @@ const deletePlayerParentHandler = async (req: any, res: any) => {
 app.delete('/players/:id/parents/:parentId', authMiddleware, deletePlayerParentHandler)
 app.delete('/api/players/:id/parents/:parentId', authMiddleware, deletePlayerParentHandler)
 
-app.post('/players', authMiddleware, async (req: any, res) => {
+const createPlayerHandler = async (req: any, res: any) => {
   if (!ensureStaff(req, res)) return
   let payload: ReturnType<typeof parsePlayerCreatePayload>
   try {
@@ -4810,7 +4814,11 @@ app.post('/players', authMiddleware, async (req: any, res) => {
   }
   const p = await playerCreateForUser(prisma, req.auth, baseData)
   res.json(normalizePlayerForApi(p))
-})
+}
+
+for (const route of playerCollectionRouteAliases) {
+  app.post(route, authMiddleware, createPlayerHandler)
+}
 
 const updatePlayerByIdHandler = async (req: any, res: any) => {
   if (!ensureStaff(req, res)) return
@@ -4840,10 +4848,9 @@ const updatePlayerByIdHandler = async (req: any, res: any) => {
   res.json(normalizePlayerForApi(updated))
 }
 
-app.put('/players/:id', authMiddleware, updatePlayerByIdHandler)
-app.put('/effectif/:id', authMiddleware, updatePlayerByIdHandler)
-app.put('/api/players/:id', authMiddleware, updatePlayerByIdHandler)
-app.put('/api/effectif/:id', authMiddleware, updatePlayerByIdHandler)
+for (const route of playerDetailRouteAliases) {
+  app.put(route, authMiddleware, updatePlayerByIdHandler)
+}
 // --- Player invite JWT and playerAuth ---
 function signPlayerInvite(playerId: string, matchdayId?: string | null, email?: string | null) {
   return jwt.sign({ aud: 'player_invite', pid: playerId, mid: matchdayId || null, em: email || null }, JWT_SECRET, { expiresIn: '30d' })
@@ -5346,10 +5353,9 @@ const deletePlayerByIdHandler = async (req: any, res: any) => {
   }
 }
 
-app.delete('/players/:id', authMiddleware, deletePlayerByIdHandler)
-app.delete('/effectif/:id', authMiddleware, deletePlayerByIdHandler)
-app.delete('/api/players/:id', authMiddleware, deletePlayerByIdHandler)
-app.delete('/api/effectif/:id', authMiddleware, deletePlayerByIdHandler)
+for (const route of playerDetailRouteAliases) {
+  app.delete(route, authMiddleware, deletePlayerByIdHandler)
+}
 
 // ---- Trainings ----
 app.get('/trainings', authMiddleware, async (req: any, res) => {
