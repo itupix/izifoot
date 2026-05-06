@@ -15,7 +15,7 @@
 
 ## 3. Scope
 Included
-- `GET/POST/PUT/DELETE /players` and legacy aliases `/effectif`, `/api/players`.
+- `GET/POST/PUT/DELETE /players` and legacy aliases `/effectif`, `/api/players`, `/api/effectif`.
 - `GET /players/:id/invitation-status`.
 - `POST /players/:id/invite`, `GET /players/:id/invite/qr`.
 - `DELETE /players/:id/parents/:parentId`.
@@ -110,7 +110,7 @@ Constraints: normalized in API adapters.
 - Parent contact cards with unlink action.
 
 ## 12. Routes / API / Handlers
-- `/players`, `/players/:id` and aliases.
+- `/players`, `/players/:id` and aliases `/effectif`, `/api/players`, `/api/effectif`.
 - `/players/:id/invitation-status`.
 - `/players/:id/invite`, `/players/:id/invite/qr`.
 - `/players/:id/parents/:parentId`.
@@ -146,7 +146,7 @@ Constraints: normalized in API adapters.
 
 ## 18. Ambiguities & Gaps
 - Observed
-- Multiple route aliases (`/players`, `/effectif`, `/api/players`) exist.
+- Multiple route aliases (`/players`, `/effectif`, `/api/players`, `/api/effectif`) exist.
 - Inferred
 - Aliases are maintained for legacy clients.
 - Missing
