@@ -67,6 +67,7 @@ import {
   ensureRotationGameKeysForContract,
   normalizeRotationForContract,
 } from './matchday-contract'
+import { toDrillDescriptionHtml, withDrillDescriptionHtml } from './drill-description'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -2133,56 +2134,6 @@ function formatDrillDescription(raw: string) {
   ].filter(Boolean)
 
   return fallbackLines.join('\n')
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
-function toDrillDescriptionHtml(value: string) {
-  const lines = value
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-
-  if (!lines.length) return ''
-
-  return lines.map((line) => {
-    const md = line.match(/^\*\*(.+?)\*\*\s*(.*)$/)
-    if (md) {
-      return `<p><strong>${escapeHtml(md[1].trim())}</strong> ${escapeHtml(md[2])}</p>`
-    }
-    const plain = line.match(/^([^:]+)\s*:\s*(.*)$/)
-    if (plain) {
-      return `<p><strong>${escapeHtml(plain[1].trim())} :</strong> ${escapeHtml(plain[2])}</p>`
-    }
-    return `<p>${escapeHtml(line)}</p>`
-  }).join('')
-}
-
-function normalizeIncomingDescription(raw: string) {
-  const noHtml = raw.replace(/<[^>]*>/g, ' ')
-  const noMarkdown = noHtml
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/__(.*?)__/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-  return noMarkdown.replace(/\s+/g, ' ').trim()
-}
-
-function withDrillDescriptionHtml<T extends { description?: string | null }>(drill: T): T & { descriptionHtml: string } {
-  const raw = typeof drill?.description === 'string' ? drill.description : ''
-  const normalizedRaw = normalizeIncomingDescription(raw)
-  const formatted = formatDrillDescription(normalizedRaw)
-  return {
-    ...drill,
-    description: formatted,
-    descriptionHtml: toDrillDescriptionHtml(formatted),
-  }
 }
 
 function normalizeAiDrillValue(

@@ -74,6 +74,7 @@ Restrictions: must respect scope and ownership checks.
 - States: draft content, persisted content.
 - Conditions: authenticated coach/direction scope.
 - Validations: payload shape for drill and diagram data.
+- Manual drill descriptions are returned as authored; section labels such as `Organisation` or `Consignes` are not synthesized for standard CRUD responses.
 - Blocking rules: team scope checks on owned drill/training drill.
 - Automations: AI generation endpoints create content artifacts.
 

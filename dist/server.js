@@ -38,6 +38,7 @@ const match_payload_1 = require("./match-payload");
 const match_status_1 = require("./match-status");
 const matchday_absence_1 = require("./matchday-absence");
 const matchday_contract_1 = require("./matchday-contract");
+const drill_description_1 = require("./drill-description");
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -2000,51 +2001,6 @@ function formatDrillDescription(raw) {
     ].filter(Boolean);
     return fallbackLines.join('\n');
 }
-function escapeHtml(value) {
-    return value
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-function toDrillDescriptionHtml(value) {
-    const lines = value
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean);
-    if (!lines.length)
-        return '';
-    return lines.map((line) => {
-        const md = line.match(/^\*\*(.+?)\*\*\s*(.*)$/);
-        if (md) {
-            return `<p><strong>${escapeHtml(md[1].trim())}</strong> ${escapeHtml(md[2])}</p>`;
-        }
-        const plain = line.match(/^([^:]+)\s*:\s*(.*)$/);
-        if (plain) {
-            return `<p><strong>${escapeHtml(plain[1].trim())} :</strong> ${escapeHtml(plain[2])}</p>`;
-        }
-        return `<p>${escapeHtml(line)}</p>`;
-    }).join('');
-}
-function normalizeIncomingDescription(raw) {
-    const noHtml = raw.replace(/<[^>]*>/g, ' ');
-    const noMarkdown = noHtml
-        .replace(/\*\*(.*?)\*\*/g, '$1')
-        .replace(/__(.*?)__/g, '$1')
-        .replace(/`([^`]+)`/g, '$1');
-    return noMarkdown.replace(/\s+/g, ' ').trim();
-}
-function withDrillDescriptionHtml(drill) {
-    const raw = typeof drill?.description === 'string' ? drill.description : '';
-    const normalizedRaw = normalizeIncomingDescription(raw);
-    const formatted = formatDrillDescription(normalizedRaw);
-    return {
-        ...drill,
-        description: formatted,
-        descriptionHtml: toDrillDescriptionHtml(formatted),
-    };
-}
 function normalizeAiDrillValue(value, ctx) {
     const title = value.t.trim().slice(0, 100);
     const category = value.c.trim().slice(0, 50);
@@ -2093,7 +2049,7 @@ function normalizeAiDrillValue(value, ctx) {
         ? `${description} Séquence: ${sequence}.`
         : description;
     const formattedDescription = formatDrillDescription(descriptionWithPlan).slice(0, 1200);
-    const descriptionHtml = toDrillDescriptionHtml(formattedDescription);
+    const descriptionHtml = (0, drill_description_1.toDrillDescriptionHtml)(formattedDescription);
     const visualCones = (value.v?.c || []).map(clampPoint).slice(0, 4);
     const visualFramesRaw = normalizeFrameSeries((value.v?.f || []).map((frame) => ({
         p1: clampPoint(frame.p1),
@@ -4207,8 +4163,8 @@ app.get('/drills', authMiddleware, async (req, res) => {
             skip: pagination.skip,
         }),
     ]);
-    const renderedItems = items.map((d) => withDrillDescriptionHtml(d));
-    const renderedCatalog = catalog.map((d) => withDrillDescriptionHtml(d));
+    const renderedItems = items.map((d) => (0, drill_description_1.withDrillDescriptionHtml)(d));
+    const renderedCatalog = catalog.map((d) => (0, drill_description_1.withDrillDescriptionHtml)(d));
     res.json({
         items: renderedItems,
         categories: Array.from(new Set(renderedCatalog.map(d => d.category))).sort(),
@@ -4222,7 +4178,7 @@ app.get('/drills/:id', authMiddleware, async (req, res) => {
     const d = await drillFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
     if (!d)
         return res.status(404).json({ error: 'Not found' });
-    res.json(withDrillDescriptionHtml(d));
+    res.json((0, drill_description_1.withDrillDescriptionHtml)(d));
 });
 app.put('/drills/:id', authMiddleware, async (req, res) => {
     const existing = await drillFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
@@ -4256,7 +4212,7 @@ app.put('/drills/:id', authMiddleware, async (req, res) => {
         where: { id: existing.id },
         data: patch
     });
-    res.json(withDrillDescriptionHtml(updated));
+    res.json((0, drill_description_1.withDrillDescriptionHtml)(updated));
 });
 app.delete('/drills/:id', authMiddleware, async (req, res) => {
     const existing = await drillFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
@@ -4310,7 +4266,7 @@ app.post('/drills', authMiddleware, async (req, res) => {
             description: parsed.data.description,
             tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
         });
-        res.status(201).json(withDrillDescriptionHtml(drill));
+        res.status(201).json((0, drill_description_1.withDrillDescriptionHtml)(drill));
     }
     catch (e) {
         if (e?.code === 'DRILL_STORAGE_UNAVAILABLE') {
@@ -7166,7 +7122,7 @@ app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
         return res.status(404).json({ error: 'Training not found' });
     const rows = await listTrainingDrillsInOrder(prisma, req.auth, trainingId);
     const catalog = await drillFindManyForUser(prisma, req.auth, { orderBy: { createdAt: 'asc' } });
-    const catalogById = new Map(catalog.map((drill) => [drill.id, withDrillDescriptionHtml(drill)]));
+    const catalogById = new Map(catalog.map((drill) => [drill.id, (0, drill_description_1.withDrillDescriptionHtml)(drill)]));
     const items = rows.map(r => {
         const meta = catalogById.get(r.drillId) || null;
         return { ...r, meta };
