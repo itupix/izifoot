@@ -60,7 +60,7 @@ Restrictions: must preserve team relation integrity.
 - External links: player/parent invite URLs, QR codes.
 
 ## 6. User Flows
-- Main flow: create player -> open detail -> send invite -> monitor invitation status.
+- Main flow: quick-create player with first name only -> open detail -> complete missing profile data if needed -> send invite -> monitor invitation status.
 - Variants: update existing player identity fields.
 - Back navigation: return to paginated roster.
 - Interruptions: invalid contact info or team mismatch.
@@ -72,7 +72,7 @@ Restrictions: must preserve team relation integrity.
 - Actions: CRUD player and parent link cleanup.
 - States: active player, invited parent pending/accepted.
 - Conditions: writable team scope required.
-- Validations: payload normalization for legacy field names.
+- Validations: player create/update accept minimal payloads and normalize legacy field names; adult account invite requires last name, email, and phone.
 - Blocking rules: cannot mutate out-of-scope player.
 - Automations: invite token generation for parent/player onboarding.
 
@@ -95,6 +95,9 @@ Constraints: normalized in API adapters.
 
 ## 9. Business Rules
 - Player belongs to one team.
+- Player creation requires first name only; last name, phone, email, licence, and position may be completed later.
+- Adult player account invitation is blocked until last name, email, and phone are available on the player profile or request overrides.
+- Child player account invitation keeps the parent-contact flow: the invite targets a parent account and still requires at least one parent contact channel (`email` or `phone`) in the invite request.
 - Invite status endpoint reflects latest account-link state.
 - Parent link deletion removes relation but keeps player record.
 - Legacy route aliases maintained for backward compatibility.
@@ -127,7 +130,8 @@ Constraints: normalized in API adapters.
 - Cross-repo: web+iOS player features depend on these contracts.
 
 ## 15. Error Handling
-- Validation: missing required player fields -> 400.
+- Validation: missing first name or invalid email format -> 400 on player create/update; missing adult invite prerequisites (`lastName`, `email`, `phone`) -> 400 on account invite.
+- Validation: child invite without parent `email` and without parent `phone` -> 400 on account invite.
 - Missing data: unknown player -> 404.
 - Permissions: scope mismatch -> 403.
 - Broken states: orphaned invites/links after manual DB edits.
@@ -161,15 +165,15 @@ Constraints: normalized in API adapters.
 - Security: add anti-spam limits on invite resend.
 
 ## 20. Acceptance Criteria
-1. Scoped admin/coach can create and update player.
+1. Scoped admin/coach can create a player with first name only and update remaining profile fields later.
 2. Out-of-scope mutations are denied.
-3. Invite endpoint returns usable invitation metadata.
+3. Adult player invite endpoint rejects incomplete profiles missing last name, email, or phone and otherwise returns usable invitation metadata.
 4. Parent unlink succeeds and updates invitation state views.
 
 ## 21. Test Scenarios
-- Happy path: create player and send parent invite.
+- Happy path: quick-create player with first name only, then complete profile and send invite.
 - Permissions: coach cannot mutate out-of-scope player.
-- Errors: invalid payload rejected.
+- Errors: invalid payload or missing adult invite prerequisites rejected.
 - Edge cases: invitation status for player with no parent contact.
 
 ## 22. Technical References

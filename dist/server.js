@@ -4500,11 +4500,11 @@ const createPlayerHandler = async (req, res) => {
         teamId: team.id,
         name: `${payload.firstName} ${payload.lastName}`.trim(),
         first_name: payload.firstName,
-        last_name: payload.lastName,
+        last_name: payload.lastName || null,
         primary_position: payload.primary_position,
         secondary_position: payload.secondary_position,
-        email: payload.isChild ? null : payload.email,
-        phone: payload.isChild ? null : payload.phone,
+        email: payload.isChild ? null : (payload.email || null),
+        phone: payload.isChild ? null : (payload.phone || null),
         is_child: payload.isChild,
         parent_first_name: payload.isChild ? null : payload.parentFirstName,
         parent_last_name: payload.isChild ? null : payload.parentLastName,
@@ -4534,12 +4534,12 @@ const updatePlayerByIdHandler = async (req, res) => {
     }
     const patch = {};
     patch.first_name = payload.firstName;
-    patch.last_name = payload.lastName;
+    patch.last_name = payload.lastName || null;
     patch.name = `${payload.firstName} ${payload.lastName}`.trim();
     patch.primary_position = payload.primary_position;
     patch.secondary_position = payload.secondary_position;
-    patch.email = payload.isChild ? null : payload.email;
-    patch.phone = payload.isChild ? null : payload.phone;
+    patch.email = payload.isChild ? null : (payload.email || null);
+    patch.phone = payload.isChild ? null : (payload.phone || null);
     patch.is_child = payload.isChild;
     patch.parent_first_name = payload.isChild ? null : payload.parentFirstName;
     patch.parent_last_name = payload.isChild ? null : payload.parentLastName;
@@ -4599,6 +4599,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
             clubId: true,
             teamId: true,
             email: true,
+            phone: true,
             first_name: true,
             last_name: true,
             name: true,
@@ -4629,7 +4630,7 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
         : (parsed.data.email || player.email || null);
     const invitePhone = inviteRole === 'PARENT'
         ? ((parsed.data.phone || '').trim() || null)
-        : (player.phone || null);
+        : ((parsed.data.phone || '').trim() || player.phone || null);
     if (parsed.data.matchdayId) {
         const base = `${req.protocol}://${req.get('host')}`;
         const presentToken = signRsvpToken(id, parsed.data.matchdayId, 'present');
@@ -4669,8 +4670,37 @@ app.post('/players/:id/invite', authMiddleware, async (req, res) => {
     if (inviteRole === 'PARENT' && !contactEmail && !invitePhone) {
         return res.status(400).json({ error: 'Parent email or phone is required to send account invitation' });
     }
-    if (inviteRole !== 'PARENT' && !contactEmail) {
-        return res.status(400).json({ error: 'Player email is required to send account invitation' });
+    if (inviteRole !== 'PARENT') {
+        try {
+            (0, player_payload_1.assertPlayerAccountInvitePrerequisites)(player, { email: contactEmail, phone: invitePhone });
+        }
+        catch (e) {
+            if (e instanceof zod_1.z.ZodError) {
+                return res.status(400).json({
+                    error: e.flatten(),
+                    missingFields: e.issues.map((issue) => issue.path.join('.')).filter(Boolean),
+                });
+            }
+            throw e;
+        }
+        const contactPatch = {};
+        if (parsed.data.email)
+            contactPatch.email = parsed.data.email.trim();
+        if (parsed.data.phone)
+            contactPatch.phone = parsed.data.phone.trim();
+        if (Object.keys(contactPatch).length > 0) {
+            await prisma.player.updateMany({
+                where: {
+                    id: player.id,
+                    ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+                },
+                data: contactPatch,
+            });
+            if (contactPatch.email)
+                player.email = contactPatch.email;
+            if (contactPatch.phone)
+                player.phone = contactPatch.phone;
+        }
     }
     let invitationEmail = contactEmail;
     if (!invitationEmail && inviteRole === 'PARENT') {

@@ -1,7 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.DEFAULT_PLAYER_PRIMARY_POSITION = void 0;
 exports.parsePlayerCreatePayload = parsePlayerCreatePayload;
 exports.parsePlayerUpdatePayload = parsePlayerUpdatePayload;
+exports.assertPlayerAccountInvitePrerequisites = assertPlayerAccountInvitePrerequisites;
 exports.normalizePlayerForApi = normalizePlayerForApi;
 const zod_1 = require("zod");
 function asOptionalTrimmedString(value) {
@@ -55,12 +57,13 @@ function composeFullName(firstName, lastName, fallbackName) {
         return full;
     return (fallbackName || '').trim();
 }
+exports.DEFAULT_PLAYER_PRIMARY_POSITION = 'NON DEFINI';
 const basePlayerSchema = zod_1.z.object({
-    firstName: zod_1.z.string().min(1),
-    lastName: zod_1.z.string().min(1),
+    firstName: zod_1.z.string(),
+    lastName: zod_1.z.string(),
     email: zod_1.z.string(),
     phone: zod_1.z.string(),
-    primary_position: zod_1.z.string().min(1),
+    primary_position: zod_1.z.string(),
     secondary_position: zod_1.z.string().nullable(),
     licence: zod_1.z.string().nullable(),
     isChild: zod_1.z.boolean(),
@@ -86,6 +89,12 @@ function validatePlayerBusinessRules(payload) {
         parentLastName: parsed.data.parentLastName ? parsed.data.parentLastName.trim() : null,
         teamId: parsed.data.teamId ? parsed.data.teamId.trim() : null,
     };
+    if (!normalized.firstName) {
+        throw new zod_1.z.ZodError([{ code: 'custom', path: ['firstName'], message: 'Required' }]);
+    }
+    if (!normalized.primary_position) {
+        normalized.primary_position = exports.DEFAULT_PLAYER_PRIMARY_POSITION;
+    }
     if (normalized.isChild) {
         // Child profiles should not carry parent identity or personal contact coordinates.
         normalized.parentFirstName = null;
@@ -96,14 +105,8 @@ function validatePlayerBusinessRules(payload) {
     else {
         normalized.parentFirstName = null;
         normalized.parentLastName = null;
-        if (!normalized.email) {
-            throw new zod_1.z.ZodError([{ code: 'custom', path: ['email'], message: 'Required when isChild is false' }]);
-        }
-        if (!zod_1.z.string().email().safeParse(normalized.email).success) {
+        if (normalized.email && !zod_1.z.string().email().safeParse(normalized.email).success) {
             throw new zod_1.z.ZodError([{ code: 'custom', path: ['email'], message: 'Invalid email' }]);
-        }
-        if (!normalized.phone) {
-            throw new zod_1.z.ZodError([{ code: 'custom', path: ['phone'], message: 'Required when isChild is false' }]);
         }
     }
     return normalized;
@@ -158,7 +161,7 @@ function canonicalFromExistingPlayer(existing) {
         lastName,
         email: firstPresentString(existing?.email) || '',
         phone: firstPresentString(existing?.phone) || '',
-        primary_position: firstPresentString(existing?.primary_position) || 'NON DEFINI',
+        primary_position: firstPresentString(existing?.primary_position) || exports.DEFAULT_PLAYER_PRIMARY_POSITION,
         secondary_position: firstPresentString(existing?.secondary_position),
         licence: firstPresentString(existing?.licence, existing?.license),
         isChild,
@@ -174,7 +177,7 @@ function parsePlayerCreatePayload(raw) {
         lastName: draft.lastName || '',
         email: draft.email || '',
         phone: draft.phone || '',
-        primary_position: draft.primary_position || '',
+        primary_position: draft.primary_position || exports.DEFAULT_PLAYER_PRIMARY_POSITION,
         secondary_position: draft.secondary_position ?? null,
         licence: draft.licence ?? null,
         isChild: draft.isChild ?? false,
@@ -184,21 +187,46 @@ function parsePlayerCreatePayload(raw) {
     });
 }
 function parsePlayerUpdatePayload(raw, existing) {
-    void existing;
+    const current = canonicalFromExistingPlayer(existing);
     const draft = extractPlayerDraft(raw);
     return validatePlayerBusinessRules({
-        firstName: draft.firstName || '',
-        lastName: draft.lastName || '',
-        email: draft.email || '',
-        phone: draft.phone || '',
-        primary_position: draft.primary_position || '',
-        secondary_position: draft.secondary_position ?? null,
-        licence: draft.licence ?? null,
-        isChild: draft.isChild ?? false,
-        parentFirstName: draft.parentFirstName ?? null,
-        parentLastName: draft.parentLastName ?? null,
-        teamId: draft.teamId ?? null,
+        firstName: draft.firstName ?? current.firstName,
+        lastName: draft.lastName ?? current.lastName,
+        email: draft.email ?? current.email,
+        phone: draft.phone ?? current.phone,
+        primary_position: draft.primary_position ?? current.primary_position,
+        secondary_position: draft.secondary_position !== undefined ? draft.secondary_position ?? null : current.secondary_position,
+        licence: draft.licence !== undefined ? draft.licence ?? null : current.licence,
+        isChild: draft.isChild ?? current.isChild,
+        parentFirstName: draft.parentFirstName ?? current.parentFirstName,
+        parentLastName: draft.parentLastName ?? current.parentLastName,
+        teamId: draft.teamId ?? current.teamId,
     });
+}
+function assertPlayerAccountInvitePrerequisites(player, overrides = {}) {
+    const split = splitLegacyName(firstPresentString(player?.name));
+    const isChild = parseBooleanLike(player?.isChild ?? player?.is_child ?? player?.enfant) || false;
+    if (isChild)
+        return;
+    const lastName = firstPresentString(player?.lastName, player?.last_name, split.lastName);
+    const email = firstPresentString(overrides.email, player?.email);
+    const phone = firstPresentString(overrides.phone, player?.phone, player?.telephone);
+    const issues = [];
+    if (!lastName) {
+        issues.push({ code: 'custom', path: ['lastName'], message: 'Required before sending account invitation' });
+    }
+    if (!email) {
+        issues.push({ code: 'custom', path: ['email'], message: 'Required before sending account invitation' });
+    }
+    else if (!zod_1.z.string().email().safeParse(email).success) {
+        issues.push({ code: 'custom', path: ['email'], message: 'Invalid email' });
+    }
+    if (!phone) {
+        issues.push({ code: 'custom', path: ['phone'], message: 'Required before sending account invitation' });
+    }
+    if (issues.length > 0) {
+        throw new zod_1.z.ZodError(issues);
+    }
 }
 function normalizePlayerForApi(player) {
     const split = splitLegacyName(firstPresentString(player?.name));

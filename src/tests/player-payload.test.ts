@@ -1,29 +1,23 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizePlayerForApi, parsePlayerCreatePayload, parsePlayerUpdatePayload } from '../player-payload'
+import {
+  assertPlayerAccountInvitePrerequisites,
+  DEFAULT_PLAYER_PRIMARY_POSITION,
+  normalizePlayerForApi,
+  parsePlayerCreatePayload,
+  parsePlayerUpdatePayload,
+} from '../player-payload'
 
-test('POST payload refuses missing email', () => {
-  assert.throws(() => {
-    parsePlayerCreatePayload({
-      firstName: 'Lina',
-      lastName: 'Martin',
-      phone: '0611223344',
-      primary_position: 'NON DEFINI',
-      isChild: false,
-    })
+test('POST payload only requires firstName', () => {
+  const parsed = parsePlayerCreatePayload({
+    firstName: 'Lina',
   })
-})
 
-test('POST payload refuses missing phone', () => {
-  assert.throws(() => {
-    parsePlayerCreatePayload({
-      firstName: 'Lina',
-      lastName: 'Martin',
-      email: 'lina@example.com',
-      primary_position: 'NON DEFINI',
-      isChild: false,
-    })
-  })
+  assert.equal(parsed.firstName, 'Lina')
+  assert.equal(parsed.lastName, '')
+  assert.equal(parsed.email, '')
+  assert.equal(parsed.phone, '')
+  assert.equal(parsed.primary_position, DEFAULT_PLAYER_PRIMARY_POSITION)
 })
 
 test('POST payload refuses child without parent names', () => {
@@ -39,6 +33,15 @@ test('POST payload refuses child without parent names', () => {
   assert.equal(parsed.parentLastName, null)
   assert.equal(parsed.email, '')
   assert.equal(parsed.phone, '')
+})
+
+test('POST payload defaults missing primary_position to NON DEFINI', () => {
+  const parsed = parsePlayerCreatePayload({
+    firstName: 'Lina',
+    lastName: 'Martin',
+  })
+
+  assert.equal(parsed.primary_position, DEFAULT_PLAYER_PRIMARY_POSITION)
 })
 
 test('POST payload accepts primary_position = NON DEFINI', () => {
@@ -89,15 +92,12 @@ test('compatibility aliases are accepted', () => {
   assert.equal(parsed.licence, 'F12345')
 })
 
-test('PUT payload refuses missing email', () => {
+test('POST payload refuses invalid email when provided', () => {
   assert.throws(() => {
-    parsePlayerUpdatePayload({
+    parsePlayerCreatePayload({
       firstName: 'Lina',
-      lastName: 'Martin',
-      phone: '0611223344',
-      primary_position: 'NON DEFINI',
-      isChild: false,
-    }, {})
+      email: 'invalid-email',
+    })
   })
 })
 
@@ -122,6 +122,25 @@ test('PUT payload updates concatenated name fields from aliases', () => {
   assert.equal(normalized.name, 'Lina Martin')
 })
 
+test('PUT payload preserves existing optional fields when omitted', () => {
+  const parsed = parsePlayerUpdatePayload({
+    firstName: 'Lina',
+    email: 'lina.new@example.com',
+  }, {
+    first_name: 'Lina',
+    last_name: 'Martin',
+    email: 'lina.old@example.com',
+    phone: '0611223344',
+    primary_position: 'ATTAQUANT',
+    is_child: false,
+  })
+
+  assert.equal(parsed.lastName, 'Martin')
+  assert.equal(parsed.email, 'lina.new@example.com')
+  assert.equal(parsed.phone, '0611223344')
+  assert.equal(parsed.primary_position, 'ATTAQUANT')
+})
+
 test('PUT payload accepts parentPrenom/parentNom aliases when child', () => {
   const parsed = parsePlayerUpdatePayload({
     firstName: 'Noah',
@@ -136,4 +155,40 @@ test('PUT payload accepts parentPrenom/parentNom aliases when child', () => {
 
   assert.equal(parsed.parentFirstName, null)
   assert.equal(parsed.parentLastName, null)
+})
+
+test('player account invite requires lastName, email and phone for non-child players', () => {
+  assert.throws(() => {
+    assertPlayerAccountInvitePrerequisites({
+      first_name: 'Lina',
+      last_name: '',
+      email: null,
+      phone: null,
+      is_child: false,
+    })
+  })
+})
+
+test('player account invite accepts request email and phone overrides for non-child players', () => {
+  assert.doesNotThrow(() => {
+    assertPlayerAccountInvitePrerequisites({
+      first_name: 'Lina',
+      last_name: 'Martin',
+      email: null,
+      phone: null,
+      is_child: false,
+    }, {
+      email: 'lina@example.com',
+      phone: '0611223344',
+    })
+  })
+})
+
+test('player account invite keeps child flow unchanged', () => {
+  assert.doesNotThrow(() => {
+    assertPlayerAccountInvitePrerequisites({
+      first_name: 'Noah',
+      is_child: true,
+    })
+  })
 })
