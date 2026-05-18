@@ -97,6 +97,7 @@ Constraints: unique like/read composites.
 - Conversation ids encode `announcements` or `coach` scope.
 - Parent/player conversation access depends on linked player.
 - `COACH` conversations are always returned in the inbox when the player scope exists, with `invitationStatus` set to `NONE`, `PENDING`, or `ACCEPTED`.
+- `COACH` conversations expose the linked `playerId` so clients can trigger invitation actions without parsing the conversation id.
 - `COACH` conversations with `invitationStatus = NONE` must be rendered disabled in clients and remain blocked on direct read/write routes.
 - Unread count uses per-team read timestamp comparison.
 - Push token endpoint stores device-token mapping for user.
@@ -136,6 +137,7 @@ Constraints: unique like/read composites.
 - Missing data: unknown conversation/player yields errors.
 - Permissions: forbidden team access returns 403.
 - Direct conversation gating: `GET/POST /messages/conversations/:id/messages` returns `403` with `code: PLAYER_INVITATION_REQUIRED` when the player invitation status is `NONE`.
+- Partial availability: `GET /messages/conversations` can still list a `COACH` conversation with `invitationStatus = NONE`; clients should use `playerId` plus invitation APIs to guide recovery UX.
 - Broken states: missing linked player for parent role.
 - Current vs expected: error contracts should be standardized for conversation parsing failures.
 
@@ -169,15 +171,17 @@ Constraints: unique like/read composites.
 ## 20. Acceptance Criteria
 1. Scoped users can list and read allowed conversations.
 2. `COACH` conversations expose `invitationStatus` for `NONE`, `PENDING`, and `ACCEPTED`.
-3. `COACH` conversations remain visible in inbox results when the status is `NONE`, but clients can disable them from this contract.
-4. Direct conversation read/write routes return the `PLAYER_INVITATION_REQUIRED` 403 contract when the player invitation status is `NONE`.
-5. Sending message persists and appears in thread.
-6. Like/unlike updates counters deterministically.
-7. Push token and badge reset endpoints work for authenticated user.
+3. `COACH` conversations expose the linked `playerId` in list and thread payloads.
+4. `COACH` conversations remain visible in inbox results when the status is `NONE`, but clients can disable them from this contract.
+5. Direct conversation read/write routes return the `PLAYER_INVITATION_REQUIRED` 403 contract when the player invitation status is `NONE`.
+6. Sending message persists and appears in thread.
+7. Like/unlike updates counters deterministically.
+8. Push token and badge reset endpoints work for authenticated user.
 
 ## 21. Test Scenarios
 - Happy path: coach sends conversation message to player context.
 - Invitation gating: inbox keeps `COACH` conversation when player invitation status is `NONE`, with `invitationStatus: NONE`.
+- Invitation recovery: `COACH` conversation payloads include `playerId` for invite CTA clients.
 - Invitation gating: direct conversation read/write returns `PLAYER_INVITATION_REQUIRED` for `NONE` and exposes `invitationStatus` for `PENDING`/`ACCEPTED`.
 - Permissions: user cannot read foreign team conversation.
 - Errors: invalid conversation id format.

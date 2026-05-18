@@ -7616,6 +7616,7 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
         const coachConversation = {
             id: conversationIdForCoach(team.id, linkedPlayer.id),
             type: 'COACH',
+            playerId: linkedPlayer.id,
             title: 'Coach',
             subtitle: coachSubtitle,
             invitationStatus: coachConversationAccess.invitationStatus,
@@ -7662,6 +7663,7 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
         return {
             id: conversationIdForCoach(team.id, player.id),
             type: 'COACH',
+            playerId: player.id,
             title,
             subtitle,
             invitationStatus,
@@ -7730,6 +7732,7 @@ app.get('/messages/conversations/:id/messages', authMiddleware, async (req, res)
         conversation: {
             id: conversationIdForCoach(team.id, player.id),
             type: 'COACH',
+            playerId: player.id,
             title: (req.auth?.role === 'PLAYER' || req.auth?.role === 'PARENT') ? 'Coach' : title,
             invitationStatus: coachConversationAccess.invitationStatus,
         },
