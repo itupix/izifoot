@@ -16,6 +16,7 @@ function resolveCoachConversationInvitationAvailability(snapshot) {
     }
     return {
         isAvailable: false,
+        invitationStatus: 'NONE',
         error: exports.PLAYER_INVITATION_REQUIRED_CONVERSATION_ERROR,
     };
 }

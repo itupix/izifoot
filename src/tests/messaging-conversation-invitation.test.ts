@@ -10,6 +10,7 @@ test('coach conversation is unavailable when player invitation status is NONE', 
 
   assert.deepEqual(result, {
     isAvailable: false,
+    invitationStatus: 'NONE',
     error: PLAYER_INVITATION_REQUIRED_CONVERSATION_ERROR,
   })
 })

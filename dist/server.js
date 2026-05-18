@@ -7592,9 +7592,6 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
         if (!linkedPlayer?.id)
             return res.json({ items: [announcementConversation] });
         const coachConversationAccess = await getCoachConversationInvitationAvailability(req.auth, linkedPlayer);
-        if (!coachConversationAccess.isAvailable) {
-            return res.json({ items: [announcementConversation] });
-        }
         const directLatest = await prisma.directMessage.findFirst({
             where: { clubId: team.clubId, teamId: team.id, playerId: linkedPlayer.id },
             include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
@@ -7632,20 +7629,18 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
         select: { id: true, name: true, first_name: true, last_name: true, is_child: true },
         orderBy: [{ last_name: 'asc' }, { first_name: 'asc' }, { name: 'asc' }],
     });
-    const coachConversationPlayers = (await Promise.all(players.map(async (player) => {
+    const coachConversationPlayers = await Promise.all(players.map(async (player) => {
         const coachConversationAccess = await getCoachConversationInvitationAvailability(req.auth, player);
-        if (!coachConversationAccess.isAvailable)
-            return null;
         return {
             player,
             invitationStatus: coachConversationAccess.invitationStatus,
         };
-    }))).filter((item) => item !== null);
-    const eligiblePlayerIds = coachConversationPlayers.map(({ player }) => player.id);
-    const parentUsersByPlayerId = await listAcceptedParentUsersByPlayerIds(team.clubId, eligiblePlayerIds);
-    const directLatestRows = eligiblePlayerIds.length
+    }));
+    const playerIds = coachConversationPlayers.map(({ player }) => player.id);
+    const parentUsersByPlayerId = await listAcceptedParentUsersByPlayerIds(team.clubId, playerIds);
+    const directLatestRows = playerIds.length
         ? await prisma.directMessage.findMany({
-            where: { clubId: team.clubId, teamId: team.id, playerId: { in: eligiblePlayerIds } },
+            where: { clubId: team.clubId, teamId: team.id, playerId: { in: playerIds } },
             include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         })

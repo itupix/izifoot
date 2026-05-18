@@ -10,6 +10,7 @@ const message_conversation_availability_1 = require("../message-conversation-ava
     const result = (0, message_conversation_availability_1.resolveCoachConversationInvitationAvailability)({ status: 'NONE' });
     strict_1.default.deepEqual(result, {
         isAvailable: false,
+        invitationStatus: 'NONE',
         error: message_conversation_availability_1.PLAYER_INVITATION_REQUIRED_CONVERSATION_ERROR,
     });
 });
