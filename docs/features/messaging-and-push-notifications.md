@@ -96,6 +96,7 @@ Constraints: unique like/read composites.
 ## 9. Business Rules
 - Conversation ids encode `announcements` or `coach` scope.
 - Parent/player conversation access depends on linked player.
+- `COACH` conversations are available only when the linked player invitation status resolves to `PENDING` or `ACCEPTED`; `NONE` removes the conversation from the inbox.
 - Unread count uses per-team read timestamp comparison.
 - Push token endpoint stores device-token mapping for user.
 
@@ -133,6 +134,7 @@ Constraints: unique like/read composites.
 - Validation: malformed conversation id rejected.
 - Missing data: unknown conversation/player yields errors.
 - Permissions: forbidden team access returns 403.
+- Direct conversation gating: `GET/POST /messages/conversations/:id/messages` returns `403` with `code: PLAYER_INVITATION_REQUIRED` when the player invitation status is `NONE`.
 - Broken states: missing linked player for parent role.
 - Current vs expected: error contracts should be standardized for conversation parsing failures.
 
@@ -165,12 +167,16 @@ Constraints: unique like/read composites.
 
 ## 20. Acceptance Criteria
 1. Scoped users can list and read allowed conversations.
-2. Sending message persists and appears in thread.
-3. Like/unlike updates counters deterministically.
-4. Push token and badge reset endpoints work for authenticated user.
+2. `COACH` conversations expose `invitationStatus` when the linked player status is `PENDING` or `ACCEPTED`, and are hidden from inbox results when the status is `NONE`.
+3. Direct conversation read/write routes return the `PLAYER_INVITATION_REQUIRED` 403 contract when the player invitation status is `NONE`.
+4. Sending message persists and appears in thread.
+5. Like/unlike updates counters deterministically.
+6. Push token and badge reset endpoints work for authenticated user.
 
 ## 21. Test Scenarios
 - Happy path: coach sends conversation message to player context.
+- Invitation gating: inbox omits `COACH` conversation when player invitation status is `NONE`.
+- Invitation gating: direct conversation read/write returns `PLAYER_INVITATION_REQUIRED` for `NONE` and exposes `invitationStatus` for `PENDING`/`ACCEPTED`.
 - Permissions: user cannot read foreign team conversation.
 - Errors: invalid conversation id format.
 - Edge cases: unread count when no `TeamMessageRead` record exists.

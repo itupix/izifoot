@@ -32,6 +32,7 @@ const match_events_1 = require("./match-events");
 const match_update_validation_1 = require("./match-update-validation");
 const player_payload_1 = require("./player-payload");
 const player_route_aliases_1 = require("./player-route-aliases");
+const message_conversation_availability_1 = require("./message-conversation-availability");
 const player_invitation_status_1 = require("./player-invitation-status");
 const player_account_role_1 = require("./player-account-role");
 const match_payload_1 = require("./match-payload");
@@ -727,7 +728,7 @@ async function resolveReadOnlyLinkedPlayer(auth) {
     if (auth.role === 'PLAYER') {
         return playerFindFirstForUser(prisma, auth, {
             where: { userId: auth.id },
-            select: { id: true, userId: true, clubId: true, teamId: true },
+            select: { id: true, userId: true, clubId: true, teamId: true, is_child: true },
         });
     }
     if (ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID) {
@@ -745,7 +746,7 @@ async function resolveReadOnlyLinkedPlayer(auth) {
         if (acceptedInvite?.linkedPlayerId) {
             const linkedById = await playerFindFirstForUser(prisma, auth, {
                 where: { id: acceptedInvite.linkedPlayerId },
-                select: { id: true, userId: true, clubId: true, teamId: true },
+                select: { id: true, userId: true, clubId: true, teamId: true, is_child: true },
             });
             if (linkedById)
                 return linkedById;
@@ -763,7 +764,7 @@ async function resolveReadOnlyLinkedPlayer(auth) {
         return null;
     return playerFindFirstForUser(prisma, auth, {
         where: { userId: { in: candidateUserIds } },
-        select: { id: true, userId: true, clubId: true, teamId: true },
+        select: { id: true, userId: true, clubId: true, teamId: true, is_child: true },
     });
 }
 async function resolveCoachConversationPlayer(auth, team, playerId) {
@@ -1759,6 +1760,10 @@ async function getPlayerInvitationStatusForRequest(req, playerId) {
         player,
         snapshot,
     };
+}
+async function getCoachConversationInvitationAvailability(auth, player) {
+    const snapshot = await getPlayerInvitationStatusSnapshot(auth, player);
+    return (0, message_conversation_availability_1.resolveCoachConversationInvitationAvailability)(snapshot);
 }
 async function sendPlayerAccountInviteEmail(params) {
     if (!transporter)
@@ -7586,6 +7591,10 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
         const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth);
         if (!linkedPlayer?.id)
             return res.json({ items: [announcementConversation] });
+        const coachConversationAccess = await getCoachConversationInvitationAvailability(req.auth, linkedPlayer);
+        if (!coachConversationAccess.isAvailable) {
+            return res.json({ items: [announcementConversation] });
+        }
         const directLatest = await prisma.directMessage.findFirst({
             where: { clubId: team.clubId, teamId: team.id, playerId: linkedPlayer.id },
             include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
@@ -7612,6 +7621,7 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
             type: 'COACH',
             title: 'Coach',
             subtitle: coachSubtitle,
+            invitationStatus: coachConversationAccess.invitationStatus,
             lastMessagePreview: directLatest?.content || null,
             lastMessageAt: directLatest?.createdAt || null,
         };
@@ -7622,10 +7632,20 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
         select: { id: true, name: true, first_name: true, last_name: true, is_child: true },
         orderBy: [{ last_name: 'asc' }, { first_name: 'asc' }, { name: 'asc' }],
     });
-    const parentUsersByPlayerId = await listAcceptedParentUsersByPlayerIds(team.clubId, players.map((player) => player.id));
-    const directLatestRows = players.length
+    const coachConversationPlayers = (await Promise.all(players.map(async (player) => {
+        const coachConversationAccess = await getCoachConversationInvitationAvailability(req.auth, player);
+        if (!coachConversationAccess.isAvailable)
+            return null;
+        return {
+            player,
+            invitationStatus: coachConversationAccess.invitationStatus,
+        };
+    }))).filter((item) => item !== null);
+    const eligiblePlayerIds = coachConversationPlayers.map(({ player }) => player.id);
+    const parentUsersByPlayerId = await listAcceptedParentUsersByPlayerIds(team.clubId, eligiblePlayerIds);
+    const directLatestRows = eligiblePlayerIds.length
         ? await prisma.directMessage.findMany({
-            where: { clubId: team.clubId, teamId: team.id, playerId: { in: players.map((player) => player.id) } },
+            where: { clubId: team.clubId, teamId: team.id, playerId: { in: eligiblePlayerIds } },
             include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         })
@@ -7635,7 +7655,7 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
         if (!directLatestByPlayerId.has(row.playerId))
             directLatestByPlayerId.set(row.playerId, row);
     }
-    const coachConversations = players.map((player) => {
+    const coachConversations = coachConversationPlayers.map(({ player, invitationStatus }) => {
         const latest = directLatestByPlayerId.get(player.id) || null;
         const firstName = player.first_name || null;
         const lastName = player.last_name || null;
@@ -7649,6 +7669,7 @@ app.get('/messages/conversations', authMiddleware, async (req, res) => {
             type: 'COACH',
             title,
             subtitle,
+            invitationStatus,
             lastMessagePreview: latest?.content || null,
             lastMessageAt: latest?.createdAt || null,
         };
@@ -7700,6 +7721,10 @@ app.get('/messages/conversations/:id/messages', authMiddleware, async (req, res)
     const player = await resolveCoachConversationPlayer(req.auth, team, parsedId.playerId || '');
     if (!player)
         return res.status(403).json({ error: 'Forbidden conversation scope' });
+    const coachConversationAccess = await getCoachConversationInvitationAvailability(req.auth, player);
+    if (!coachConversationAccess.isAvailable) {
+        return res.status(403).json(coachConversationAccess.error);
+    }
     const rows = await prisma.directMessage.findMany({
         where: { clubId: team.clubId, teamId: team.id, playerId: player.id },
         include: { sender: { select: { id: true, firstName: true, lastName: true, role: true } } },
@@ -7711,6 +7736,7 @@ app.get('/messages/conversations/:id/messages', authMiddleware, async (req, res)
             id: conversationIdForCoach(team.id, player.id),
             type: 'COACH',
             title: (req.auth?.role === 'PLAYER' || req.auth?.role === 'PARENT') ? 'Coach' : title,
+            invitationStatus: coachConversationAccess.invitationStatus,
         },
         items: rows.map((row) => ({
             id: row.id,
@@ -7790,6 +7816,10 @@ app.post('/messages/conversations/:id/messages', authMiddleware, async (req, res
     const player = await resolveCoachConversationPlayer(req.auth, team, parsedId.playerId || '');
     if (!player)
         return res.status(403).json({ error: 'Forbidden conversation scope' });
+    const coachConversationAccess = await getCoachConversationInvitationAvailability(req.auth, player);
+    if (!coachConversationAccess.isAvailable) {
+        return res.status(403).json(coachConversationAccess.error);
+    }
     const created = await prisma.directMessage.create({
         data: {
             clubId: team.clubId,
@@ -8147,6 +8177,8 @@ app.use((err, _req, res, _next) => {
         error: status >= 500 ? 'Internal error' : (err?.message || 'Request failed')
     });
 });
-app.listen(PORT, () => {
-    console.log(`API listening on ${PORT}`);
-});
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`API listening on ${PORT}`);
+    });
+}
