@@ -71,6 +71,23 @@ test('normalizePlayerForApi returns coherent firstName + lastName + name', () =>
   assert.equal(normalized.name, 'Lina Martin')
 })
 
+test('normalizePlayerForApi exposes team and club context when available', () => {
+  const normalized = normalizePlayerForApi({
+    id: 'p1',
+    first_name: 'Lina',
+    last_name: 'Martin',
+    teamId: 'team-1',
+    teamName: 'U11 A',
+    clubId: 'club-1',
+    clubName: 'FC Test',
+  })
+
+  assert.equal(normalized.teamId, 'team-1')
+  assert.equal(normalized.teamName, 'U11 A')
+  assert.equal(normalized.clubId, 'club-1')
+  assert.equal(normalized.clubName, 'FC Test')
+})
+
 test('compatibility aliases are accepted', () => {
   const parsed = parsePlayerCreatePayload({
     prenom: 'Noah',
@@ -139,6 +156,21 @@ test('PUT payload preserves existing optional fields when omitted', () => {
   assert.equal(parsed.email, 'lina.new@example.com')
   assert.equal(parsed.phone, '0611223344')
   assert.equal(parsed.primary_position, 'ATTAQUANT')
+})
+
+test('PUT payload keeps requested teamId when provided', () => {
+  const parsed = parsePlayerUpdatePayload({
+    firstName: 'Lina',
+    teamId: 'team-2',
+  }, {
+    first_name: 'Lina',
+    last_name: 'Martin',
+    primary_position: 'ATTAQUANT',
+    teamId: 'team-1',
+    is_child: false,
+  })
+
+  assert.equal(parsed.teamId, 'team-2')
 })
 
 test('PUT payload accepts parentPrenom/parentNom aliases when child', () => {

@@ -60,6 +60,21 @@ const player_payload_1 = require("../player-payload");
     strict_1.default.equal(normalized.lastName, 'Martin');
     strict_1.default.equal(normalized.name, 'Lina Martin');
 });
+(0, node_test_1.default)('normalizePlayerForApi exposes team and club context when available', () => {
+    const normalized = (0, player_payload_1.normalizePlayerForApi)({
+        id: 'p1',
+        first_name: 'Lina',
+        last_name: 'Martin',
+        teamId: 'team-1',
+        teamName: 'U11 A',
+        clubId: 'club-1',
+        clubName: 'FC Test',
+    });
+    strict_1.default.equal(normalized.teamId, 'team-1');
+    strict_1.default.equal(normalized.teamName, 'U11 A');
+    strict_1.default.equal(normalized.clubId, 'club-1');
+    strict_1.default.equal(normalized.clubName, 'FC Test');
+});
 (0, node_test_1.default)('compatibility aliases are accepted', () => {
     const parsed = (0, player_payload_1.parsePlayerCreatePayload)({
         prenom: 'Noah',
@@ -121,6 +136,19 @@ const player_payload_1 = require("../player-payload");
     strict_1.default.equal(parsed.email, 'lina.new@example.com');
     strict_1.default.equal(parsed.phone, '0611223344');
     strict_1.default.equal(parsed.primary_position, 'ATTAQUANT');
+});
+(0, node_test_1.default)('PUT payload keeps requested teamId when provided', () => {
+    const parsed = (0, player_payload_1.parsePlayerUpdatePayload)({
+        firstName: 'Lina',
+        teamId: 'team-2',
+    }, {
+        first_name: 'Lina',
+        last_name: 'Martin',
+        primary_position: 'ATTAQUANT',
+        teamId: 'team-1',
+        is_child: false,
+    });
+    strict_1.default.equal(parsed.teamId, 'team-2');
 });
 (0, node_test_1.default)('PUT payload accepts parentPrenom/parentNom aliases when child', () => {
     const parsed = (0, player_payload_1.parsePlayerUpdatePayload)({

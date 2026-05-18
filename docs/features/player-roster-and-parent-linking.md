@@ -60,8 +60,8 @@ Restrictions: must preserve team relation integrity.
 - External links: player/parent invite URLs, QR codes.
 
 ## 6. User Flows
-- Main flow: quick-create player with first name only -> open detail -> complete missing profile data if needed -> send invite -> monitor invitation status.
-- Variants: update existing player identity fields.
+- Main flow: quick-create player with first name only -> open detail -> complete missing profile data if needed -> review club/team context -> optionally reassign the player to another authorized team -> send invite -> monitor invitation status.
+- Variants: update existing player identity fields and team assignment.
 - Back navigation: return to paginated roster.
 - Interruptions: invalid contact info or team mismatch.
 - Errors: 403 scope errors, 404 missing player.
@@ -72,7 +72,7 @@ Restrictions: must preserve team relation integrity.
 - Actions: CRUD player and parent link cleanup.
 - States: active player, invited parent pending/accepted.
 - Conditions: writable team scope required.
-- Validations: player create/update accept minimal payloads and normalize legacy field names; adult account invite requires last name, email, and phone.
+- Validations: player create/update accept minimal payloads and normalize legacy field names; `PUT /players/:id` accepts `teamId` to reassign a player within the caller write scope; adult account invite requires last name, email, and phone.
 - Blocking rules: cannot mutate out-of-scope player.
 - Automations: invite token generation for parent/player onboarding.
 
@@ -87,6 +87,11 @@ Source: selected team.
 Purpose: scope and grouping.
 Format: cuid.
 Constraints: required.
+- `Player.teamName` / `Player.clubName`
+Source: server-side enrichment from the linked team and club.
+Purpose: render human-readable roster context on detail screens.
+Format: nullable strings in API responses.
+Constraints: read-only API fields.
 - `Player.email/phone` and parent contact fields
 Source: roster/invite forms.
 Purpose: invitation channel.
@@ -95,7 +100,9 @@ Constraints: normalized in API adapters.
 
 ## 9. Business Rules
 - Player belongs to one team.
+- Player detail responses expose the readable `teamName` and `clubName` associated with that team.
 - Player creation requires first name only; last name, phone, email, licence, date of birth, and position may be completed later.
+- Player reassignment is allowed only inside the writer scope: direction can target club teams, coach can target managed teams only.
 - Adult player account invitation is blocked until last name, email, and phone are available on the player profile or request overrides.
 - Child player account invitation keeps the parent-contact flow: the invite targets a parent account and still requires at least one parent contact channel (`email` or `phone`) in the invite request.
 - Invite status endpoint reflects latest account-link state.
@@ -166,9 +173,11 @@ Constraints: normalized in API adapters.
 
 ## 20. Acceptance Criteria
 1. Scoped admin/coach can create a player with first name only and update remaining profile fields later.
-2. Out-of-scope mutations are denied.
-3. Adult player invite endpoint rejects incomplete profiles missing last name, email, or phone and otherwise returns usable invitation metadata.
-4. Parent unlink succeeds and updates invitation state views.
+2. Player detail payloads expose readable club/team labels for the assigned team.
+3. Scoped admin/coach can reassign a player to another authorized team through `PUT /players/:id`.
+4. Out-of-scope mutations are denied.
+5. Adult player invite endpoint rejects incomplete profiles missing last name, email, or phone and otherwise returns usable invitation metadata.
+6. Parent unlink succeeds and updates invitation state views.
 
 ## 21. Test Scenarios
 - Happy path: quick-create player with first name only, then complete profile and send invite.

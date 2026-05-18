@@ -4535,6 +4535,58 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
 // All endpoints are protected (same as plannings). Adjust if you want some public.
 
 // ---- Players ----
+async function enrichPlayersWithTeamAndClubContext(players: any[]) {
+  if (!players.length) return players
+
+  const teamIds = Array.from(new Set(
+    players
+      .map((player) => (typeof player?.teamId === 'string' ? player.teamId.trim() : ''))
+      .filter(Boolean)
+  ))
+  const clubIds = Array.from(new Set(
+    players
+      .map((player) => (typeof player?.clubId === 'string' ? player.clubId.trim() : ''))
+      .filter(Boolean)
+  ))
+
+  const [teams, clubs] = await Promise.all([
+    teamIds.length
+      ? prisma.team.findMany({
+        where: { id: { in: teamIds } },
+        select: { id: true, name: true, clubId: true },
+      })
+      : Promise.resolve([]),
+    clubIds.length
+      ? prisma.club.findMany({
+        where: { id: { in: clubIds } },
+        select: { id: true, name: true },
+      })
+      : Promise.resolve([]),
+  ])
+
+  const teamById = new Map(teams.map((team) => [team.id, team]))
+  const clubById = new Map(clubs.map((club) => [club.id, club]))
+
+  return players.map((player) => {
+    const teamId = typeof player?.teamId === 'string' && player.teamId.trim() ? player.teamId.trim() : null
+    const clubId = typeof player?.clubId === 'string' && player.clubId.trim()
+      ? player.clubId.trim()
+      : (teamId ? (teamById.get(teamId)?.clubId || null) : null)
+
+    return {
+      ...player,
+      teamId,
+      clubId,
+      teamName: typeof player?.teamName === 'string' && player.teamName.trim()
+        ? player.teamName.trim()
+        : (teamId ? (teamById.get(teamId)?.name || null) : null),
+      clubName: typeof player?.clubName === 'string' && player.clubName.trim()
+        ? player.clubName.trim()
+        : (clubId ? (clubById.get(clubId)?.name || null) : null),
+    }
+  })
+}
+
 const listPlayersHandler = async (req: any, res: any) => {
   if (!ensureStaff(req, res)) return
   const pagination = readPagination(req.query, { limit: 100, maxLimit: 300 })
@@ -4543,9 +4595,10 @@ const listPlayersHandler = async (req: any, res: any) => {
     take: pagination.take,
     skip: pagination.skip,
   })
+  const enrichedPlayers = await enrichPlayersWithTeamAndClubContext(players)
   res.json({
-    items: players.map((player: any) => normalizePlayerForApi(player)),
-    pagination: { limit: pagination.limit, offset: pagination.offset, returned: players.length }
+    items: enrichedPlayers.map((player: any) => normalizePlayerForApi(player)),
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: enrichedPlayers.length }
   })
 }
 
@@ -4558,7 +4611,8 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
   const { id } = req.params
   const scopedPlayer = await getPlayerInvitationStatusForRequest(req, id)
   if (!scopedPlayer) return res.status(404).json({ error: 'Player not found' })
-  const normalizedPlayer = normalizePlayerForApi(scopedPlayer.player)
+  const [enrichedPlayer] = await enrichPlayersWithTeamAndClubContext([scopedPlayer.player])
+  const normalizedPlayer = normalizePlayerForApi(enrichedPlayer)
   const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(
     scopedPlayer.player,
     scopedPlayer.player.clubId || req.auth?.clubId || null
@@ -4783,7 +4837,8 @@ const createPlayerHandler = async (req: any, res: any) => {
     date_of_birth: payload.dateOfBirth,
   }
   const p = await playerCreateForUser(prisma, req.auth, baseData)
-  res.json(normalizePlayerForApi(p))
+  const [enrichedPlayer] = await enrichPlayersWithTeamAndClubContext([p])
+  res.json(normalizePlayerForApi(enrichedPlayer))
 }
 
 for (const route of playerCollectionRouteAliases) {
@@ -4815,8 +4870,21 @@ const updatePlayerByIdHandler = async (req: any, res: any) => {
   patch.parent_last_name = payload.isChild ? null : payload.parentLastName
   patch.licence = payload.licence
   patch.date_of_birth = payload.dateOfBirth
+  const requestedTeamId = payload.teamId?.trim() || null
+  const currentTeamId = typeof existing.teamId === 'string' && existing.teamId.trim() ? existing.teamId.trim() : null
+  if (requestedTeamId && requestedTeamId !== currentTeamId) {
+    let team: any
+    try {
+      team = await resolveTeamForWrite(req.auth, requestedTeamId)
+    } catch (e: any) {
+      return res.status(400).json({ error: e.message })
+    }
+    patch.teamId = team.id
+    patch.clubId = team.clubId
+  }
   const updated = await prisma.player.update({ where: { id: existing.id }, data: patch })
-  res.json(normalizePlayerForApi(updated))
+  const [enrichedPlayer] = await enrichPlayersWithTeamAndClubContext([updated])
+  res.json(normalizePlayerForApi(enrichedPlayer))
 }
 
 for (const route of playerDetailRouteAliases) {

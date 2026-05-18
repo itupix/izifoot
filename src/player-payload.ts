@@ -270,6 +270,10 @@ export function normalizePlayerForApi(player: any) {
   const dateOfBirth = firstPresentString(player?.dateOfBirth, player?.date_of_birth)
   const email = isChild ? null : firstPresentString(player?.email)
   const phone = isChild ? null : firstPresentString(player?.phone, player?.telephone)
+  const teamId = firstPresentString(player?.teamId, player?.team_id)
+  const teamName = firstPresentString(player?.teamName, player?.team_name, player?.team?.name)
+  const clubId = firstPresentString(player?.clubId, player?.club_id, player?.team?.clubId)
+  const clubName = firstPresentString(player?.clubName, player?.club_name, player?.club?.name)
 
   return {
     ...player,
@@ -281,6 +285,10 @@ export function normalizePlayerForApi(player: any) {
     phone: phone ?? null,
     dateOfBirth: dateOfBirth ?? null,
     date_of_birth: dateOfBirth ?? null,
+    teamId: teamId ?? null,
+    teamName: teamName ?? null,
+    clubId: clubId ?? null,
+    clubName: clubName ?? null,
     parentFirstName: null,
     parentLastName: null,
     parent_first_name: null,
