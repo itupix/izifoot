@@ -3136,6 +3136,7 @@ app.get('/me/child', authMiddleware, async (req, res) => {
                 first_name: true,
                 last_name: true,
                 licence: true,
+                date_of_birth: true,
                 teamId: true,
                 is_child: true,
                 parent_first_name: true,
@@ -3165,6 +3166,7 @@ app.get('/me/child', authMiddleware, async (req, res) => {
                 first_name: true,
                 last_name: true,
                 licence: true,
+                date_of_birth: true,
                 teamId: true,
                 is_child: true,
                 parent_first_name: true,
@@ -3188,6 +3190,8 @@ app.get('/me/child', authMiddleware, async (req, res) => {
         firstName: normalizedPlayer.firstName ?? null,
         lastName: normalizedPlayer.lastName ?? null,
         licence: normalizedPlayer.licence ?? null,
+        dateOfBirth: normalizedPlayer.dateOfBirth ?? null,
+        date_of_birth: normalizedPlayer.dateOfBirth ?? null,
         teamId: normalizedPlayer.teamId ?? null,
         teamName: linkedTeam?.name ?? null,
     });
@@ -4514,6 +4518,7 @@ const createPlayerHandler = async (req, res) => {
         parent_first_name: payload.isChild ? null : payload.parentFirstName,
         parent_last_name: payload.isChild ? null : payload.parentLastName,
         licence: payload.licence,
+        date_of_birth: payload.dateOfBirth,
     };
     const p = await playerCreateForUser(prisma, req.auth, baseData);
     res.json((0, player_payload_1.normalizePlayerForApi)(p));
@@ -4549,6 +4554,7 @@ const updatePlayerByIdHandler = async (req, res) => {
     patch.parent_first_name = payload.isChild ? null : payload.parentFirstName;
     patch.parent_last_name = payload.isChild ? null : payload.parentLastName;
     patch.licence = payload.licence;
+    patch.date_of_birth = payload.dateOfBirth;
     const updated = await prisma.player.update({ where: { id: existing.id }, data: patch });
     res.json((0, player_payload_1.normalizePlayerForApi)(updated));
 };

@@ -45,6 +45,16 @@ function composeFullName(firstName: string | null, lastName: string | null, fall
   return (fallbackName || '').trim()
 }
 
+function isValidDateOnlyString(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const [year, month, day] = value.split('-').map((part) => Number(part))
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return false
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day
+}
+
 export const DEFAULT_PLAYER_PRIMARY_POSITION = 'NON DEFINI'
 
 const basePlayerSchema = z.object({
@@ -55,6 +65,7 @@ const basePlayerSchema = z.object({
   primary_position: z.string(),
   secondary_position: z.string().nullable(),
   licence: z.string().nullable(),
+  dateOfBirth: z.string().nullable(),
   isChild: z.boolean(),
   parentFirstName: z.string().nullable(),
   parentLastName: z.string().nullable(),
@@ -78,6 +89,7 @@ function validatePlayerBusinessRules(payload: CanonicalPlayerPayload): Canonical
     primary_position: parsed.data.primary_position.trim(),
     secondary_position: parsed.data.secondary_position ? parsed.data.secondary_position.trim() : null,
     licence: parsed.data.licence ? parsed.data.licence.trim() : null,
+    dateOfBirth: parsed.data.dateOfBirth ? parsed.data.dateOfBirth.trim() : null,
     parentFirstName: parsed.data.parentFirstName ? parsed.data.parentFirstName.trim() : null,
     parentLastName: parsed.data.parentLastName ? parsed.data.parentLastName.trim() : null,
     teamId: parsed.data.teamId ? parsed.data.teamId.trim() : null,
@@ -89,6 +101,10 @@ function validatePlayerBusinessRules(payload: CanonicalPlayerPayload): Canonical
 
   if (!normalized.primary_position) {
     normalized.primary_position = DEFAULT_PLAYER_PRIMARY_POSITION
+  }
+
+  if (normalized.dateOfBirth && !isValidDateOnlyString(normalized.dateOfBirth)) {
+    throw new z.ZodError([{ code: 'custom', path: ['dateOfBirth'], message: 'Invalid date' }])
   }
 
   if (normalized.isChild) {
@@ -122,6 +138,7 @@ function extractPlayerDraft(raw: any): Partial<CanonicalPlayerPayload> {
   const parentFirstName = firstPresentString(raw?.parentFirstName, raw?.parent_first_name, raw?.parentPrenom)
   const parentLastName = firstPresentString(raw?.parentLastName, raw?.parent_last_name, raw?.parentNom)
   const teamId = firstPresentString(raw?.teamId, raw?.team_id)
+  const dateOfBirth = firstPresentString(raw?.dateOfBirth, raw?.date_of_birth)
 
   let isChild: boolean | undefined
   const parsedChild = parseBooleanLike(raw?.isChild ?? raw?.is_child ?? raw?.enfant)
@@ -145,6 +162,7 @@ function extractPlayerDraft(raw: any): Partial<CanonicalPlayerPayload> {
     ...(primaryPosition !== null ? { primary_position: primaryPosition } : {}),
     ...(secondary_position !== undefined ? { secondary_position } : {}),
     ...(licence !== undefined ? { licence: licence ?? null } : {}),
+    ...(('dateOfBirth' in (raw || {}) || 'date_of_birth' in (raw || {})) ? { dateOfBirth: dateOfBirth ?? null } : {}),
     ...(isChild !== undefined ? { isChild } : {}),
     ...(parentFirstName !== null ? { parentFirstName } : {}),
     ...(parentLastName !== null ? { parentLastName } : {}),
@@ -168,6 +186,7 @@ function canonicalFromExistingPlayer(existing: any): CanonicalPlayerPayload {
     primary_position: firstPresentString(existing?.primary_position) || DEFAULT_PLAYER_PRIMARY_POSITION,
     secondary_position: firstPresentString(existing?.secondary_position),
     licence: firstPresentString(existing?.licence, existing?.license),
+    dateOfBirth: firstPresentString(existing?.dateOfBirth, existing?.date_of_birth),
     isChild,
     parentFirstName,
     parentLastName,
@@ -185,6 +204,7 @@ export function parsePlayerCreatePayload(raw: any): CanonicalPlayerPayload {
     primary_position: draft.primary_position || DEFAULT_PLAYER_PRIMARY_POSITION,
     secondary_position: draft.secondary_position ?? null,
     licence: draft.licence ?? null,
+    dateOfBirth: draft.dateOfBirth ?? null,
     isChild: draft.isChild ?? false,
     parentFirstName: draft.parentFirstName ?? null,
     parentLastName: draft.parentLastName ?? null,
@@ -203,6 +223,7 @@ export function parsePlayerUpdatePayload(raw: any, existing: any): CanonicalPlay
     primary_position: draft.primary_position ?? current.primary_position,
     secondary_position: draft.secondary_position !== undefined ? draft.secondary_position ?? null : current.secondary_position,
     licence: draft.licence !== undefined ? draft.licence ?? null : current.licence,
+    dateOfBirth: draft.dateOfBirth !== undefined ? draft.dateOfBirth ?? null : current.dateOfBirth,
     isChild: draft.isChild ?? current.isChild,
     parentFirstName: draft.parentFirstName ?? current.parentFirstName,
     parentLastName: draft.parentLastName ?? current.parentLastName,
@@ -246,6 +267,7 @@ export function normalizePlayerForApi(player: any) {
   const lastName = firstPresentString(player?.lastName, player?.last_name, split.lastName)
   const isChild = parseBooleanLike(player?.isChild ?? player?.is_child ?? player?.enfant) || false
   const licence = firstPresentString(player?.licence, player?.license)
+  const dateOfBirth = firstPresentString(player?.dateOfBirth, player?.date_of_birth)
   const email = isChild ? null : firstPresentString(player?.email)
   const phone = isChild ? null : firstPresentString(player?.phone, player?.telephone)
 
@@ -257,6 +279,8 @@ export function normalizePlayerForApi(player: any) {
     isChild,
     email: email ?? null,
     phone: phone ?? null,
+    dateOfBirth: dateOfBirth ?? null,
+    date_of_birth: dateOfBirth ?? null,
     parentFirstName: null,
     parentLastName: null,
     parent_first_name: null,

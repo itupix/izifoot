@@ -95,7 +95,7 @@ Constraints: normalized in API adapters.
 
 ## 9. Business Rules
 - Player belongs to one team.
-- Player creation requires first name only; last name, phone, email, licence, and position may be completed later.
+- Player creation requires first name only; last name, phone, email, licence, date of birth, and position may be completed later.
 - Adult player account invitation is blocked until last name, email, and phone are available on the player profile or request overrides.
 - Child player account invitation keeps the parent-contact flow: the invite targets a parent account and still requires at least one parent contact channel (`email` or `phone`) in the invite request.
 - Invite status endpoint reflects latest account-link state.

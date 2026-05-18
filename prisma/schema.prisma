@@ -207,6 +207,7 @@ model Player {
   parent_first_name       String?
   parent_last_name        String?
   licence                 String?
+  date_of_birth           String?
   createdAt               DateTime                 @default(now())
   updatedAt               DateTime                 @updatedAt
   scorers                 Scorer[]                 @relation("ScorerPlayer")
