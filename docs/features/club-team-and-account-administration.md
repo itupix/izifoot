@@ -16,8 +16,9 @@
 ## 3. Scope
 Included
 - `GET/PUT /clubs/me`, `GET /clubs/me/coaches`, `GET /coaches/:id`, `PUT /coaches/:id/teams`, `DELETE /coaches/:id`.
+- `POST /coaches/:id/invite` to resend or reactivate an existing pending/expired/cancelled coach invitation.
 - `GET/POST/PUT/DELETE /teams`.
-- `POST /accounts`, `GET /accounts`, `GET /accounts/invitations`.
+- `POST /accounts`, `POST /coaches/:id/invite`, `GET /accounts`, `GET /accounts/invitations`.
 
 Excluded
 - Authentication token acceptance (auth feature).
@@ -59,7 +60,7 @@ Restrictions: Must preserve referential integrity.
 - API triggers: creation and update forms.
 
 ## 6. User Flows
-- Main flow: direction loads club dashboard -> creates/edits/deletes teams -> invites accounts -> assigns or removes coaches on team cards.
+- Main flow: direction loads club dashboard -> creates/edits/deletes teams -> invites accounts -> opens the invitation link/QR -> assigns or removes coaches on team cards.
 - Variants: list invitations and existing accounts; reactivate a previously removed coach by reusing the same email.
 - Back navigation: return to team list after modifications.
 - Interruptions: duplicate team name in same club.
@@ -68,7 +69,7 @@ Restrictions: Must preserve referential integrity.
 
 ## 7. Functional Behavior
 - UI behavior: fetches club + teams + invitations in one load cycle.
-- Actions: rename club, create/update/delete team, create invitation, assign/unassign coach teams, remove coach access.
+- Actions: rename club, create/update/delete team, create invitation, resend coach invitation, assign/unassign coach teams, remove coach access.
 - States: loading, ready, mutation pending, mutation error.
 - Conditions: direction role required for writes.
 - Validations: required `teamId`/role/email for account invite payload; `managedTeamIds` must stay inside the current club.
@@ -102,6 +103,7 @@ Constraints: ids must belong to the same club; `teamId` mirrors the active manag
 - Account invites require valid team in same club.
 - Direction-only endpoints reject coach/player/parent writes.
 - Coach listing merges existing users and invite metadata and exposes multi-team assignments.
+- Pending coach invites can be resent from the existing coach entry and return a fresh `inviteUrl` for QR/link sharing.
 - Removing an accepted coach revokes club access while preserving historical records tied to the user.
 
 ## 10. State Machine
@@ -117,7 +119,7 @@ Constraints: ids must belong to the same club; `teamId` mirrors the active manag
 - Invitation list table.
 
 ## 12. Routes / API / Handlers
-- `/clubs/me`, `/clubs/me/coaches`, `/coaches/:id`, `/coaches/:id/teams`.
+- `/clubs/me`, `/clubs/me/coaches`, `/coaches/:id`, `/coaches/:id/invite`, `/coaches/:id/teams`.
 - `/teams` and `/teams/:id`.
 - `/accounts`, `/accounts/invitations`, `DELETE /coaches/:id`.
 
@@ -169,7 +171,7 @@ Constraints: ids must belong to the same club; `teamId` mirrors the active manag
 ## 20. Acceptance Criteria
 1. Direction can create/update/delete team within own club.
 2. Non-direction cannot mutate team/club/admin endpoints.
-3. Account invite appears in invitation list after creation.
+3. Account invite appears in invitation list after creation and can be resent from the same coach entry while still pending, expired, or cancelled.
 4. Direction can assign and remove coaches from any team in the same club.
 5. Direction can remove a coach from the club list without deleting historical sports data.
 6. Duplicate team name in same club is rejected.

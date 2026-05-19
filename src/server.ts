@@ -77,6 +77,7 @@ import {
   normalizeCoachManagedTeamIds,
   resolveCoachActiveTeamId,
 } from './coach-management'
+import { filterLatestCoachInvites } from './coach-invite-list'
 import {
   deriveMatchdayMode,
   ensureRotationGameKeysForContract,
@@ -1964,6 +1965,33 @@ async function sendPlayerAccountInviteEmail(params: {
   }
 }
 
+async function sendCoachAccountInviteEmail(params: {
+  coachName: string | null
+  inviteEmail: string
+  token: string
+  expiresAt: Date
+}) {
+  if (!transporter) return
+
+  const inviteUrl = buildAccountInviteUrl(params.token)
+  const displayName = (params.coachName || '').trim()
+  const greeting = displayName ? `Bonjour ${displayName},` : 'Bonjour,'
+
+  try {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || 'no-reply@example.com',
+      to: params.inviteEmail,
+      subject: 'Activation de votre compte coach Izifoot',
+      html: `<p>${greeting}</p>
+<p>Votre compte coach Izifoot est pret. Cliquez sur le lien ci-dessous pour activer votre compte et definir votre mot de passe.</p>
+<p><a href="${inviteUrl}">${inviteUrl}</a></p>
+<p>Ce lien expire le ${params.expiresAt.toISOString()}.</p>`
+    })
+  } catch (e) {
+    console.warn('[coach invite] email failed:', e)
+  }
+}
+
 function buildAccountInviteUrl(token: string) {
   const acceptPath = process.env.INVITE_ACCEPT_PATH || '/invite/accept'
   return `${APP_BASE_URL.replace(/\/+$/, '')}${acceptPath}?token=${encodeURIComponent(token)}`
@@ -3710,23 +3738,17 @@ app.get('/clubs/me/coaches', authMiddleware, async (req: any, res) => {
         teamId: true,
         status: true,
         managedTeamIds: true,
+        updatedAt: true,
         createdAt: true,
       },
-      orderBy: [{ createdAt: 'desc' }]
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
     })
   ])
 
   const teamNameById = await loadCoachTeamNameMap(req.auth.clubId, [...coaches, ...invites])
 
   const acceptedEmails = new Set(coaches.map((coach) => normEmail(coach.email)))
-  const seenInviteEmails = new Set<string>()
-  const pendingItems = invites.filter((invite) => {
-    const email = normEmail(invite.email)
-    if (acceptedEmails.has(email)) return false
-    if (seenInviteEmails.has(email)) return false
-    seenInviteEmails.add(email)
-    return true
-  })
+  const pendingItems = filterLatestCoachInvites(invites, acceptedEmails)
 
   res.json([
     ...coaches.map((coach) => toCoachSummaryFromUser(coach, teamNameById)),
@@ -3809,6 +3831,118 @@ app.get('/coaches/:id', authMiddleware, async (req: any, res) => {
     acceptedAt: invite.acceptedAt,
     createdAt: invite.createdAt,
     updatedAt: invite.updatedAt,
+  })
+})
+
+app.post('/coaches/:id/invite', authMiddleware, async (req: any, res) => {
+  if (!ensureDirection(req, res)) return
+  if (!req.auth?.clubId) return res.status(404).json({ error: 'Club not found' })
+
+  const schema = z.object({
+    expiresInDays: z.coerce.number().int().min(1).max(30).optional(),
+  })
+  const parsed = schema.safeParse(req.body && typeof req.body === 'object' ? req.body : {})
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0]
+    return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() })
+  }
+
+  const activeCoach = await prisma.user.findFirst({
+    where: {
+      id: req.params.id,
+      clubId: req.auth.clubId,
+      role: 'COACH',
+    },
+    select: { id: true },
+  })
+  if (activeCoach) {
+    return res.status(409).json({ error: 'Compte coach déjà activé' })
+  }
+
+  const invite = await prisma.accountInvite.findFirst({
+    where: {
+      id: req.params.id,
+      clubId: req.auth.clubId,
+      role: 'COACH',
+    },
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      phone: true,
+      status: true,
+      teamId: true,
+      managedTeamIds: true,
+    },
+  })
+  if (!invite) return res.status(404).json({ error: 'Coach not found' })
+  if (invite.status === 'ACCEPTED') {
+    return res.status(409).json({ error: 'Compte coach déjà activé' })
+  }
+
+  const existingUser = await prisma.user.findUnique({
+    where: { email: invite.email },
+    select: {
+      id: true,
+      role: true,
+      clubId: true,
+    },
+  })
+  if (existingUser) {
+    if (existingUser.role === 'COACH' && existingUser.clubId === req.auth.clubId) {
+      return res.status(409).json({ error: 'Compte coach déjà activé' })
+    }
+    return res.status(409).json({ error: 'Email already in use' })
+  }
+
+  await prisma.accountInvite.updateMany({
+    where: {
+      clubId: req.auth.clubId,
+      role: 'COACH',
+      email: invite.email,
+      status: 'PENDING',
+      NOT: { id: invite.id },
+    },
+    data: { status: 'CANCELLED' },
+  })
+
+  const inviteToken = nanoid(48)
+  const expiresAt = addDays(new Date(), parsed.data.expiresInDays ?? 7)
+  const updatedInvite = await prisma.accountInvite.update({
+    where: { id: invite.id },
+    data: {
+      token: inviteToken,
+      status: 'PENDING',
+      expiresAt,
+      invitedByUserId: req.auth.id,
+    },
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      token: true,
+      updatedAt: true,
+      expiresAt: true,
+    },
+  })
+
+  await sendCoachAccountInviteEmail({
+    coachName: [updatedInvite.firstName, updatedInvite.lastName].filter(Boolean).join(' ').trim() || null,
+    inviteEmail: updatedInvite.email,
+    token: updatedInvite.token,
+    expiresAt: updatedInvite.expiresAt,
+  })
+
+  const inviteUrl = buildAccountInviteUrl(updatedInvite.token)
+
+  return res.json({
+    status: 'PENDING',
+    invitationId: updatedInvite.id,
+    sentAt: updatedInvite.updatedAt.toISOString(),
+    expiresAt: updatedInvite.expiresAt ? updatedInvite.expiresAt.toISOString() : null,
+    inviteUrl,
   })
 })
 
