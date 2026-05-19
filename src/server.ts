@@ -3161,6 +3161,7 @@ app.get('/auth/invitations/:token', async (req, res) => {
       role: true,
       status: true,
       expiresAt: true,
+      clubId: true,
       teamId: true,
       managedTeamIds: true,
       ...getPlayerInviteLinkSelect()
@@ -3175,7 +3176,19 @@ app.get('/auth/invitations/:token', async (req, res) => {
     })
     return res.status(410).json({ error: 'Invitation expired' })
   }
-  res.json(invite)
+
+  const club = invite.clubId
+    ? await prisma.club.findUnique({
+        where: { id: invite.clubId },
+        select: { name: true }
+      })
+    : null
+  const { clubId: _clubId, ...inviteResponse } = invite
+
+  res.json({
+    ...inviteResponse,
+    clubName: club?.name ?? null
+  })
 })
 
 app.post('/auth/invitations/accept', async (req, res) => {

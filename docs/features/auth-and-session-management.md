@@ -117,6 +117,7 @@ Constraints: token unique, status transitions validated.
 ## 12. Routes / API / Handlers
 - `/auth/register`, `/auth/login`, `/auth/logout`.
 - `/auth/invitations/:token`, `/auth/invitations/accept`.
+- `GET /auth/invitations/:token` returns invite context plus `clubName` for invite onboarding copy.
 - `/me`.
 - Handler source: `src/server.ts`.
 
