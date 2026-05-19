@@ -72,6 +72,11 @@ import {
   findRotationGameKeysForTeam,
 } from './matchday-absence'
 import {
+  mapCoachManagedTeams,
+  normalizeCoachManagedTeamIds,
+  resolveCoachActiveTeamId,
+} from './coach-management'
+import {
   deriveMatchdayMode,
   ensureRotationGameKeysForContract,
   normalizeRotationForContract,
@@ -1757,28 +1762,60 @@ function normalizeCoachPayload(raw: any) {
   }
 }
 
-function toCoachSummaryFromUser(user: any) {
+function collectCoachTeamIds(rows: Array<{ teamId?: string | null, managedTeamIds?: string[] | null }>): string[] {
+  const ids = new Set<string>()
+  for (const row of rows) {
+    for (const teamId of normalizeCoachManagedTeamIds(row.teamId, row.managedTeamIds)) {
+      ids.add(teamId)
+    }
+  }
+  return Array.from(ids)
+}
+
+async function loadCoachTeamNameMap(
+  clubId: string,
+  rows: Array<{ teamId?: string | null, managedTeamIds?: string[] | null }>,
+): Promise<Map<string, string>> {
+  const teamIds = collectCoachTeamIds(rows)
+  if (!teamIds.length) return new Map()
+
+  const teams = await prisma.team.findMany({
+    where: { id: { in: teamIds }, clubId },
+    select: { id: true, name: true },
+  })
+  return new Map(teams.map((team) => [team.id, team.name]))
+}
+
+function toCoachSummaryFromUser(user: any, teamNameById: ReadonlyMap<string, string> = new Map()) {
+  const managedTeamIds = normalizeCoachManagedTeamIds(user.teamId, user.managedTeamIds)
+  const activeTeamId = resolveCoachActiveTeamId(user.teamId, managedTeamIds)
   return {
     id: user.id,
     firstName: user.firstName ?? null,
     lastName: user.lastName ?? null,
     email: user.email,
     phone: user.phone ?? null,
-    teamId: user.teamId ?? null,
-    teamName: user.team?.name ?? null,
+    teamId: activeTeamId,
+    teamName: activeTeamId ? (teamNameById.get(activeTeamId) ?? user.team?.name ?? activeTeamId) : null,
+    managedTeamIds,
+    managedTeams: mapCoachManagedTeams(managedTeamIds, teamNameById),
     invitationStatus: 'ACCEPTED',
   }
 }
 
-function toCoachSummaryFromInvite(invite: any) {
+function toCoachSummaryFromInvite(invite: any, teamNameById: ReadonlyMap<string, string> = new Map()) {
+  const managedTeamIds = normalizeCoachManagedTeamIds(invite.teamId, invite.managedTeamIds)
+  const activeTeamId = resolveCoachActiveTeamId(invite.teamId, managedTeamIds)
   return {
     id: invite.id,
     firstName: invite.firstName ?? null,
     lastName: invite.lastName ?? null,
     email: invite.email,
     phone: invite.phone ?? null,
-    teamId: invite.teamId ?? null,
-    teamName: invite.teamName ?? invite.team?.name ?? null,
+    teamId: activeTeamId,
+    teamName: activeTeamId ? (teamNameById.get(activeTeamId) ?? invite.teamName ?? invite.team?.name ?? activeTeamId) : null,
+    managedTeamIds,
+    managedTeams: mapCoachManagedTeams(managedTeamIds, teamNameById),
     invitationStatus: invite.status,
   }
 }
@@ -3665,17 +3702,7 @@ app.get('/clubs/me/coaches', authMiddleware, async (req: any, res) => {
     })
   ])
 
-  const teamIds = new Set<string>()
-  for (const coach of coaches) if (coach.teamId) teamIds.add(coach.teamId)
-  for (const invite of invites) if (invite.teamId) teamIds.add(invite.teamId)
-
-  const teams = teamIds.size
-    ? await prisma.team.findMany({
-      where: { id: { in: Array.from(teamIds) }, clubId: req.auth.clubId },
-      select: { id: true, name: true }
-    })
-    : []
-  const teamNameById = new Map(teams.map((team) => [team.id, team.name]))
+  const teamNameById = await loadCoachTeamNameMap(req.auth.clubId, [...coaches, ...invites])
 
   const acceptedEmails = new Set(coaches.map((coach) => normEmail(coach.email)))
   const seenInviteEmails = new Set<string>()
@@ -3688,13 +3715,8 @@ app.get('/clubs/me/coaches', authMiddleware, async (req: any, res) => {
   })
 
   res.json([
-    ...coaches.map(toCoachSummaryFromUser),
-    ...pendingItems.map((invite) =>
-      toCoachSummaryFromInvite({
-        ...invite,
-        teamName: invite.teamId ? (teamNameById.get(invite.teamId) ?? null) : null
-      })
-    ),
+    ...coaches.map((coach) => toCoachSummaryFromUser(coach, teamNameById)),
+    ...pendingItems.map((invite) => toCoachSummaryFromInvite(invite, teamNameById)),
   ])
 })
 
@@ -3731,10 +3753,10 @@ app.get('/coaches/:id', authMiddleware, async (req: any, res) => {
     }
   })
   if (coach) {
+    const teamNameById = await loadCoachTeamNameMap(req.auth.clubId, [coach])
     return res.json({
-      ...toCoachSummaryFromUser(coach),
+      ...toCoachSummaryFromUser(coach, teamNameById),
       role: 'COACH',
-      managedTeamIds: coach.managedTeamIds,
       createdAt: coach.createdAt,
     })
   }
@@ -3763,23 +3785,219 @@ app.get('/coaches/:id', authMiddleware, async (req: any, res) => {
   })
   if (!invite) return res.status(404).json({ error: 'Coach not found' })
 
-  const teamName = invite.teamId
-    ? await prisma.team.findFirst({
-      where: { id: invite.teamId, clubId: req.auth.clubId },
-      select: { name: true }
-    }).then((team) => team?.name ?? null)
-    : null
+  const teamNameById = await loadCoachTeamNameMap(req.auth.clubId, [invite])
 
   return res.json({
-    ...toCoachSummaryFromInvite({ ...invite, teamName }),
+    ...toCoachSummaryFromInvite(invite, teamNameById),
     role: 'COACH',
-    managedTeamIds: invite.managedTeamIds,
     invitedByUserId: invite.invitedByUserId,
     expiresAt: invite.expiresAt,
     acceptedAt: invite.acceptedAt,
     createdAt: invite.createdAt,
     updatedAt: invite.updatedAt,
   })
+})
+
+app.put('/coaches/:id/teams', authMiddleware, async (req: any, res) => {
+  if (!ensureDirection(req, res)) return
+  if (!req.auth?.clubId) return res.status(404).json({ error: 'Club not found' })
+
+  const schema = z.preprocess(
+    (raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
+      const payload = raw as Record<string, unknown>
+      return {
+        managedTeamIds: payload.managedTeamIds ?? payload.managed_team_ids ?? [],
+      }
+    },
+    z.object({
+      managedTeamIds: z.array(z.string().min(1)).default([]),
+    }),
+  )
+  const parsed = schema.safeParse(req.body)
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0]
+    return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() })
+  }
+
+  const requestedManagedTeamIds = normalizeCoachManagedTeamIds(null, parsed.data.managedTeamIds)
+  const managedTeams = requestedManagedTeamIds.length
+    ? await prisma.team.findMany({
+      where: {
+        id: { in: requestedManagedTeamIds },
+        clubId: req.auth.clubId,
+      },
+      select: { id: true, name: true },
+    })
+    : []
+  const managedTeamSet = new Set(managedTeams.map((team) => team.id))
+  if (managedTeamSet.size !== requestedManagedTeamIds.length) {
+    return res.status(404).json({ error: 'One or more teams were not found in club' })
+  }
+  const managedTeamIds = requestedManagedTeamIds.filter((teamId) => managedTeamSet.has(teamId))
+  const nextActiveTeamId = managedTeamIds[0] ?? null
+  const teamNameById = new Map(managedTeams.map((team) => [team.id, team.name]))
+
+  const coach = await prisma.user.findFirst({
+    where: {
+      id: req.params.id,
+      clubId: req.auth.clubId,
+      role: 'COACH',
+    },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      phone: true,
+      teamId: true,
+      managedTeamIds: true,
+      createdAt: true,
+      team: { select: { name: true } },
+    },
+  })
+  if (coach) {
+    const updated = await prisma.user.update({
+      where: { id: coach.id },
+      data: {
+        teamId: resolveCoachActiveTeamId(coach.teamId, managedTeamIds) ?? nextActiveTeamId,
+        managedTeamIds,
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        teamId: true,
+        managedTeamIds: true,
+        createdAt: true,
+        team: { select: { name: true } },
+      },
+    })
+    return res.json({
+      ...toCoachSummaryFromUser(updated, teamNameById),
+      role: 'COACH',
+      createdAt: updated.createdAt,
+    })
+  }
+
+  const invite = await prisma.accountInvite.findFirst({
+    where: {
+      id: req.params.id,
+      clubId: req.auth.clubId,
+      role: 'COACH',
+    },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      phone: true,
+      status: true,
+      teamId: true,
+      managedTeamIds: true,
+      invitedByUserId: true,
+      expiresAt: true,
+      acceptedAt: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  })
+  if (!invite) return res.status(404).json({ error: 'Coach not found' })
+
+  const updatedInvite = await prisma.accountInvite.update({
+    where: { id: invite.id },
+    data: {
+      teamId: resolveCoachActiveTeamId(invite.teamId, managedTeamIds) ?? nextActiveTeamId,
+      managedTeamIds,
+    },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      phone: true,
+      status: true,
+      teamId: true,
+      managedTeamIds: true,
+      invitedByUserId: true,
+      expiresAt: true,
+      acceptedAt: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  })
+
+  return res.json({
+    ...toCoachSummaryFromInvite(updatedInvite, teamNameById),
+    role: 'COACH',
+    invitedByUserId: updatedInvite.invitedByUserId,
+    expiresAt: updatedInvite.expiresAt,
+    acceptedAt: updatedInvite.acceptedAt,
+    createdAt: updatedInvite.createdAt,
+    updatedAt: updatedInvite.updatedAt,
+  })
+})
+
+app.delete('/coaches/:id', authMiddleware, async (req: any, res) => {
+  if (!ensureDirection(req, res)) return
+  if (!req.auth?.clubId) return res.status(404).json({ error: 'Club not found' })
+
+  const coach = await prisma.user.findFirst({
+    where: {
+      id: req.params.id,
+      clubId: req.auth.clubId,
+      role: 'COACH',
+    },
+    select: {
+      id: true,
+      email: true,
+    },
+  })
+
+  if (coach) {
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: coach.id },
+        data: {
+          clubId: null,
+          teamId: null,
+          managedTeamIds: [],
+        },
+      }),
+      prisma.accountInvite.deleteMany({
+        where: {
+          clubId: req.auth.clubId,
+          role: 'COACH',
+          email: coach.email,
+        },
+      }),
+    ])
+    return res.json({ ok: true })
+  }
+
+  const invite = await prisma.accountInvite.findFirst({
+    where: {
+      id: req.params.id,
+      clubId: req.auth.clubId,
+      role: 'COACH',
+    },
+    select: {
+      id: true,
+      email: true,
+    },
+  })
+  if (!invite) return res.status(404).json({ error: 'Coach not found' })
+
+  await prisma.accountInvite.deleteMany({
+    where: {
+      clubId: req.auth.clubId,
+      role: 'COACH',
+      email: invite.email,
+    },
+  })
+  return res.json({ ok: true })
 })
 
 app.put('/clubs/me', authMiddleware, async (req: any, res) => {
@@ -3981,7 +4199,6 @@ app.post('/accounts', authMiddleware, async (req: any, res) => {
 
   const email = normEmail(parsed.data.email)
   const existing = await prisma.user.findUnique({ where: { email } })
-  if (existing) return res.status(409).json({ error: 'Email already in use' })
 
   const selectedTeam = await prisma.team.findFirst({
     where: {
@@ -4002,7 +4219,43 @@ app.post('/accounts', authMiddleware, async (req: any, res) => {
       select: { id: true }
     }).then((rows) => rows.map((row) => row.id))
     : []
-  const managedTeamIds = Array.from(new Set([selectedTeam.id, ...filteredManagedTeamIds]))
+  const managedTeamIds = normalizeCoachManagedTeamIds(selectedTeam.id, filteredManagedTeamIds)
+
+  if (existing) {
+    if (existing.role !== 'COACH' || existing.clubId) {
+      return res.status(409).json({ error: 'Email already in use' })
+    }
+
+    const reactivated = await prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        firstName: parsed.data.firstName,
+        lastName: parsed.data.lastName,
+        phone: parsed.data.phone ?? null,
+        role: 'COACH',
+        clubId: req.auth.clubId,
+        teamId: selectedTeam.id,
+        managedTeamIds,
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        phone: true,
+        role: true,
+        clubId: true,
+        teamId: true,
+        managedTeamIds: true,
+        createdAt: true,
+      },
+    })
+    return res.status(201).json({
+      ...reactivated,
+      invitationStatus: 'ACCEPTED',
+      reactivated: true,
+    })
+  }
 
   await prisma.accountInvite.updateMany({
     where: {

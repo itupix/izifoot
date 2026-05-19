@@ -15,7 +15,7 @@
 
 ## 3. Scope
 Included
-- `GET/PUT /clubs/me`, `GET /clubs/me/coaches`, `GET /coaches/:id`.
+- `GET/PUT /clubs/me`, `GET /clubs/me/coaches`, `GET /coaches/:id`, `PUT /coaches/:id/teams`, `DELETE /coaches/:id`.
 - `GET/POST/PUT/DELETE /teams`.
 - `POST /accounts`, `GET /accounts`, `GET /accounts/invitations`.
 
@@ -59,8 +59,8 @@ Restrictions: Must preserve referential integrity.
 - API triggers: creation and update forms.
 
 ## 6. User Flows
-- Main flow: direction loads club dashboard -> creates/edits/deletes teams -> invites accounts.
-- Variants: list invitations and existing accounts.
+- Main flow: direction loads club dashboard -> creates/edits/deletes teams -> invites accounts -> assigns or removes coaches on team cards.
+- Variants: list invitations and existing accounts; reactivate a previously removed coach by reusing the same email.
 - Back navigation: return to team list after modifications.
 - Interruptions: duplicate team name in same club.
 - Errors: forbidden for non-direction, validation failures.
@@ -68,10 +68,10 @@ Restrictions: Must preserve referential integrity.
 
 ## 7. Functional Behavior
 - UI behavior: fetches club + teams + invitations in one load cycle.
-- Actions: rename club, create/update/delete team, create invitation.
+- Actions: rename club, create/update/delete team, create invitation, assign/unassign coach teams, remove coach access.
 - States: loading, ready, mutation pending, mutation error.
 - Conditions: direction role required for writes.
-- Validations: required `teamId`/role/email for account invite payload.
+- Validations: required `teamId`/role/email for account invite payload; `managedTeamIds` must stay inside the current club.
 - Blocking rules: read-only accounts cannot perform writes.
 - Automations: invitation status transitions by backend.
 
@@ -91,28 +91,35 @@ Source: invitation form.
 Purpose: create pending access for users.
 Format: role/email/team mapping.
 Constraints: status lifecycle and expiry.
+- `User.managedTeamIds` / `AccountInvite.managedTeamIds`
+Source: coach assignment mutations.
+Purpose: define all teams a coach can manage.
+Format: ordered string array of team ids.
+Constraints: ids must belong to the same club; `teamId` mirrors the active managed team when one exists.
 
 ## 9. Business Rules
 - Team operations are club-scoped.
 - Account invites require valid team in same club.
 - Direction-only endpoints reject coach/player/parent writes.
-- Coach listing merges existing users and invite metadata.
+- Coach listing merges existing users and invite metadata and exposes multi-team assignments.
+- Removing an accepted coach revokes club access while preserving historical records tied to the user.
 
 ## 10. State Machine
 - Team states: `ACTIVE` or deleted.
+- Coach states: `ACTIVE`, `UNASSIGNED`, or removed from club scope.
 - Invite states: `PENDING` -> `ACCEPTED`/`CANCELLED`/`EXPIRED`.
 - Transitions: API mutations.
 - Invalid transitions: invite acceptance from cancelled/expired.
 
 ## 11. UI Components
 - Club form, team list/forms, invitation creation modal.
-- Coach detail page/view.
+- Coach detail page/view and team-assignment controls.
 - Invitation list table.
 
 ## 12. Routes / API / Handlers
-- `/clubs/me`, `/clubs/me/coaches`, `/coaches/:id`.
+- `/clubs/me`, `/clubs/me/coaches`, `/coaches/:id`, `/coaches/:id/teams`.
 - `/teams` and `/teams/:id`.
-- `/accounts`, `/accounts/invitations`.
+- `/accounts`, `/accounts/invitations`, `DELETE /coaches/:id`.
 
 ## 13. Persistence
 - Models: `Club`, `Team`, `User`, `AccountInvite`.
@@ -140,7 +147,7 @@ Constraints: status lifecycle and expiry.
 ## 17. UX Requirements
 - Feedback: immediate mutation result feedback.
 - Errors: deterministic reason for duplicate/forbidden actions.
-- Empty states: no teams/no invites should be explicit.
+- Empty states: no teams/no invites should be explicit; team cards should handle no assigned coach.
 - Loading: concurrent load of club + teams + invites.
 
 ## 18. Ambiguities & Gaps
@@ -155,21 +162,23 @@ Constraints: status lifecycle and expiry.
 
 ## 19. Recommendations
 - Product: define allowed team categories/formats in canonical enum contract.
-- UX: add conflict guidance for duplicate team names.
-- Tech: extract account-invite service with unit tests.
+- UX: keep club administration independent from the global active-team picker.
+- Tech: extract account-invite and coach-assignment service with unit tests.
 - Security: add audit trail for admin mutations.
 
 ## 20. Acceptance Criteria
 1. Direction can create/update/delete team within own club.
 2. Non-direction cannot mutate team/club/admin endpoints.
 3. Account invite appears in invitation list after creation.
-4. Duplicate team name in same club is rejected.
+4. Direction can assign and remove coaches from any team in the same club.
+5. Direction can remove a coach from the club list without deleting historical sports data.
+6. Duplicate team name in same club is rejected.
 
 ## 21. Test Scenarios
-- Happy path: create team then invite coach.
+- Happy path: create team, invite coach, then assign the coach to a second team.
 - Permissions: coach write attempt blocked.
 - Errors: invalid teamId in invite payload.
-- Edge cases: deleting team with linked players.
+- Edge cases: removing the last assigned team from a coach; deleting team with linked players.
 
 ## 22. Technical References
 - `src/server.ts`
