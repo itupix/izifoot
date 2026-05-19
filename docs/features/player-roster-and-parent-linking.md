@@ -101,10 +101,12 @@ Constraints: normalized in API adapters.
 ## 9. Business Rules
 - Player belongs to one team.
 - Player detail responses expose the readable `teamName` and `clubName` associated with that team.
+- Child player detail responses expose invitation status per parent contact, including non-activated parents whose latest invite is pending, expired, or cancelled.
 - Player creation requires first name only; last name, phone, email, licence, date of birth, and position may be completed later.
 - Player reassignment is allowed only inside the writer scope: direction can target club teams, coach can target managed teams only.
 - Adult player account invitation is blocked until last name, email, and phone are available on the player profile or request overrides.
 - Child player account invitation keeps the parent-contact flow: the invite targets a parent account and still requires at least one parent contact channel (`email` or `phone`) in the invite request.
+- Child player account invitation accepts an optional `parentId` to resend or reactivate a specific known parent.
 - Invite status endpoint reflects latest account-link state.
 - Parent link deletion removes relation but keeps player record.
 - Legacy route aliases maintained for backward compatibility.
@@ -124,6 +126,7 @@ Constraints: normalized in API adapters.
 - `/players/:id/invitation-status`.
 - `/players/:id/invite`, `/players/:id/invite/qr`.
 - `/players/:id/parents/:parentId`.
+- `POST /players/:id/invite` accepts optional `parentId` for child-parent resend flows.
 
 ## 13. Persistence
 - Models: `Player`, `User`, `AccountInvite`, `Attendance`, `DirectMessage`.
@@ -177,7 +180,8 @@ Constraints: normalized in API adapters.
 3. Scoped admin/coach can reassign a player to another authorized team through `PUT /players/:id`.
 4. Out-of-scope mutations are denied.
 5. Adult player invite endpoint rejects incomplete profiles missing last name, email, or phone and otherwise returns usable invitation metadata.
-6. Parent unlink succeeds and updates invitation state views.
+6. Child player detail payload exposes invitation status per parent and keeps non-activated parents visible for resend.
+7. Parent unlink succeeds and updates invitation state views.
 
 ## 21. Test Scenarios
 - Happy path: quick-create player with first name only, then complete profile and send invite.

@@ -48,6 +48,7 @@ import {
   parsePlayerCreatePayload,
   parsePlayerUpdatePayload,
 } from './player-payload'
+import { normalizeParentInviteEmail, summarizeParentContacts } from './player-parent-contacts'
 import { playerCollectionRouteAliases, playerDetailRouteAliases } from './player-route-aliases'
 import {
   type CoachConversationInvitationStatus,
@@ -4884,12 +4885,24 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
     scopedPlayer.player.clubId || req.auth?.clubId || null
   )
   const parentLinkWhere = getPlayerInviteLinkWhere(scopedPlayer.player, linkedPlayerAccountUser?.id)
+  const parentInviteClubId = scopedPlayer.player.clubId || req.auth?.clubId || null
+  if (parentLinkWhere && parentInviteClubId) {
+    await prisma.accountInvite.updateMany({
+      where: {
+        clubId: parentInviteClubId,
+        role: 'PARENT',
+        ...parentLinkWhere,
+        status: 'PENDING',
+        expiresAt: { lt: new Date() },
+      },
+      data: { status: 'EXPIRED' }
+    })
+  }
   const parentInvites = parentLinkWhere
     ? await prisma.accountInvite.findMany({
       where: {
-        ...(req.auth?.clubId ? { clubId: req.auth.clubId } : {}),
+        ...(parentInviteClubId ? { clubId: parentInviteClubId } : {}),
         role: 'PARENT',
-        status: { in: ['PENDING', 'ACCEPTED'] },
         ...parentLinkWhere,
       },
       select: {
@@ -4915,33 +4928,7 @@ const getPlayerByIdHandler = async (req: any, res: any) => {
       orderBy: [{ acceptedAt: 'desc' }, { updatedAt: 'desc' }, { createdAt: 'desc' }]
     })
     : []
-
-  const seenParentKeys = new Set<string>()
-  const parentContacts: Array<{
-    parentId: string | null
-    parentUserId: string | null
-    firstName: string | null
-    lastName: string | null
-    email: string | null
-    phone: string | null
-    status: string | null
-  }> = parentInvites
-    .map((invite) => ({
-      parentId: invite.id,
-      parentUserId: invite.user?.id ?? null,
-      firstName: (invite.user?.firstName || invite.firstName || '').trim() || null,
-      lastName: (invite.user?.lastName || invite.lastName || '').trim() || null,
-      email: (invite.user?.email || invite.email || '').trim() || null,
-      phone: (invite.user?.phone || invite.phone || '').trim() || null,
-      status: invite.status,
-    }))
-    .filter((parent) => {
-      const key = `${(parent.email || '').toLowerCase()}|${parent.phone || ''}|${(parent.firstName || '').toLowerCase()}|${(parent.lastName || '').toLowerCase()}`
-      if (!key.replace(/\|/g, '')) return false
-      if (seenParentKeys.has(key)) return false
-      seenParentKeys.add(key)
-      return true
-    })
+  const parentContacts = summarizeParentContacts(parentInvites)
 
   res.json({
     ...normalizedPlayer,
@@ -5187,6 +5174,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   const schema = z.object({
     matchdayId: z.string().optional(),
+    parentId: z.string().trim().min(1).optional(),
     email: z.string().email().optional(),
     phone: z.string().trim().min(3).max(32).optional(),
     expiresInDays: z.coerce.number().int().min(1).max(30).optional()
@@ -5271,13 +5259,51 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
     return res.json({ ok: true, presentUrl, absentUrl })
   }
 
-  const contactEmail = inviteEmail ? normEmail(inviteEmail) : null
-  if (inviteRole === 'PARENT' && !contactEmail && !invitePhone) {
+  if (!req.auth?.clubId) {
+    return res.status(400).json({ error: 'Staff account must be attached to a club' })
+  }
+  const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(player, req.auth.clubId)
+  const playerLinkWhere = getPlayerInviteLinkWhere(player, linkedPlayerAccountUser?.id)
+  const targetParentInvite = inviteRole === 'PARENT' && parsed.data.parentId
+    ? (playerLinkWhere
+      ? await prisma.accountInvite.findFirst({
+        where: {
+          id: parsed.data.parentId,
+          clubId: req.auth.clubId,
+          role: 'PARENT',
+          ...playerLinkWhere,
+        },
+        select: {
+          id: true,
+          email: true,
+          phone: true,
+          status: true,
+          userId: true,
+        }
+      })
+      : null)
+    : null
+  if (parsed.data.parentId && inviteRole === 'PARENT' && !targetParentInvite) {
+    return res.status(404).json({ error: 'Parent not found for this player' })
+  }
+  if (targetParentInvite && (targetParentInvite.userId || targetParentInvite.status === 'ACCEPTED')) {
+    return res.status(409).json({ error: 'Compte parent déjà activé' })
+  }
+
+  const accountInviteEmail = inviteRole === 'PARENT'
+    ? (parsed.data.email || normalizeParentInviteEmail(targetParentInvite?.email) || null)
+    : inviteEmail
+  const accountInvitePhone = inviteRole === 'PARENT'
+    ? ((parsed.data.phone || '').trim() || (targetParentInvite?.phone || '').trim() || null)
+    : invitePhone
+  const contactEmail = accountInviteEmail ? normEmail(accountInviteEmail) : null
+
+  if (inviteRole === 'PARENT' && !contactEmail && !accountInvitePhone) {
     return res.status(400).json({ error: 'Parent email or phone is required to send account invitation' })
   }
   if (inviteRole !== 'PARENT') {
     try {
-      assertPlayerAccountInvitePrerequisites(player, { email: contactEmail, phone: invitePhone })
+      assertPlayerAccountInvitePrerequisites(player, { email: contactEmail, phone: accountInvitePhone })
     } catch (e: any) {
       if (e instanceof z.ZodError) {
         return res.status(400).json({
@@ -5310,10 +5336,6 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
   if (!invitationEmail) {
     return res.status(400).json({ error: 'Player email is required to send account invitation' })
   }
-  if (!req.auth?.clubId) {
-    return res.status(400).json({ error: 'Staff account must be attached to a club' })
-  }
-  const linkedPlayerAccountUser = await resolveLinkedPlayerAccountUser(player, req.auth.clubId)
 
   const snapshot = await getPlayerInvitationStatusSnapshot(req.auth, player)
   if (inviteRole === 'PLAYER' && snapshot.status === 'ACCEPTED') {
@@ -5340,32 +5362,32 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
     ? null
     : (player.last_name || null)
 
-  const parentPendingInvite = inviteRole === 'PARENT'
-    ? await prisma.accountInvite.findFirst({
+  const parentInviteToReuse = inviteRole === 'PARENT'
+    ? (targetParentInvite
+      ? { id: targetParentInvite.id }
+      : await prisma.accountInvite.findFirst({
       where: {
         clubId: req.auth.clubId,
-        ...(contactEmail ? { email: contactEmail } : (invitePhone ? { phone: invitePhone } : {})),
+        ...(contactEmail ? { email: contactEmail } : (accountInvitePhone ? { phone: accountInvitePhone } : {})),
         role: 'PARENT',
         status: 'PENDING',
         expiresAt: { gte: new Date() },
-        ...(ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID
-          ? { linkedPlayerId: player.id }
-          : (linkedPlayerAccountUser?.id ? { linkedPlayerUserId: linkedPlayerAccountUser.id } : {})),
+        ...(playerLinkWhere || {}),
       },
       select: { id: true },
       orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
-    })
+    }))
     : null
 
   const invitation = inviteRole === 'PARENT'
-    ? (parentPendingInvite
+    ? (parentInviteToReuse
       ? await prisma.accountInvite.update({
-        where: { id: parentPendingInvite.id },
+        where: { id: parentInviteToReuse.id },
         data: {
           email: invitationEmail,
           firstName: inviteFirstName,
           lastName: inviteLastName,
-          phone: invitePhone,
+          phone: accountInvitePhone,
           token: inviteToken,
           role: inviteRole,
           teamId: player.teamId ?? null,
@@ -5432,7 +5454,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
           email: invitationEmail,
           firstName: inviteFirstName,
           lastName: inviteLastName,
-          phone: invitePhone,
+          phone: accountInvitePhone,
           token: inviteToken,
           role: inviteRole,
           clubId: req.auth.clubId,
