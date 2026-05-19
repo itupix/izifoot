@@ -41,6 +41,7 @@ model User {
   teamMessageLikes        TeamMessageLike[]
   teamMessageReads        TeamMessageRead[]
   pushDevices             PushDevice[]
+  mobileAuthCodes         MobileAuthCode[]
 }
 
 enum UserRole {
@@ -55,6 +56,10 @@ enum AccountInviteStatus {
   ACCEPTED
   CANCELLED
   EXPIRED
+}
+
+enum MobileAuthPlatform {
+  IOS
 }
 
 model Club {
@@ -188,6 +193,21 @@ model ShareToken {
   planning   Planning  @relation(fields: [planningId], references: [id])
   expiresAt  DateTime?
   createdAt  DateTime  @default(now())
+}
+
+model MobileAuthCode {
+  id        String             @id @default(cuid())
+  codeHash  String             @unique
+  stateHash String
+  platform  MobileAuthPlatform
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime           @default(now())
+
+  @@index([stateHash])
+  @@index([userId, createdAt(sort: Desc)])
 }
 
 // === FOOT DOMAIN ===

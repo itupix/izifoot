@@ -84,6 +84,23 @@ import {
   normalizeRotationForContract,
 } from './matchday-contract'
 import { toDrillDescriptionHtml, withDrillDescriptionHtml } from './drill-description'
+import {
+  buildMobileAuthAppCallbackUrl,
+  buildMobileAuthCallbackUrl,
+  buildMobileAuthWebUrl,
+  consumeMobileAuthExchange,
+  createMobileAuthState,
+  createMobileAuthCode,
+  DEFAULT_MOBILE_AUTH_CODE_TTL_SECONDS,
+  DEFAULT_MOBILE_AUTH_STATE_TTL_SECONDS,
+  hashMobileAuthValue,
+  MOBILE_AUTH_STATE_COOKIE_NAME,
+  mobileAuthCallbackQuerySchema,
+  mobileAuthExchangeBodySchema,
+  mobileAuthStartQuerySchema,
+  signMobileAuthStateCookie,
+  verifyMobileAuthStateCookie,
+} from './mobile-auth'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -97,6 +114,10 @@ const DEFAULT_DEV_APP_BASE_URL = 'http://localhost:5173'
 const APP_BASE_URL = process.env.APP_BASE_URL || DEFAULT_DEV_APP_BASE_URL
 const API_BASE_URL = process.env.API_BASE_URL || `http://localhost:${PORT}`
 const AUTH_COOKIE_NAME = 'token'
+const MOBILE_AUTH_SECRET = process.env.MOBILE_AUTH_SECRET || JWT_SECRET
+const IOS_APP_CALLBACK_URL = process.env.IOS_APP_CALLBACK_URL || 'izifoot://auth/callback'
+const MOBILE_AUTH_CODE_TTL_SECONDS = readPositiveIntEnv(process.env.MOBILE_AUTH_CODE_TTL_SECONDS, DEFAULT_MOBILE_AUTH_CODE_TTL_SECONDS)
+const MOBILE_AUTH_STATE_TTL_SECONDS = readPositiveIntEnv(process.env.MOBILE_AUTH_STATE_TTL_SECONDS, DEFAULT_MOBILE_AUTH_STATE_TTL_SECONDS)
 const ACCOUNT_INVITE_HAS_LINKED_PLAYER_ID = Boolean(
   (prisma as any)?._runtimeDataModel?.models?.AccountInvite?.fields?.some((field: any) => field?.name === 'linkedPlayerId')
 )
@@ -260,6 +281,23 @@ function authClearCookieOpts() {
   return opts
 }
 
+function mobileAuthCookieOpts(maxAgeMs: number) {
+  const isProd = process.env.NODE_ENV === 'production'
+  const sameSite: 'lax' | 'none' = isProd ? 'none' : 'lax'
+  return {
+    httpOnly: true,
+    sameSite,
+    secure: isProd,
+    path: '/',
+    maxAge: maxAgeMs,
+  }
+}
+
+function mobileAuthClearCookieOpts() {
+  const { maxAge, ...opts } = mobileAuthCookieOpts(MOBILE_AUTH_STATE_TTL_SECONDS * 1000)
+  return opts
+}
+
 function playerCookieOpts() {
   const isProd = process.env.NODE_ENV === 'production'
   const sameSite: 'lax' | 'none' = isProd ? 'none' : 'lax'
@@ -278,6 +316,12 @@ function toNonNegativeInt(value: unknown): number | null {
   if (!Number.isFinite(n)) return null
   const i = Math.trunc(n)
   return i >= 0 ? i : null
+}
+
+function readPositiveIntEnv(value: string | undefined, fallback: number) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return Math.trunc(n)
 }
 
 function readPagination(query: any, defaults: { limit: number, maxLimit: number } = { limit: 50, maxLimit: 200 }) {
@@ -327,6 +371,39 @@ function recordRoutePerf(routeKey: string, durationMs: number) {
 // --- Auth helpers ---
 function signToken(userId: string) {
   return jwt.sign({ sub: userId }, JWT_SECRET, { expiresIn: '7d' })
+}
+
+function readAuthTokenFromRequest(req: any) {
+  const authHeader = req.headers.authorization
+  return req.cookies?.token || (typeof authHeader === 'string' && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null)
+}
+
+async function resolveAuthenticatedRequestUser(req: any) {
+  const token = readAuthTokenFromRequest(req)
+  if (!token) return null
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as any
+    return await resolveUserAuthContext(payload.sub)
+  } catch {
+    return null
+  }
+}
+
+function toMobileAuthExchangeUser(user: any) {
+  return {
+    id: user.id,
+    email: user.email,
+    firstName: user.firstName ?? null,
+    lastName: user.lastName ?? null,
+    phone: user.phone ?? null,
+    isPremium: Boolean(user.isPremium),
+    planningCount: user.planningCount ?? null,
+    role: user.role,
+    clubId: user.clubId ?? null,
+    teamId: user.teamId ?? null,
+    managedTeamIds: Array.isArray(user.managedTeamIds) ? user.managedTeamIds : [],
+    linkedPlayerUserId: user.linkedPlayerUserId ?? null,
+  }
 }
 
 async function resolveUserAuthContext(userId: string) {
@@ -386,7 +463,7 @@ async function resolveUserAuthContext(userId: string) {
 }
 
 async function authMiddleware(req: any, res: any, next: any) {
-  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  const token = readAuthTokenFromRequest(req)
   if (!token) return res.status(401).json({ error: 'Unauthorized' })
   try {
     const payload = jwt.verify(token, JWT_SECRET) as any
@@ -3323,8 +3400,173 @@ app.post('/auth/logout', (req, res) => {
   res.json({ ok: true })
 })
 
+app.get('/auth/mobile/start', async (req, res) => {
+  const parsed = mobileAuthStartQuerySchema.safeParse(req.query)
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0]
+    return res.status(400).json({ error: firstIssue?.message || 'Invalid mobile auth start payload' })
+  }
+
+  const { platform } = parsed.data
+  const redirectUri = parsed.data.redirect_uri || IOS_APP_CALLBACK_URL
+  const state = parsed.data.state || createMobileAuthState()
+  const stateCookie = signMobileAuthStateCookie({
+    platform,
+    state,
+    redirectUri,
+    secret: MOBILE_AUTH_SECRET,
+    ttlSeconds: MOBILE_AUTH_STATE_TTL_SECONDS,
+  })
+  const auth = await resolveAuthenticatedRequestUser(req)
+  const callbackUrl = buildMobileAuthCallbackUrl({
+    apiBaseUrl: API_BASE_URL,
+    state,
+  })
+
+  res.setHeader('Cache-Control', 'no-store')
+  res.cookie(MOBILE_AUTH_STATE_COOKIE_NAME, stateCookie, mobileAuthCookieOpts(MOBILE_AUTH_STATE_TTL_SECONDS * 1000))
+  console.log('[auth.mobile.start]', { platform, hasSession: Boolean(auth?.id) })
+
+  return res.redirect(302, auth
+    ? callbackUrl
+    : buildMobileAuthWebUrl({
+        appBaseUrl: APP_BASE_URL,
+        platform,
+        state,
+      }))
+})
+
+app.get('/auth/mobile/callback', async (req, res) => {
+  const parsed = mobileAuthCallbackQuerySchema.safeParse(req.query)
+  if (!parsed.success) {
+    res.clearCookie(MOBILE_AUTH_STATE_COOKIE_NAME, mobileAuthClearCookieOpts())
+    return res.status(400).json({ error: 'Invalid mobile auth state', code: 'MOBILE_AUTH_INVALID_STATE' })
+  }
+
+  const verifiedState = verifyMobileAuthStateCookie({
+    token: req.cookies?.[MOBILE_AUTH_STATE_COOKIE_NAME],
+    platform: 'ios',
+    state: parsed.data.state,
+    secret: MOBILE_AUTH_SECRET,
+  })
+
+  if (!verifiedState.ok) {
+    res.clearCookie(MOBILE_AUTH_STATE_COOKIE_NAME, mobileAuthClearCookieOpts())
+    const status = verifiedState.error === 'state_expired' ? 410 : 400
+    const error = verifiedState.error === 'state_expired' ? 'Mobile auth state expired' : 'Invalid mobile auth state'
+    console.warn('[auth.mobile.callback] rejected', { reason: verifiedState.error })
+    return res.status(status).json({
+      error,
+      code: verifiedState.error === 'state_expired' ? 'MOBILE_AUTH_CODE_EXPIRED' : 'MOBILE_AUTH_INVALID_STATE',
+    })
+  }
+
+  const auth = await resolveAuthenticatedRequestUser(req)
+  if (!auth) {
+    console.log('[auth.mobile.callback] web login required')
+    return res.redirect(302, buildMobileAuthWebUrl({
+      appBaseUrl: APP_BASE_URL,
+      platform: 'ios',
+      state: parsed.data.state,
+    }))
+  }
+
+  const code = createMobileAuthCode()
+  const codeHash = hashMobileAuthValue(code, MOBILE_AUTH_SECRET)
+  const expiresAt = new Date(Date.now() + (MOBILE_AUTH_CODE_TTL_SECONDS * 1000))
+
+  await prisma.mobileAuthCode.create({
+    data: {
+      codeHash,
+      stateHash: verifiedState.stateHash,
+      platform: 'IOS',
+      userId: auth.id,
+      expiresAt,
+    },
+  })
+
+  res.clearCookie(MOBILE_AUTH_STATE_COOKIE_NAME, mobileAuthClearCookieOpts())
+  console.log('[auth.mobile.callback] approved', {
+    platform: 'ios',
+    userId: auth.id,
+    callbackScheme: verifiedState.redirectUri.split(':')[0],
+    expiresAt: expiresAt.toISOString(),
+  })
+
+  return res.redirect(302, buildMobileAuthAppCallbackUrl({
+    callbackUrl: verifiedState.redirectUri,
+    code,
+    state: parsed.data.state,
+  }))
+})
+
+app.post('/auth/mobile/exchange', async (req, res) => {
+  const parsed = mobileAuthExchangeBodySchema.safeParse(req.body)
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0]
+    return res.status(400).json({ error: firstIssue?.message || 'Invalid mobile auth exchange payload' })
+  }
+
+  const exchange = await consumeMobileAuthExchange(
+    {
+      async findByCodeHash(codeHash) {
+        return prisma.mobileAuthCode.findUnique({
+          where: { codeHash },
+          select: {
+            id: true,
+            userId: true,
+            platform: true,
+            stateHash: true,
+            expiresAt: true,
+            usedAt: true,
+          },
+        })
+      },
+      async markCodeUsed(codeId, usedAt) {
+        const markedUsed = await prisma.mobileAuthCode.updateMany({
+          where: {
+            id: codeId,
+            usedAt: null,
+            expiresAt: { gt: usedAt },
+          },
+          data: { usedAt },
+        })
+        return markedUsed.count === 1
+      },
+    },
+    {
+      platform: parsed.data.platform,
+      code: parsed.data.code,
+      state: parsed.data.state,
+      secret: MOBILE_AUTH_SECRET,
+    },
+  )
+
+  if (!exchange.ok) {
+    console.warn('[auth.mobile.exchange] rejected', { reason: exchange.code })
+    return res.status(exchange.status).json({ error: exchange.error, code: exchange.code })
+  }
+
+  const auth = await resolveUserAuthContext(exchange.record.userId)
+  if (!auth) {
+    console.error('[auth.mobile.exchange] linked user missing', { codeId: exchange.record.id })
+    return res.status(500).json({ error: 'Failed to resolve mobile auth user', code: 'MOBILE_AUTH_USER_CONTEXT_MISSING' })
+  }
+
+  const token = signToken(auth.id)
+  console.log('[auth.mobile.exchange] success', { userId: auth.id, codeId: exchange.record.id })
+
+  return res.json({
+    accessToken: token,
+    refreshToken: null,
+    tokenType: 'Bearer',
+    expiresIn: 7 * 24 * 3600,
+    user: toMobileAuthExchangeUser(auth),
+  })
+})
+
 app.get('/me', async (req: any, res, next) => {
-  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
+  const token = readAuthTokenFromRequest(req)
   if (!token) {
     return res.json({
       id: null,

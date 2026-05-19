@@ -16,6 +16,7 @@
 ## 3. Scope
 Included
 - `POST /auth/register`, `POST /auth/login`, `POST /auth/logout`.
+- `GET /auth/mobile/start`, `GET /auth/mobile/callback`, `POST /auth/mobile/exchange`.
 - `GET /auth/invitations/:token`, `POST /auth/invitations/accept`.
 - `GET /me`.
 
@@ -56,12 +57,14 @@ Restrictions: Must enforce role and invite integrity.
 ## 5. Entry Points
 - UI: Home/login/register forms, invite acceptance page.
 - Routes: `/auth/*`, `/me`.
+- Mobile web auth route hand-off: `/auth/mobile/*` with web continuation on `APP_BASE_URL/auth/mobile` plus `platform` and `state`.
 - External links: Invite URL with token.
 - System triggers: Session restore calling `/me`.
 - API triggers: AuthStore/useAuth bootstrap.
 
 ## 6. User Flows
 - Main flow: Register or login -> session created -> `/me` loaded.
+- Mobile flow: iOS opens `GET /auth/mobile/start?platform=ios` -> backend generates a short-lived state cookie -> browser is redirected to `APP_BASE_URL/auth/mobile` -> callback creates a one-time code -> iOS exchanges `{ code, state }` for a Bearer token.
 - Variants: Invite token accepted before first login.
 - Back navigation: User can logout and return to public home.
 - Interruptions: Invalid credentials or expired invite.
@@ -93,12 +96,18 @@ Source: invitation creation and acceptance.
 Purpose: controlled onboarding.
 Format: string/enum/date/cuid.
 Constraints: token unique, status transitions validated.
+- `MobileAuthCode.codeHash/stateHash/platform/expiresAt/usedAt`
+Source: mobile web auth callback and exchange.
+Purpose: one-time short-lived mobile login hand-off.
+Format: HMAC hashes + expiry timestamps.
+Constraints: code hash unique, state never stored in clear, platform fixed to `IOS`, code is single-use.
 
 ## 9. Business Rules
 - Invite acceptance requires valid token and allowed status.
 - Role is assigned from invite when onboarding invited account.
 - `/me` returns normalized account payload used by clients.
 - Logout invalidates current session token/cookie.
+- Mobile exchange never places an API token in the callback URL; only a one-time code and state are redirected to the app.
 
 ## 10. State Machine
 - States: `UNAUTHENTICATED`, `AUTHENTICATED`, `INVITE_PENDING`, `INVITE_ACCEPTED`, `INVITE_EXPIRED`.
@@ -116,6 +125,7 @@ Constraints: token unique, status transitions validated.
 
 ## 12. Routes / API / Handlers
 - `/auth/register`, `/auth/login`, `/auth/logout`.
+- `/auth/mobile/start`, `/auth/mobile/callback`, `/auth/mobile/exchange`.
 - `/auth/invitations/:token`, `/auth/invitations/accept`.
 - `GET /auth/invitations/:token` returns invite context plus `clubName` for invite onboarding copy.
 - `/me`.
@@ -123,15 +133,18 @@ Constraints: token unique, status transitions validated.
 
 ## 13. Persistence
 - Models: `User`, `AccountInvite`.
+- Additional model: `MobileAuthCode`.
 - Tables: same names via Prisma.
 - Relations: `AccountInvite.user`, `AccountInvite.invitedBy`.
 - Constraints: unique email, unique invite token.
+- Additional constraint: unique mobile auth code hash.
 - Lifecycle: invite created -> pending -> accepted/cancelled/expired.
 
 ## 14. Dependencies
 - Upstream: session middleware, password hashing/JWT logic.
 - Downstream: all protected product features.
 - Cross-repo: web/iOS auth stores and route guards.
+- Cross-repo mobile auth: dedicated web bridge page and iOS `AuthService` rely on the backend contract.
 
 ## 15. Error Handling
 - Validation: malformed payload -> 400.
@@ -145,6 +158,7 @@ Constraints: token unique, status transitions validated.
 - Access control: auth middleware for protected routes.
 - Data exposure: `/me` only returns current user context.
 - Guest rules: guest can only access explicit public auth routes.
+- Mobile bridge: `state` is generated server-side on start, verified via a short-lived HTTP-only cookie on the API domain, and exchanged server-side for a single-use code stored hashed in Prisma. The app callback carries only `code` and `state`.
 
 ## 17. UX Requirements
 - Feedback: clear invalid credential and invite status messages.
@@ -160,6 +174,7 @@ Constraints: token unique, status transitions validated.
 - Token strategy supports both web and mobile session restoration.
 - Missing
 - No explicit machine-readable error catalog.
+- Universal-link based callback is not configured yet; the current flow uses the custom URL scheme `izifoot://`.
 - Tech debt
 - Mixed naming conventions (`firstName` vs `first_name`) increase parser complexity.
 
@@ -174,13 +189,17 @@ Constraints: token unique, status transitions validated.
 2. Invalid credentials return deterministic 401 error payload.
 3. Expired invite cannot be accepted.
 4. Logout invalidates next protected request.
+4. Mobile auth exchange rejects invalid state, expired code, and already-used code.
 
 ## 21. Test Scenarios
 - Happy path: register -> login -> `/me`.
+- Happy path: start mobile auth -> login on web -> callback -> exchange -> Bearer `/me`.
 - Permissions: unauthenticated `/me` denied.
 - Errors: bad token invite returns expected status.
 - Edge cases: accepting already accepted invite.
+- Edge cases: retrying an already-used mobile code.
 
 ## 22. Technical References
 - `src/server.ts`
 - `prisma/schema.prisma`
+- `src/mobile-auth.ts`
