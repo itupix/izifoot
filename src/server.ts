@@ -49,6 +49,7 @@ import {
   parsePlayerUpdatePayload,
 } from './player-payload'
 import { normalizeParentInviteEmail, summarizeParentContacts } from './player-parent-contacts'
+import { parseMePasswordPutBody, validatePasswordChangeInput } from './account-password'
 import { playerCollectionRouteAliases, playerDetailRouteAliases } from './player-route-aliases'
 import {
   type CoachConversationInvitationStatus,
@@ -3790,6 +3791,12 @@ app.put('/me/profile', authMiddleware, async (req: any, res) => {
       clubId: true,
       teamId: true,
       managedTeamIds: true,
+      linkedPlayerUserId: true,
+      _count: {
+        select: {
+          plannings: true,
+        },
+      },
     }
   })
 
@@ -3815,7 +3822,55 @@ app.put('/me/profile', authMiddleware, async (req: any, res) => {
     }
   }
 
-  res.json(updated)
+  res.json({
+    id: updated.id,
+    email: updated.email,
+    firstName: updated.firstName,
+    lastName: updated.lastName,
+    phone: updated.phone,
+    isPremium: updated.isPremium,
+    planningCount: updated._count.plannings,
+    role: updated.role,
+    clubId: updated.clubId,
+    teamId: updated.teamId,
+    managedTeamIds: updated.managedTeamIds,
+    linkedPlayerUserId: updated.linkedPlayerUserId,
+  })
+})
+
+app.put('/me/password', authMiddleware, async (req: any, res) => {
+  const parsed = parseMePasswordPutBody(req.body)
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: 'Merci de renseigner votre mot de passe actuel et un nouveau mot de passe d au moins 6 caracteres.',
+    })
+  }
+
+  const validated = validatePasswordChangeInput(parsed.data)
+  if (!validated.ok) {
+    return res.status(400).json({ error: validated.error })
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.auth.id },
+    select: { id: true, passwordHash: true },
+  })
+
+  if (!user) return res.status(404).json({ error: 'User not found' })
+
+  const isCurrentPasswordValid = await bcrypt.compare(parsed.data.currentPassword, user.passwordHash)
+  if (!isCurrentPasswordValid) {
+    return res.status(400).json({ error: 'Le mot de passe actuel est incorrect.' })
+  }
+
+  const passwordHash = await bcrypt.hash(parsed.data.newPassword, 10)
+
+  await prisma.user.update({
+    where: { id: req.auth.id },
+    data: { passwordHash },
+  })
+
+  res.json({ ok: true })
 })
 
 app.post('/me/push-token', authMiddleware, async (req: any, res) => {
@@ -5784,7 +5839,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
           email: invitationEmail,
           firstName: inviteFirstName,
           lastName: inviteLastName,
-          phone: invitePhone,
+          phone: accountInvitePhone,
           token: inviteToken,
           role: inviteRole,
           clubId: req.auth.clubId,
@@ -5830,7 +5885,7 @@ app.post('/players/:id/invite', authMiddleware, async (req: any, res) => {
           email: invitationEmail,
           firstName: inviteFirstName,
           lastName: inviteLastName,
-          phone: accountInvitePhone,
+          phone: invitePhone,
           token: inviteToken,
           role: inviteRole,
           clubId: req.auth.clubId,
