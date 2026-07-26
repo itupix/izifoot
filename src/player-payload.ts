@@ -274,6 +274,8 @@ export function normalizePlayerForApi(player: any) {
   const teamName = firstPresentString(player?.teamName, player?.team_name, player?.team?.name)
   const clubId = firstPresentString(player?.clubId, player?.club_id, player?.team?.clubId)
   const clubName = firstPresentString(player?.clubName, player?.club_name, player?.club?.name)
+  const isActive = parseBooleanLike(player?.isActive ?? player?.is_active)
+  const deactivatedAt = firstPresentString(player?.deactivatedAt, player?.deactivated_at)
 
   return {
     ...player,
@@ -289,6 +291,10 @@ export function normalizePlayerForApi(player: any) {
     teamName: teamName ?? null,
     clubId: clubId ?? null,
     clubName: clubName ?? null,
+    isActive: isActive ?? true,
+    is_active: isActive ?? true,
+    deactivatedAt: deactivatedAt ?? null,
+    deactivated_at: deactivatedAt ?? null,
     parentFirstName: null,
     parentLastName: null,
     parent_first_name: null,

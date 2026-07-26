@@ -9,6 +9,7 @@ const match_payload_1 = require("../match-payload");
 (0, node_test_1.default)('POST /matches payload accepts tactic when valid', () => {
     const parsed = match_payload_1.matchCreatePayloadSchema.safeParse({
         type: 'ENTRAINEMENT',
+        date: '2026-07-26T08:30:00.000Z',
         sides: {
             home: { starters: ['h1'], subs: [] },
             away: { starters: ['a1'], subs: [] },
@@ -33,6 +34,16 @@ const match_payload_1 = require("../match-payload");
         },
     });
     strict_1.default.equal(parsed.success, true);
+});
+(0, node_test_1.default)('POST /matches payload rejects standalone match without date', () => {
+    const parsed = match_payload_1.matchCreatePayloadSchema.safeParse({
+        type: 'MATCH',
+        sides: {
+            home: { starters: ['h1'], subs: [] },
+            away: { starters: ['a1'], subs: [] },
+        },
+    });
+    strict_1.default.equal(parsed.success, false);
 });
 (0, node_test_1.default)('POST /matches payload rejects invalid tactic', () => {
     const parsed = match_payload_1.matchCreatePayloadSchema.safeParse({

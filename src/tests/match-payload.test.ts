@@ -5,6 +5,7 @@ import { matchCreatePayloadSchema } from '../match-payload'
 test('POST /matches payload accepts tactic when valid', () => {
   const parsed = matchCreatePayloadSchema.safeParse({
     type: 'ENTRAINEMENT',
+    date: '2026-07-26T08:30:00.000Z',
     sides: {
       home: { starters: ['h1'], subs: [] },
       away: { starters: ['a1'], subs: [] },
@@ -32,6 +33,18 @@ test('POST /matches payload accepts missing tactic', () => {
   })
 
   assert.equal(parsed.success, true)
+})
+
+test('POST /matches payload rejects standalone match without date', () => {
+  const parsed = matchCreatePayloadSchema.safeParse({
+    type: 'MATCH',
+    sides: {
+      home: { starters: ['h1'], subs: [] },
+      away: { starters: ['a1'], subs: [] },
+    },
+  })
+
+  assert.equal(parsed.success, false)
 })
 
 test('POST /matches payload rejects invalid tactic', () => {

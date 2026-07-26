@@ -31,6 +31,7 @@ export const matchCreatePayloadSchema = z.object({
   status: z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
   played: z.boolean().optional(),
   matchdayId: z.string().optional(),
+  date: z.string().datetime().optional(),
   rotationGameKey: z.string().min(1).max(120).optional(),
   sides: matchSidesPayloadSchema,
   score: z.object({ home: z.number().int().min(0), away: z.number().int().min(0) }).optional(),
@@ -43,6 +44,13 @@ export const matchCreatePayloadSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ['played'],
       message: 'played must be false when status is CANCELLED',
+    })
+  }
+  if (!value.matchdayId && !value.date) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['date'],
+      message: 'date is required when matchdayId is missing',
     })
   }
 })

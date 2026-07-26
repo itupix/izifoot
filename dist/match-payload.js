@@ -31,6 +31,7 @@ exports.matchCreatePayloadSchema = zod_1.z.object({
     status: zod_1.z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
     played: zod_1.z.boolean().optional(),
     matchdayId: zod_1.z.string().optional(),
+    date: zod_1.z.string().datetime().optional(),
     rotationGameKey: zod_1.z.string().min(1).max(120).optional(),
     sides: exports.matchSidesPayloadSchema,
     score: zod_1.z.object({ home: zod_1.z.number().int().min(0), away: zod_1.z.number().int().min(0) }).optional(),
@@ -43,6 +44,13 @@ exports.matchCreatePayloadSchema = zod_1.z.object({
             code: zod_1.z.ZodIssueCode.custom,
             path: ['played'],
             message: 'played must be false when status is CANCELLED',
+        });
+    }
+    if (!value.matchdayId && !value.date) {
+        ctx.addIssue({
+            code: zod_1.z.ZodIssueCode.custom,
+            path: ['date'],
+            message: 'date is required when matchdayId is missing',
         });
     }
 });

@@ -101,6 +101,7 @@ Constraints: unique like/read composites.
 - `COACH` conversations with `invitationStatus = NONE` must be rendered disabled in clients and remain blocked on direct read/write routes.
 - Unread count uses per-team read timestamp comparison.
 - Push token endpoint stores device-token mapping for user.
+- `POST /me/push-token` accepts `enabled` as the client source of truth for the current OS notification permission state, so mobile apps can disable or re-enable an already known device token after the user changes system settings.
 
 ## 10. State Machine
 - Message states: created, visible, deleted (if supported).
@@ -176,7 +177,7 @@ Constraints: unique like/read composites.
 5. Direct conversation read/write routes return the `PLAYER_INVITATION_REQUIRED` 403 contract when the player invitation status is `NONE`.
 6. Sending message persists and appears in thread.
 7. Like/unlike updates counters deterministically.
-8. Push token and badge reset endpoints work for authenticated user.
+8. Push token and badge reset endpoints work for authenticated user, including re-enabling a previously known token after the user re-allows notifications in iOS settings.
 
 ## 21. Test Scenarios
 - Happy path: coach sends conversation message to player context.

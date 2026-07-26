@@ -75,6 +75,19 @@ const player_payload_1 = require("../player-payload");
     strict_1.default.equal(normalized.clubId, 'club-1');
     strict_1.default.equal(normalized.clubName, 'FC Test');
 });
+(0, node_test_1.default)('normalizePlayerForApi exposes roster activity fields', () => {
+    const normalized = (0, player_payload_1.normalizePlayerForApi)({
+        id: 'p1',
+        first_name: 'Lina',
+        last_name: 'Martin',
+        is_active: false,
+        deactivated_at: '2026-07-26T12:00:00.000Z',
+    });
+    strict_1.default.equal(normalized.isActive, false);
+    strict_1.default.equal(normalized.is_active, false);
+    strict_1.default.equal(normalized.deactivatedAt, '2026-07-26T12:00:00.000Z');
+    strict_1.default.equal(normalized.deactivated_at, '2026-07-26T12:00:00.000Z');
+});
 (0, node_test_1.default)('compatibility aliases are accepted', () => {
     const parsed = (0, player_payload_1.parsePlayerCreatePayload)({
         prenom: 'Noah',

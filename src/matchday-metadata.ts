@@ -40,6 +40,15 @@ export function toPublicMatchday(matchday: {
   id: string
   date: Date
   lieu: string
+  seasonId?: string | null
+  season?: {
+    id: string
+    clubId: string
+    key: string
+    label?: string | null
+    startDate: Date | string
+    endDate: Date | string
+  } | null
   address?: string | null
   startTime?: string | null
   meetingTime?: string | null
@@ -51,6 +60,15 @@ export function toPublicMatchday(matchday: {
     id: matchday.id,
     date: matchday.date,
     lieu: matchday.lieu,
+    seasonId: matchday.seasonId ?? matchday.season?.id ?? null,
+    season: matchday.season ? {
+      id: matchday.season.id,
+      clubId: matchday.season.clubId,
+      key: matchday.season.key,
+      label: matchday.season.label ?? matchday.season.key,
+      startDate: matchday.season.startDate,
+      endDate: matchday.season.endDate,
+    } : null,
     address: matchday.address ?? null,
     startTime: matchday.startTime ?? null,
     meetingTime: matchday.meetingTime ?? null,

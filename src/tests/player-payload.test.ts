@@ -88,6 +88,21 @@ test('normalizePlayerForApi exposes team and club context when available', () =>
   assert.equal(normalized.clubName, 'FC Test')
 })
 
+test('normalizePlayerForApi exposes roster activity fields', () => {
+  const normalized = normalizePlayerForApi({
+    id: 'p1',
+    first_name: 'Lina',
+    last_name: 'Martin',
+    is_active: false,
+    deactivated_at: '2026-07-26T12:00:00.000Z',
+  })
+
+  assert.equal(normalized.isActive, false)
+  assert.equal(normalized.is_active, false)
+  assert.equal(normalized.deactivatedAt, '2026-07-26T12:00:00.000Z')
+  assert.equal(normalized.deactivated_at, '2026-07-26T12:00:00.000Z')
+})
+
 test('compatibility aliases are accepted', () => {
   const parsed = parsePlayerCreatePayload({
     prenom: 'Noah',

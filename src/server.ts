@@ -102,6 +102,13 @@ import {
   signMobileAuthStateCookie,
   verifyMobileAuthStateCookie,
 } from './mobile-auth'
+import {
+  buildSeasonConfigPatch,
+  clubSeasonConfigSchema,
+  normalizeClubSeasonConfig,
+  resolveOrCreateSeasonForClubDate,
+  toSeasonResponse,
+} from './season'
 
 const app = express()
 const prisma = new PrismaClient()
@@ -331,6 +338,173 @@ function readPagination(query: any, defaults: { limit: number, maxLimit: number 
   const limit = Math.min(limitInput ?? defaults.limit, defaults.maxLimit)
   const offset = offsetInput ?? 0
   return { take: limit, skip: offset, limit, offset }
+}
+
+function parseOptionalSeasonId(raw: unknown) {
+  if (typeof raw !== 'string') return null
+  const value = raw.trim()
+  return value.length > 0 ? value : null
+}
+
+function toClubResponse(club: any, currentSeason: any = null) {
+  if (!club) return null
+  const {
+    seasonStartMonth,
+    seasonStartDay,
+    seasonEndMonth,
+    seasonEndDay,
+    seasonTimezone,
+    ...rest
+  } = club
+  return {
+    ...rest,
+    seasonConfig: normalizeClubSeasonConfig({
+      seasonStartMonth,
+      seasonStartDay,
+      seasonEndMonth,
+      seasonEndDay,
+      seasonTimezone,
+    }),
+    currentSeason: currentSeason ? toSeasonResponse(currentSeason) : null,
+  }
+}
+
+function toEntityWithSeason(entity: any) {
+  if (!entity) return entity
+  const season = entity.season ? toSeasonResponse(entity.season) : null
+  return {
+    ...entity,
+    seasonId: entity.seasonId ?? season?.id ?? null,
+    season,
+  }
+}
+
+async function resolveSeasonForClubId(db: any, clubId: string | null | undefined, dateInput: Date | string) {
+  if (!clubId) return null
+  const club = await db.club.findUnique({
+    where: { id: clubId },
+    select: {
+      id: true,
+      seasonStartMonth: true,
+      seasonStartDay: true,
+      seasonEndMonth: true,
+      seasonEndDay: true,
+      seasonTimezone: true,
+    },
+  })
+  if (!club) return null
+  return resolveOrCreateSeasonForClubDate(db, club, dateInput)
+}
+
+async function clubHasMaterializedSeasonData(db: any, clubId: string) {
+  const seasons = await db.season.findMany({
+    where: { clubId },
+    select: {
+      id: true,
+      _count: {
+        select: {
+          trainings: true,
+          plateaus: true,
+          matches: true,
+        },
+      },
+    },
+  })
+  return seasons.some((season: any) => (
+    season._count.trainings > 0
+    || season._count.plateaus > 0
+    || season._count.matches > 0
+  ))
+}
+
+async function backfillLegacySeasonData() {
+  try {
+    const clubs = await prisma.club.findMany({
+      select: {
+        id: true,
+        seasonStartMonth: true,
+        seasonStartDay: true,
+        seasonEndMonth: true,
+        seasonEndDay: true,
+        seasonTimezone: true,
+      },
+    })
+    const clubById = new Map(clubs.map((club: any) => [club.id, club]))
+
+    const trainings = await prisma.training.findMany({
+      where: {
+        clubId: { not: null },
+        seasonId: null,
+      },
+      select: { id: true, clubId: true, date: true },
+    })
+    for (const training of trainings) {
+      const club = training.clubId ? clubById.get(training.clubId) : null
+      if (!club) continue
+      const season = await resolveOrCreateSeasonForClubDate(prisma, club, training.date)
+      if (!season) continue
+      await prisma.training.update({
+        where: { id: training.id },
+        data: { seasonId: season.id },
+      })
+    }
+
+    const plateaus = await prisma.plateau.findMany({
+      where: {
+        clubId: { not: null },
+        seasonId: null,
+      },
+      select: { id: true, clubId: true, date: true },
+    })
+    for (const plateau of plateaus) {
+      const club = plateau.clubId ? clubById.get(plateau.clubId) : null
+      if (!club) continue
+      const season = await resolveOrCreateSeasonForClubDate(prisma, club, plateau.date)
+      if (!season) continue
+      await prisma.plateau.update({
+        where: { id: plateau.id },
+        data: { seasonId: season.id },
+      })
+    }
+
+    const plateauMap = new Map<string, { date: Date, seasonId: string | null, clubId: string | null }>()
+    const plateauRows = await prisma.plateau.findMany({
+      where: { id: { not: '' } },
+      select: { id: true, date: true, seasonId: true, clubId: true },
+    })
+    for (const plateau of plateauRows) {
+      plateauMap.set(plateau.id, plateau)
+    }
+
+    const matches = await prisma.match.findMany({
+      where: {
+        clubId: { not: null },
+        OR: [
+          { seasonId: null },
+          { date: null },
+        ],
+      },
+      select: { id: true, clubId: true, plateauId: true, createdAt: true, date: true, seasonId: true },
+    })
+    for (const match of matches) {
+      const plateau = match.plateauId ? plateauMap.get(match.plateauId) ?? null : null
+      const club = match.clubId ? clubById.get(match.clubId) : null
+      if (!club) continue
+      const nextDate = plateau?.date ?? match.date ?? match.createdAt
+      const season = plateau?.seasonId
+        ? { id: plateau.seasonId }
+        : await resolveOrCreateSeasonForClubDate(prisma, club, nextDate)
+      await prisma.match.update({
+        where: { id: match.id },
+        data: {
+          date: nextDate,
+          seasonId: season?.id ?? null,
+        },
+      })
+    }
+  } catch (error) {
+    console.error('[season] legacy backfill failed', error)
+  }
 }
 
 function percentile(values: number[], p: number) {
@@ -823,6 +997,37 @@ async function playerCreateForUser(db: any, scopeOrUserId: any, data: any) {
       ...data,
     }
   })
+}
+
+type PlayerRosterStatusFilter = 'active' | 'inactive' | 'all'
+
+function resolvePlayerRosterStatusFilter(raw: unknown): PlayerRosterStatusFilter | null {
+  if (raw === undefined || raw === null || raw === '') return 'active'
+  if (Array.isArray(raw)) return resolvePlayerRosterStatusFilter(raw[0])
+  if (typeof raw !== 'string') return null
+
+  const normalized = raw.trim().toLowerCase()
+  if (normalized === 'active') return 'active'
+  if (normalized === 'inactive') return 'inactive'
+  if (normalized === 'all') return 'all'
+  return null
+}
+
+function playerRosterStatusWhere(status: PlayerRosterStatusFilter) {
+  switch (status) {
+    case 'active':
+      return { is_active: true }
+    case 'inactive':
+      return { is_active: false }
+    case 'all':
+      return {}
+  }
+}
+
+function isPlayerActiveRecord(player: any) {
+  if (typeof player?.is_active === 'boolean') return player.is_active
+  if (typeof player?.isActive === 'boolean') return player.isActive
+  return true
 }
 
 async function attendanceFindManyForUser(db: any, scopeOrUserId: any, args: any = {}): Promise<any[]> {
@@ -3112,7 +3317,7 @@ async function getPublicMatchdayPayloadByToken(token: string) {
           { id: token }, // compat if frontend accidentally stores share row id instead of token
         ]
       },
-      include: { plateau: true }
+      include: { plateau: { include: { season: true } } }
     })
   } catch (e: any) {
     if (e?.code === 'P2021') {
@@ -3988,9 +4193,38 @@ app.get('/clubs/me', authMiddleware, async (req: any, res) => {
     }
   })
   if (!club) return res.status(404).json({ error: 'Club not found' })
+  const currentSeason = await resolveOrCreateSeasonForClubDate(prisma, club, new Date())
   res.json({
-    ...club,
+    ...toClubResponse(club, currentSeason),
     teams: (club.teams || []).map(withTeamFormatAliases),
+  })
+})
+
+app.get('/clubs/me/seasons', authMiddleware, async (req: any, res) => {
+  if (!req.auth?.clubId) return res.status(404).json({ error: 'Club not found' })
+  const club = await prisma.club.findUnique({
+    where: { id: req.auth.clubId },
+    select: {
+      id: true,
+      seasonStartMonth: true,
+      seasonStartDay: true,
+      seasonEndMonth: true,
+      seasonEndDay: true,
+      seasonTimezone: true,
+    },
+  })
+  if (!club) return res.status(404).json({ error: 'Club not found' })
+  await resolveOrCreateSeasonForClubDate(prisma, club, new Date())
+  const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
+  const seasons = await prisma.season.findMany({
+    where: { clubId: req.auth.clubId },
+    orderBy: { startDate: 'desc' },
+    take: pagination.take,
+    skip: pagination.skip,
+  })
+  res.json({
+    items: seasons.map((season: any) => toSeasonResponse(season)),
+    pagination: { limit: pagination.limit, offset: pagination.offset, returned: seasons.length },
   })
 })
 
@@ -4450,16 +4684,48 @@ app.put('/clubs/me', authMiddleware, async (req: any, res) => {
   if (!req.auth?.clubId) return res.status(404).json({ error: 'Club not found' })
 
   const schema = z.object({
-    name: z.string().min(2).max(120)
+    name: z.string().min(2).max(120).optional(),
+    seasonConfig: clubSeasonConfigSchema.optional(),
+  }).refine((value) => value.name !== undefined || value.seasonConfig !== undefined, {
+    message: 'At least one club field must be provided',
   })
   const parsed = schema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0]
+    return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() })
+  }
+
+  const currentClub = await prisma.club.findUnique({ where: { id: req.auth.clubId } })
+  if (!currentClub) return res.status(404).json({ error: 'Club not found' })
+
+  const nextSeasonConfig = parsed.data.seasonConfig ? normalizeClubSeasonConfig(parsed.data.seasonConfig) : null
+  const currentSeasonConfig = normalizeClubSeasonConfig(currentClub)
+  const seasonConfigChanged = nextSeasonConfig
+    ? (
+      nextSeasonConfig.startMonth !== currentSeasonConfig.startMonth
+      || nextSeasonConfig.startDay !== currentSeasonConfig.startDay
+      || nextSeasonConfig.endMonth !== currentSeasonConfig.endMonth
+      || nextSeasonConfig.endDay !== currentSeasonConfig.endDay
+    )
+    : false
+
+  if (seasonConfigChanged && await clubHasMaterializedSeasonData(prisma, req.auth.clubId)) {
+    return res.status(409).json({
+      error: 'Retroactive season config change not allowed once seasons contain data',
+      code: 'SEASON_CONFIG_RETROACTIVE_CHANGE_NOT_ALLOWED',
+    })
+  }
+
+  const data: any = {}
+  if (parsed.data.name !== undefined) data.name = parsed.data.name.trim()
+  if (nextSeasonConfig) Object.assign(data, buildSeasonConfigPatch(nextSeasonConfig))
 
   const updated = await prisma.club.update({
     where: { id: req.auth.clubId },
-    data: { name: parsed.data.name.trim() }
+    data,
   })
-  res.json(updated)
+  const currentSeason = await resolveOrCreateSeasonForClubDate(prisma, updated, new Date())
+  res.json(toClubResponse(updated, currentSeason))
 })
 
 app.get('/teams', authMiddleware, async (req: any, res) => {
@@ -5287,8 +5553,13 @@ async function enrichPlayersWithTeamAndClubContext(players: any[]) {
 
 const listPlayersHandler = async (req: any, res: any) => {
   if (!ensureStaff(req, res)) return
+  const rosterStatus = resolvePlayerRosterStatusFilter(req.query?.rosterStatus)
+  if (!rosterStatus) {
+    return res.status(400).json({ error: 'Invalid rosterStatus query parameter' })
+  }
   const pagination = readPagination(req.query, { limit: 100, maxLimit: 300 })
   const players = await playerFindManyForUser(prisma, req.auth, {
+    where: playerRosterStatusWhere(rosterStatus),
     orderBy: [{ first_name: 'asc' }, { last_name: 'asc' }, { name: 'asc' }],
     take: pagination.take,
     skip: pagination.skip,
@@ -5573,6 +5844,37 @@ const updatePlayerByIdHandler = async (req: any, res: any) => {
 
 for (const route of playerDetailRouteAliases) {
   app.put(route, authMiddleware, updatePlayerByIdHandler)
+}
+
+const updatePlayerRosterStatusHandler = async (req: any, res: any) => {
+  if (!ensureStaff(req, res)) return
+  const { id } = req.params
+  const existing = await playerFindFirstForUser(prisma, req.auth, { where: { id } })
+  if (!existing) return res.status(404).json({ error: 'Player not found' })
+
+  const parsed = z.object({
+    isActive: z.boolean(),
+  }).safeParse(req.body)
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() })
+  }
+
+  const nextIsActive = parsed.data.isActive
+  const patch: any = {
+    is_active: nextIsActive,
+    deactivated_at: nextIsActive ? null : new Date(),
+  }
+
+  const updated = await prisma.player.update({
+    where: { id: existing.id },
+    data: patch,
+  })
+  const [enrichedPlayer] = await enrichPlayersWithTeamAndClubContext([updated])
+  return res.json(normalizePlayerForApi(enrichedPlayer))
+}
+
+for (const route of playerDetailRouteAliases) {
+  app.put(`${route}/roster-status`, authMiddleware, updatePlayerRosterStatusHandler)
 }
 // --- Player invite JWT and playerAuth ---
 function signPlayerInvite(playerId: string, matchdayId?: string | null, email?: string | null) {
@@ -6144,7 +6446,10 @@ for (const route of playerDetailRouteAliases) {
 // ---- Trainings ----
 app.get('/trainings', authMiddleware, async (req: any, res) => {
   const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
+  const seasonId = parseOptionalSeasonId(req.query?.seasonId)
   const trainings = await trainingFindManyForUser(prisma, req.auth, {
+    where: seasonId ? { seasonId } : undefined,
+    include: { season: true },
     orderBy: { date: 'desc' },
     take: pagination.take,
     skip: pagination.skip,
@@ -6153,7 +6458,7 @@ app.get('/trainings', authMiddleware, async (req: any, res) => {
   const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
   const decorations = await buildTrainingIntentDecorations(req.auth, trainings, linkedPlayer?.id ?? null)
   const items = trainings.map((training: any) => ({
-    ...training,
+    ...toEntityWithSeason(training),
     intentSummary: decorations.summaryByTrainingId.get(training.id) ?? {
       presentCount: 0,
       absentCount: 0,
@@ -6174,12 +6479,15 @@ app.get('/trainings', authMiddleware, async (req: any, res) => {
 app.get('/trainings/:id', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {
-    const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id } })
+    const training = await trainingFindFirstForUser(prisma, req.auth, {
+      where: { id },
+      include: { season: true },
+    })
     if (!training) return res.status(404).json({ error: 'Training not found' })
     const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
     const decorations = await buildTrainingIntentDecorations(req.auth, [training], linkedPlayer?.id ?? null)
     res.json({
-      ...training,
+      ...toEntityWithSeason(training),
       intentSummary: decorations.summaryByTrainingId.get(training.id) ?? {
         presentCount: 0,
         absentCount: 0,
@@ -6218,7 +6526,10 @@ app.get('/trainings/:id/intent', authMiddleware, async (req: any, res) => {
 
   const teamPlayers = includePerPlayerItems && training.teamId
     ? await playerFindManyForUser(prisma, req.auth, {
-      where: { teamId: training.teamId },
+      where: {
+        teamId: training.teamId,
+        is_active: true,
+      },
       select: { id: true },
     })
     : []
@@ -6264,6 +6575,9 @@ app.post('/trainings/:id/intent', authMiddleware, async (req: any, res) => {
 
   const linkedPlayer = await resolveReadOnlyLinkedPlayer(req.auth)
   if (!linkedPlayer) return res.status(404).json({ error: 'Linked player not found for this account' })
+  if (!isPlayerActiveRecord(linkedPlayer)) {
+    return res.status(409).json({ error: 'Linked player is no longer active in the roster' })
+  }
   if (training.teamId && linkedPlayer.teamId && linkedPlayer.teamId !== training.teamId) {
     return res.status(403).json({ error: 'Linked player does not belong to this training team' })
   }
@@ -6426,6 +6740,7 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
       ? (parsed.data.endTime ?? null)
       : (previousTraining?.endTime ?? null),
     status: 'PLANNED',
+    seasonId: (await resolveSeasonForClubId(prisma, team.clubId, dateWithDefaultSchedule))?.id ?? null,
     clubId: team.clubId,
     teamId: team.id
   })
@@ -6474,8 +6789,22 @@ app.put('/trainings/:id', authMiddleware, async (req: any, res) => {
   try {
     const existing = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
     if (!existing) return res.status(404).json({ error: 'Training not found' })
+    if (data.date && Number.isNaN(data.date.getTime())) {
+      return res.status(400).json({ error: 'Invalid date' })
+    }
+    if (data.date) {
+      data.seasonId = (await resolveSeasonForClubId(
+        prisma,
+        existing.clubId ?? req.auth?.clubId ?? null,
+        data.date,
+      ))?.id ?? null
+    }
     const updated = await trainingUpdateCompat(prisma, existing.id, data)
-    res.json(updated)
+    const hydrated = await trainingFindFirstForUser(prisma, req.auth, {
+      where: { id: updated.id },
+      include: { season: true },
+    })
+    res.json(toEntityWithSeason(hydrated))
   } catch (e: any) {
     if (e?.code === 'P2025') {
       return res.status(404).json({ error: 'Training not found' })
@@ -6505,9 +6834,25 @@ app.put('/trainings/:trainingId/attendance', authMiddleware, async (req: any, re
       teamId: training.teamId ?? req.auth?.teamId ?? null,
     }
     const players = await prisma.player.findMany({
-      where: { teamId: training.teamId },
+      where: {
+        teamId: training.teamId,
+        is_active: true,
+      },
       select: { id: true },
     })
+    const existingRows = await attendanceFindManyForUser(prisma, scopeAuth, {
+      where: {
+        session_type: { in: attendanceSessionTypeVariants('TRAINING') as any },
+        session_id: trainingId,
+        teamId: training.teamId,
+        ...(training.clubId ? { clubId: training.clubId } : {}),
+      },
+      select: {
+        playerId: true,
+        session_type: true,
+      },
+    })
+    const activePlayerIdSet = new Set(players.map((player) => player.id))
     const snapshot = buildTrainingAttendanceSnapshot({
       trainingId,
       trainingPlayerIds: players.map((p) => p.id),
@@ -6527,9 +6872,19 @@ app.put('/trainings/:trainingId/attendance', authMiddleware, async (req: any, re
 
       await tx.attendance.deleteMany({ where: attendanceWhere })
 
-      if (snapshot.items.length > 0) {
+      const preservedInactiveItems = existingRows
+        .filter((row: any) => !activePlayerIdSet.has(row.playerId))
+        .map((row: any) => ({
+          session_type: row.session_type,
+          session_id: trainingId,
+          playerId: row.playerId,
+        }))
+
+      const nextItems = [...snapshot.items, ...preservedInactiveItems]
+
+      if (nextItems.length > 0) {
         await tx.attendance.createMany({
-          data: snapshot.items.map((item) => ({
+          data: nextItems.map((item) => ({
             ...(scopeAuth?.id ? { userId: scopeAuth.id } : {}),
             ...(scopeAuth?.clubId ? { clubId: scopeAuth.clubId } : {}),
             ...(scopeAuth?.teamId ? { teamId: scopeAuth.teamId } : {}),
@@ -6630,29 +6985,57 @@ app.put('/trainings/:id/roles', authMiddleware, async (req: any, res) => {
         where: {
           id: { in: playerIds },
           teamId: training.teamId,
+          is_active: true,
         },
         select: { id: true },
       })
       if (players.length !== playerIds.length) {
-        return res.status(400).json({ error: 'One or more players do not belong to the training team' })
+        return res.status(400).json({ error: 'One or more players are not active in the training team' })
       }
     }
 
     const savedRows = await prisma.$transaction(async (tx) => {
+      const existingRows = await tx.trainingRoleAssignment.findMany({
+        where: applyScopeWhere(req.auth, { trainingId }, { includeLegacyOwner: true }),
+        include: {
+          player: {
+            select: {
+              id: true,
+              is_active: true,
+            },
+          },
+        },
+      })
       await tx.trainingRoleAssignment.deleteMany({
         where: applyScopeWhere(req.auth, { trainingId }, { includeLegacyOwner: true }),
       })
 
-      if (items.length > 0) {
+      const preservedInactiveItems = existingRows
+        .filter((row: any) => row.playerId && row.player?.is_active === false && !playerIds.includes(row.playerId))
+        .map((row: any) => ({
+          userId: req.auth?.id ?? null,
+          clubId: training.clubId ?? null,
+          teamId: training.teamId ?? null,
+          trainingId,
+          role: row.role,
+          playerId: row.playerId,
+        }))
+
+      const nextItems = [
+        ...items.map((item) => ({
+          userId: req.auth?.id ?? null,
+          clubId: training.clubId ?? null,
+          teamId: training.teamId ?? null,
+          trainingId,
+          role: item.role,
+          playerId: item.playerId,
+        })),
+        ...preservedInactiveItems,
+      ]
+
+      if (nextItems.length > 0) {
         await tx.trainingRoleAssignment.createMany({
-          data: items.map((item) => ({
-            userId: req.auth?.id ?? null,
-            clubId: training.clubId ?? null,
-            teamId: training.teamId ?? null,
-            trainingId,
-            role: item.role,
-            playerId: item.playerId,
-          })),
+          data: nextItems,
         })
       }
 
@@ -6690,13 +7073,16 @@ app.get('/matchday', async (req: any, res, next) => {
   return next()
 }, authMiddleware, async (req: any, res) => {
   const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
+  const seasonId = parseOptionalSeasonId(req.query?.seasonId)
   const matchdays = await matchdayFindManyForUser(prisma, req.auth, {
+    where: seasonId ? { seasonId } : undefined,
+    include: { season: true },
     orderBy: { date: 'desc' },
     take: pagination.take,
     skip: pagination.skip,
   })
   res.json({
-    items: matchdays,
+    items: matchdays.map((matchday: any) => toEntityWithSeason(matchday)),
     pagination: { limit: pagination.limit, offset: pagination.offset, returned: matchdays.length }
   })
 })
@@ -6718,14 +7104,21 @@ app.post('/matchday', authMiddleware, async (req: any, res) => {
     return res.status(400).json({ error: e.message })
   }
   const date = new Date(parsed.data.date as any)
+  if (Number.isNaN(date.getTime())) return res.status(400).json({ error: 'Invalid date' })
+  const season = await resolveSeasonForClubId(prisma, team.clubId, date)
   const pl = await matchdayCreateForUser(prisma, req.auth, {
     date,
     lieu: parsed.data.lieu,
     ...buildMatchdayMetadataPatch(parsed.data),
+    seasonId: season?.id ?? null,
     clubId: team.clubId,
     teamId: team.id
   })
-  res.json(pl)
+  const hydrated = await matchdayFindFirstForUser(prisma, req.auth, {
+    where: { id: pl.id },
+    include: { season: true },
+  })
+  res.json(toEntityWithSeason(hydrated))
 })
 
 app.put('/matchday/:id', authMiddleware, async (req: any, res) => {
@@ -6739,10 +7132,13 @@ app.put('/matchday/:id', authMiddleware, async (req: any, res) => {
   }
 
   try {
-    const existing = await matchdayFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
+    const existing = await matchdayFindFirstForUser(prisma, req.auth, {
+      where: { id: req.params.id },
+      include: { season: true },
+    })
     if (!existing) return res.status(404).json({ error: 'Matchday not found' })
     const updated = await prisma.plateau.update({ where: { id: existing.id }, data })
-    res.json(updated)
+    res.json(toEntityWithSeason({ ...updated, season: existing.season }))
   } catch (e: any) {
     if (e?.code === 'P2025') return res.status(404).json({ error: 'Matchday not found' })
     console.error('[PUT /matchday/:id] update failed', e)
@@ -7011,9 +7407,12 @@ app.get('/matchday/:id', async (req: any, res, next) => {
 app.get('/matchday/:id', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   try {
-    const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id } })
+    const matchday = await matchdayFindFirstForUser(prisma, req.auth, {
+      where: { id },
+      include: { season: true },
+    })
     if (!matchday) return res.status(404).json({ error: 'Matchday not found' })
-    res.json(matchday)
+    res.json(toEntityWithSeason(matchday))
   } catch (e) {
     console.error('[GET /matchday/:id] failed', e)
     return res.status(500).json({ error: 'Failed to fetch matchday' })
@@ -7032,7 +7431,10 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
   const { id } = req.params
   const includeAllPlayers = req.query.includeAllPlayers === '1' || req.query.includeAllPlayers === 'true'
   try {
-    const matchday = await matchdayFindFirstForUser(prisma, req.auth, { where: { id } })
+    const matchday = await matchdayFindFirstForUser(prisma, req.auth, {
+      where: { id },
+      include: { season: true },
+    })
     if (!matchday) return res.status(404).json({ error: 'Matchday not found' })
 
     // Attendance (present/absent records) for this matchday, include player info
@@ -7074,6 +7476,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
     const matchesRaw = await matchFindManyForUser(prisma, req.auth, {
       where: { plateauId: id },
       include: {
+        season: true,
         teams: { select: { id: true, side: true, score: true } },
         scorers: { select: { id: true, playerId: true, assistId: true, side: true } }
       },
@@ -7138,10 +7541,13 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
     // Build enriched matches with teams[].players including player info
     const matches = matchesRawWithContractKeys.map((m: any) => {
       const status = resolveMatchStatus({ status: m.status, played: Boolean(m.played) })
-      const { plateauId, ...rest } = m
+      const { plateauId, season, ...rest } = m
       return {
         ...rest,
+        date: m.date ?? m.createdAt,
         matchdayId: plateauId ?? null,
+        seasonId: m.seasonId ?? season?.id ?? null,
+        season: season ? toSeasonResponse(season) : null,
         status,
         played: derivePlayedFromStatus(status),
         rotationGameKey: m.rotationGameKey ?? null,
@@ -7250,7 +7656,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
       matchesCancelled: matchesEnriched.filter((m: any) => resolveMatchStatus({ status: m.status, played: m.played }) === 'CANCELLED').length,
     }
     res.json({
-      matchday,
+      matchday: toEntityWithSeason(matchday),
       mode,
       rotation: mode === 'ROTATION' ? (rotation || { updatedAt: new Date().toISOString(), teams: [], slots: [] }) : null,
       matches: matchesEnriched,
@@ -7272,11 +7678,12 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
 app.get('/attendance', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     session_type: z.enum(['TRAINING', 'PLATEAU']).optional(),
-    session_id: z.string().optional()
+    session_id: z.string().optional(),
+    seasonId: z.string().optional(),
   })
   const parsed = schema.safeParse(req.query)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
-  const { session_type, session_id } = parsed.data
+  const { session_type, session_id, seasonId } = parsed.data
   let scopeAuth = req.auth
   if (session_type && session_id) {
     const resolved = await resolveAttendanceScopeFromSession(req.auth, session_type, session_id)
@@ -7288,8 +7695,37 @@ app.get('/attendance', authMiddleware, async (req: any, res) => {
   else where.session_type = { in: ['TRAINING', 'TRAINING_ABSENT', 'PLATEAU', 'PLATEAU_ABSENT'] } as any
   if (session_id) where.session_id = session_id
   const pagination = readPagination(req.query, { limit: 200, maxLimit: 500 })
+  let finalWhere: any = where
+  if (seasonId) {
+    const [seasonTrainings, seasonMatchdays] = await Promise.all([
+      trainingFindManyForUser(prisma, req.auth, {
+        where: { seasonId },
+        select: { id: true },
+      }),
+      matchdayFindManyForUser(prisma, req.auth, {
+        where: { seasonId },
+        select: { id: true },
+      }),
+    ])
+    const trainingIds = seasonTrainings.map((row: any) => row.id)
+    const matchdayIds = seasonMatchdays.map((row: any) => row.id)
+    const seasonScopedOr: any[] = []
+    if (!session_type || session_type === 'TRAINING') {
+      seasonScopedOr.push({
+        session_type: { in: ['TRAINING', 'TRAINING_ABSENT'] as any },
+        session_id: { in: trainingIds.length ? trainingIds : ['__no_training_for_season__'] },
+      })
+    }
+    if (!session_type || session_type === 'PLATEAU') {
+      seasonScopedOr.push({
+        session_type: { in: ['PLATEAU', 'PLATEAU_ABSENT', 'PLATEAU_CONVOKE'] as any },
+        session_id: { in: matchdayIds.length ? matchdayIds : ['__no_matchday_for_season__'] },
+      })
+    }
+    finalWhere = { AND: [where, { OR: seasonScopedOr }] }
+  }
   const rows = await attendanceFindManyForUser(prisma, scopeAuth, {
-    where,
+    where: finalWhere,
     take: pagination.take,
     skip: pagination.skip,
   })
@@ -7312,6 +7748,17 @@ app.post('/attendance', authMiddleware, async (req: any, res) => {
   const present = parsed.data.present ?? false
   const scopeAuth = await resolveAttendanceScopeFromSession(req.auth, session_type, session_id)
   if (!scopeAuth) return res.status(404).json({ error: `${session_type === 'TRAINING' ? 'Training' : 'Matchday'} not found` })
+  const scopedPlayer = await playerFindFirstForUser(prisma, scopeAuth, {
+    where: {
+      id: playerId,
+      ...(scopeAuth?.teamId ? { teamId: scopeAuth.teamId } : {}),
+      is_active: true,
+    },
+    select: { id: true },
+  })
+  if (!scopedPlayer) {
+    return res.status(400).json({ error: 'Player is not active for this session team' })
+  }
   await attendanceSetPresenceForUser(prisma, scopeAuth, { session_type, session_id, playerId, present })
   res.json({ ok: true })
 })
@@ -7453,7 +7900,7 @@ async function assertPlayerIdsInMatchTeams(db: any, matchId: string, playerIds: 
 async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
   const match = await matchFindFirstForUser(db, scopeOrUserId, {
     where: { id },
-    include: { teams: true, scorers: true }
+    include: { teams: true, scorers: true, season: true }
   })
   if (!match) return null
 
@@ -7535,10 +7982,13 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
   return {
     id: match.id,
     createdAt: match.createdAt,
+    date: match.date ?? match.createdAt,
     type: match.type,
     status,
     played: derivePlayedFromStatus(status),
     matchdayId: match.plateauId ?? null,
+    seasonId: match.seasonId ?? match.season?.id ?? null,
+    season: match.season ? toSeasonResponse(match.season) : null,
     rotationGameKey: (match as any).rotationGameKey ?? null,
     opponentName: match.opponentName ?? null,
     tactic: match.tactic ?? null,
@@ -7552,10 +8002,14 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
 app.get('/matches', authMiddleware, async (req: any, res) => {
   const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
   const { matchdayId } = req.query as { matchdayId?: string }
-  const where = matchdayId ? { plateauId: String(matchdayId) } : {}
+  const seasonId = parseOptionalSeasonId(req.query?.seasonId)
+  const where = {
+    ...(matchdayId ? { plateauId: String(matchdayId) } : {}),
+    ...(seasonId ? { seasonId } : {}),
+  }
   const matches = await matchFindManyForUser(prisma, req.auth, {
     where,
-    include: { teams: true, scorers: true },
+    include: { teams: true, scorers: true, season: true },
     orderBy: { createdAt: 'desc' },
     take: pagination.take,
     skip: pagination.skip,
@@ -7579,17 +8033,20 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
   const matchesWithContractKeys = ensureRotationGameKeysForContract(matches, mode === 'ROTATION')
   res.json({
     items: matchesWithContractKeys.map((match: any) => {
-    const status = resolveMatchStatus({ status: match.status, played: Boolean(match.played) })
-    const { plateauId, ...rest } = match
-    return {
-      ...rest,
-      matchdayId: plateauId ?? null,
-      status,
-      played: derivePlayedFromStatus(status),
-      tactic: match.tactic ?? null,
-      rotationGameKey: match.rotationGameKey ?? null,
-    }
-  }),
+      const status = resolveMatchStatus({ status: match.status, played: Boolean(match.played) })
+      const { plateauId, season, ...rest } = match
+      return {
+        ...rest,
+        date: match.date ?? match.createdAt,
+        matchdayId: plateauId ?? null,
+        seasonId: match.seasonId ?? season?.id ?? null,
+        season: season ? toSeasonResponse(season) : null,
+        status,
+        played: derivePlayedFromStatus(status),
+        tactic: match.tactic ?? null,
+        rotationGameKey: match.rotationGameKey ?? null,
+      }
+    }),
     pagination: { limit: pagination.limit, offset: pagination.offset, returned: matches.length }
   })
 })
@@ -7689,7 +8146,7 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
     const firstIssue = parsed.error.issues[0]
     return res.status(400).json({ error: firstIssue?.message || parsed.error.flatten() })
   }
-  const { type, matchdayId, sides, score, buteurs, opponentName, played, status, tactic, rotationGameKey } = parsed.data
+  const { type, matchdayId, date, sides, score, buteurs, opponentName, played, status, tactic, rotationGameKey } = parsed.data
   const normalized = normalizeMatchState({
     payload: { played, status, score, buteurs },
     fallbackStatus: 'PLANNED',
@@ -7700,19 +8157,26 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
 
   let team: any = null
   let teamFormat: string | null = null
+  let matchDate: Date | null = null
+  let seasonId: string | null = null
   if (matchdayId) {
     const ownedMatchday = await matchdayFindFirstForUser(prisma, req.auth, {
       where: { id: matchdayId },
-      select: { teamId: true, clubId: true },
+      select: { teamId: true, clubId: true, date: true, seasonId: true },
     })
     if (!ownedMatchday) return res.status(404).json({ error: 'Matchday not found' })
     team = { id: ownedMatchday.teamId, clubId: ownedMatchday.clubId }
+    matchDate = new Date(ownedMatchday.date)
+    seasonId = ownedMatchday.seasonId ?? (await resolveSeasonForClubId(prisma, ownedMatchday.clubId, ownedMatchday.date))?.id ?? null
   } else {
     try {
       team = await resolveTeamForWrite(req.auth)
     } catch (e: any) {
       return res.status(400).json({ error: e.message })
     }
+    matchDate = new Date(date as string)
+    if (Number.isNaN(matchDate.getTime())) return res.status(400).json({ error: 'Invalid date' })
+    seasonId = (await resolveSeasonForClubId(prisma, team.clubId, matchDate))?.id ?? null
   }
 
   const owningTeam = team?.id
@@ -7731,7 +8195,13 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
 
   try {
     const match = await matchCreateForUser(prisma, req.auth, {
-      type, plateauId: matchdayId, opponentName, played: normalized.played, status: normalized.status,
+      type,
+      plateauId: matchdayId,
+      date: matchDate,
+      opponentName,
+      played: normalized.played,
+      status: normalized.status,
+      seasonId,
       rotationGameKey: rotationGameKey ?? null,
       tactic: tactic ?? null,
       clubId: team?.clubId ?? req.auth.clubId ?? null,
@@ -7765,12 +8235,8 @@ app.post('/matches', authMiddleware, async (req: any, res) => {
       })
     }
 
-    const full = await matchFindUniqueCompat(prisma, {
-      where: { id: match.id },
-      include: { teams: { include: { players: { include: { player: true } } } }, scorers: true }
-    })
-    const { plateauId, ...rest } = full as any
-    res.status(201).json({ ...rest, matchdayId: plateauId ?? null })
+    const full = await getMatchDetailForUser(prisma, req.auth, match.id)
+    res.status(201).json(full)
   } catch (e: any) {
     if (e?.code === 'PLAYER_NOT_IN_MATCH_TEAMS') return res.status(400).json({ error: e.message })
     if (e?.code === 'P2003') return res.status(400).json({ error: 'Invalid scorer reference in payload' })
@@ -7790,6 +8256,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
     status: z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
     played: z.boolean().optional(),
     matchdayId: z.string().nullable().optional(),
+    date: z.string().datetime().optional(),
     rotationGameKey: z.string().min(1).max(120).nullable().optional(),
     sides: z.object({
       home: z.object({
@@ -7859,9 +8326,13 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
         fallbackStatus: existingStatus,
       })
 
+      let attachedMatchday: any = null
       if (payload.matchdayId !== undefined && payload.matchdayId) {
-        const matchday = await matchdayFindFirstForUser(tx, req.auth, { where: { id: payload.matchdayId }, select: { id: true } })
-        if (!matchday) {
+        attachedMatchday = await matchdayFindFirstForUser(tx, req.auth, {
+          where: { id: payload.matchdayId },
+          select: { id: true, date: true, seasonId: true, clubId: true },
+        })
+        if (!attachedMatchday) {
           const err: any = new Error('Matchday not found')
           err.code = 'MATCHDAY_NOT_FOUND'
           throw err
@@ -7884,6 +8355,53 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
       }
 
       const matchPatch: any = {}
+      let nextDate = existing.date ?? existing.createdAt
+      let nextSeasonId = existing.seasonId ?? null
+      if (payload.matchdayId !== undefined) {
+        if (payload.matchdayId) {
+          nextDate = attachedMatchday.date
+          nextSeasonId = attachedMatchday.seasonId
+            ?? (await resolveSeasonForClubId(tx, attachedMatchday.clubId ?? existing.clubId ?? req.auth?.clubId ?? null, attachedMatchday.date))?.id
+            ?? null
+        } else {
+          const standaloneDate = payload.date ? new Date(payload.date) : (existing.date ?? existing.createdAt)
+          if (Number.isNaN(standaloneDate.getTime())) {
+            const err: any = new Error('Invalid date')
+            err.code = 'MATCH_DATE_INVALID'
+            throw err
+          }
+          nextDate = standaloneDate
+          nextSeasonId = (await resolveSeasonForClubId(
+            tx,
+            existing.clubId ?? req.auth?.clubId ?? null,
+            standaloneDate,
+          ))?.id ?? null
+        }
+      } else if (payload.date !== undefined && !existing.plateauId) {
+        const standaloneDate = new Date(payload.date)
+        if (Number.isNaN(standaloneDate.getTime())) {
+          const err: any = new Error('Invalid date')
+          err.code = 'MATCH_DATE_INVALID'
+          throw err
+        }
+        nextDate = standaloneDate
+        nextSeasonId = (await resolveSeasonForClubId(
+          tx,
+          existing.clubId ?? req.auth?.clubId ?? null,
+          standaloneDate,
+        ))?.id ?? null
+      } else if (!existing.date && existing.plateauId) {
+        const currentMatchday = await matchdayFindFirstForUser(tx, req.auth, {
+          where: { id: existing.plateauId },
+          select: { id: true, date: true, seasonId: true, clubId: true },
+        })
+        if (currentMatchday) {
+          nextDate = currentMatchday.date
+          nextSeasonId = currentMatchday.seasonId
+            ?? (await resolveSeasonForClubId(tx, currentMatchday.clubId ?? existing.clubId ?? req.auth?.clubId ?? null, currentMatchday.date))?.id
+            ?? null
+        }
+      }
       if (payload.type !== undefined) matchPatch.type = payload.type
       if (payload.played !== undefined || payload.status !== undefined) {
         matchPatch.played = normalized.played
@@ -7894,6 +8412,8 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
           ? { connect: { id: payload.matchdayId } }
           : { disconnect: true }
       }
+      matchPatch.date = nextDate
+      matchPatch.seasonId = nextSeasonId
       if (payload.rotationGameKey !== undefined) {
         const currentRotationGameKey = typeof (existing as any).rotationGameKey === 'string'
           ? (existing as any).rotationGameKey.trim()
@@ -7970,6 +8490,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
   } catch (e) {
     if ((e as any)?.code === 'MATCH_NOT_FOUND') return res.status(404).json({ error: 'Match not found' })
     if ((e as any)?.code === 'MATCHDAY_NOT_FOUND') return res.status(404).json({ error: 'Matchday not found' })
+    if ((e as any)?.code === 'MATCH_DATE_INVALID') return res.status(400).json({ error: 'Invalid date' })
     if ((e as any)?.code === 'MATCH_PAYLOAD_INVALID') return res.status(400).json({ error: (e as any).message })
     if ((e as any)?.code === 'PLAYER_NOT_IN_MATCH_TEAMS') return res.status(400).json({ error: (e as any).message })
     if ((e as any)?.code === 'P2003') return res.status(400).json({ error: 'Invalid scorer reference in payload' })
@@ -9280,6 +9801,7 @@ app.use((err: any, _req: any, res: any, _next: any) => {
 })
 
 if (require.main === module) {
+  void backfillLegacySeasonData()
   app.listen(PORT, () => {
     console.log(`API listening on ${PORT}`)
   })

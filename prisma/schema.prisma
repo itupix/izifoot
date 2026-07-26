@@ -63,11 +63,36 @@ enum MobileAuthPlatform {
 }
 
 model Club {
-  id        String   @id @default(cuid())
-  name      String
-  createdAt DateTime @default(now())
-  users     User[]
-  teams     Team[]
+  id               String   @id @default(cuid())
+  name             String
+  seasonStartMonth Int      @default(8)
+  seasonStartDay   Int      @default(1)
+  seasonEndMonth   Int      @default(7)
+  seasonEndDay     Int      @default(31)
+  seasonTimezone   String   @default("Europe/Paris")
+  createdAt        DateTime @default(now())
+  users            User[]
+  teams            Team[]
+  seasons          Season[]
+}
+
+model Season {
+  id        String    @id @default(cuid())
+  clubId    String
+  club      Club      @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  key       String
+  label     String
+  startDate DateTime
+  endDate   DateTime
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  trainings Training[]
+  plateaus  Plateau[]
+  matches   Match[]
+
+  @@unique([clubId, key])
+  @@unique([clubId, startDate, endDate])
+  @@index([clubId, startDate(sort: Desc)])
 }
 
 model Team {
@@ -218,6 +243,8 @@ model Player {
   user                    User?                    @relation(fields: [userId], references: [id])
   clubId                  String?
   teamId                  String
+  is_active               Boolean                  @default(true)
+  deactivated_at          DateTime?
   name                    String
   first_name              String?
   last_name               String?
@@ -241,6 +268,7 @@ model Player {
 
   @@unique([userId, email])
   @@index([teamId])
+  @@index([teamId, is_active])
   @@index([teamId, last_name, first_name, name])
 }
 
@@ -249,6 +277,8 @@ model Training {
   userId                  String?
   user                    User?                    @relation(fields: [userId], references: [id])
   clubId                  String?
+  seasonId                String?
+  season                  Season?                  @relation(fields: [seasonId], references: [id])
   teamId                  String
   date                    DateTime
   endTime                 String?                  @map("end_time") @db.VarChar(5)
@@ -260,6 +290,7 @@ model Training {
   trainingRoleAssignments TrainingRoleAssignment[]
 
   @@index([teamId, date])
+  @@index([seasonId, date])
 }
 
 model Plateau {
@@ -267,6 +298,8 @@ model Plateau {
   userId      String?
   user        User?               @relation(fields: [userId], references: [id])
   clubId      String?
+  seasonId    String?
+  season      Season?             @relation(fields: [seasonId], references: [id])
   teamId      String
   date        DateTime
   lieu        String
@@ -283,6 +316,7 @@ model Plateau {
   updatedAt   DateTime            @updatedAt
 
   @@index([teamId, date])
+  @@index([seasonId, date])
 }
 
 model PlateauShareToken {
@@ -318,7 +352,10 @@ model Match {
   userId          String?
   user            User?        @relation(fields: [userId], references: [id])
   clubId          String?
+  seasonId        String?
+  season          Season?      @relation(fields: [seasonId], references: [id])
   teamId          String?
+  date            DateTime?
   type            String
   played          Boolean      @default(false)
   status          MatchStatus  @default(PLANNED)
@@ -335,6 +372,7 @@ model Match {
 
   @@index([plateauId, rotationGameKey])
   @@index([plateauId, createdAt])
+  @@index([seasonId, date])
 }
 
 enum MatchStatus {
