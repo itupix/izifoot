@@ -98,11 +98,10 @@ test('public matchday shape includes new metadata fields', () => {
     address: '1 rue du Stade',
     startTime: '10:00',
     meetingTime: '09:30',
-    matchVenue: 'AWAY',
   })
 
   assert.equal(matchday.address, '1 rue du Stade')
   assert.equal(matchday.startTime, '10:00')
   assert.equal(matchday.meetingTime, '09:30')
-  assert.equal(matchday.matchVenue, 'AWAY')
+  assert.equal('matchVenue' in matchday, false)
 })

@@ -14,7 +14,6 @@ exports.matchdayMetadataSchema = zod_1.z.object({
     startTime: nullableHHMMSchema.optional(),
     meetingTime: nullableHHMMSchema.optional(),
     competitionType: zod_1.z.enum(['PLATEAU', 'MATCH', 'TOURNOI']).optional(),
-    matchVenue: zod_1.z.enum(['HOME', 'AWAY']).nullable().optional(),
     tournamentHasGroupStage: zod_1.z.boolean().nullable().optional(),
     tournamentKnockoutMode: zod_1.z.enum(['NONE', 'SINGLE', 'HOME_AWAY']).nullable().optional(),
 });
@@ -23,6 +22,7 @@ exports.matchdayCreateSchema = zod_1.z.object({
     lieu: zod_1.z.string().trim().optional(),
     teamId: zod_1.z.string().trim().min(1).optional(),
     opponentName: zod_1.z.string().trim().min(1).max(100).optional(),
+    matchVenue: zod_1.z.enum(['HOME', 'AWAY']).optional(),
 }).merge(exports.matchdayMetadataSchema).superRefine((value, ctx) => {
     if (value.competitionType === 'MATCH' && !value.opponentName?.trim()) {
         ctx.addIssue({
@@ -63,8 +63,6 @@ function buildMatchdayMetadataPatch(data) {
         patch.meetingTime = data.meetingTime ?? null;
     if (Object.prototype.hasOwnProperty.call(data, 'competitionType') && data.competitionType)
         patch.competitionType = data.competitionType;
-    if (Object.prototype.hasOwnProperty.call(data, 'matchVenue'))
-        patch.matchVenue = data.matchVenue ?? null;
     if (Object.prototype.hasOwnProperty.call(data, 'tournamentHasGroupStage'))
         patch.tournamentHasGroupStage = data.tournamentHasGroupStage ?? null;
     if (Object.prototype.hasOwnProperty.call(data, 'tournamentKnockoutMode'))
@@ -89,7 +87,6 @@ function toPublicMatchday(matchday) {
         startTime: matchday.startTime ?? null,
         meetingTime: matchday.meetingTime ?? null,
         competitionType: matchday.competitionType ?? 'PLATEAU',
-        matchVenue: matchday.matchVenue ?? null,
         tournamentHasGroupStage: matchday.tournamentHasGroupStage ?? null,
         tournamentKnockoutMode: matchday.tournamentKnockoutMode ?? null,
     };

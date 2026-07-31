@@ -89,10 +89,9 @@ const matchday_metadata_1 = require("../matchday-metadata");
         address: '1 rue du Stade',
         startTime: '10:00',
         meetingTime: '09:30',
-        matchVenue: 'AWAY',
     });
     strict_1.default.equal(matchday.address, '1 rue du Stade');
     strict_1.default.equal(matchday.startTime, '10:00');
     strict_1.default.equal(matchday.meetingTime, '09:30');
-    strict_1.default.equal(matchday.matchVenue, 'AWAY');
+    strict_1.default.equal('matchVenue' in matchday, false);
 });

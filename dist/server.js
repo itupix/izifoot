@@ -6703,48 +6703,60 @@ app.post('/matchday', authMiddleware, async (req, res) => {
     const date = new Date(parsed.data.date);
     if (Number.isNaN(date.getTime()))
         return res.status(400).json({ error: 'Invalid date' });
-    const season = await resolveSeasonForClubId(prisma, team.clubId, date);
-    const opponentName = parsed.data.opponentName?.trim();
-    const persistedLieu = parsed.data.competitionType === 'MATCH' && parsed.data.matchVenue === 'HOME'
-        ? ''
-        : (parsed.data.lieu?.trim() || '');
-    const matchdayId = await prisma.$transaction(async (tx) => {
-        const createdMatchday = await matchdayCreateForUser(tx, req.auth, {
-            date,
-            lieu: persistedLieu,
-            ...(0, matchday_metadata_1.buildMatchdayMetadataPatch)(parsed.data),
-            seasonId: season?.id ?? null,
-            clubId: team.clubId,
-            teamId: team.id
-        });
-        if (parsed.data.competitionType === 'MATCH') {
-            const createdMatch = await matchCreateForUser(tx, req.auth, {
-                type: 'MATCH',
-                plateauId: createdMatchday.id,
+    try {
+        const season = await resolveSeasonForClubId(prisma, team.clubId, date);
+        const opponentName = parsed.data.opponentName?.trim();
+        const persistedLieu = parsed.data.competitionType === 'MATCH' && parsed.data.matchVenue === 'HOME'
+            ? ''
+            : (parsed.data.lieu?.trim() || '');
+        const matchdayId = await prisma.$transaction(async (tx) => {
+            const createdMatchday = await matchdayCreateForUser(tx, req.auth, {
                 date,
-                opponentName,
-                played: false,
-                status: 'PLANNED',
+                lieu: persistedLieu,
+                ...(0, matchday_metadata_1.buildMatchdayMetadataPatch)(parsed.data),
                 seasonId: season?.id ?? null,
-                rotationGameKey: null,
-                tactic: null,
                 clubId: team.clubId,
-                teamId: team.id,
+                teamId: team.id
             });
-            await tx.matchTeam.createMany({
-                data: [
-                    { matchId: createdMatch.id, side: 'home', score: 0 },
-                    { matchId: createdMatch.id, side: 'away', score: 0 },
-                ],
-            });
-        }
-        return createdMatchday.id;
-    });
-    const hydrated = await matchdayFindFirstForUser(prisma, req.auth, {
-        where: { id: matchdayId },
-        include: { season: true },
-    });
-    res.json(toEntityWithSeason(hydrated));
+            if (parsed.data.competitionType === 'MATCH') {
+                const createdMatch = await matchCreateForUser(tx, req.auth, {
+                    type: 'MATCH',
+                    plateauId: createdMatchday.id,
+                    date,
+                    opponentName,
+                    played: false,
+                    status: 'PLANNED',
+                    seasonId: season?.id ?? null,
+                    rotationGameKey: null,
+                    tactic: null,
+                    clubId: team.clubId,
+                    teamId: team.id,
+                });
+                await tx.matchTeam.createMany({
+                    data: [
+                        { matchId: createdMatch.id, side: 'home', score: 0 },
+                        { matchId: createdMatch.id, side: 'away', score: 0 },
+                    ],
+                });
+            }
+            return createdMatchday.id;
+        });
+        const hydrated = await matchdayFindFirstForUser(prisma, req.auth, {
+            where: { id: matchdayId },
+            include: { season: true },
+        });
+        res.json(toEntityWithSeason(hydrated));
+    }
+    catch (e) {
+        if (e?.code === 'P2022')
+            return res.status(503).json({ error: 'Matchday storage unavailable' });
+        console.error('[POST /matchday] create failed', {
+            body: req.body,
+            auth: req.auth,
+            error: e,
+        });
+        return res.status(500).json({ error: 'Failed to create matchday' });
+    }
 });
 app.put('/matchday/:id', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
