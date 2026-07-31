@@ -15,6 +15,7 @@ import { addDays } from 'date-fns'
 import { createPrivateKey, randomUUID } from 'crypto'
 import http2 from 'http2'
 import { HHMM_TIME_REGEX, buildMatchdayMetadataPatch, matchdayCreateSchema, matchdayMetadataSchema, toPublicMatchday } from './matchday-metadata'
+import { toPrismaNullableJsonValue } from './prisma-json'
 import {
   attendanceSessionTypeVariants,
   buildTrainingAttendanceSnapshot,
@@ -1516,9 +1517,12 @@ async function matchFindUniqueCompat(db: any, args: any): Promise<any> {
 async function matchCreateForUser(db: any, scopeOrUserId: any, data: any) {
   const auth = normalizeScopeInput(scopeOrUserId)
   const { plateauId, ...rest } = data
+  const normalizedRest = Object.prototype.hasOwnProperty.call(rest, 'tactic')
+    ? { ...rest, tactic: toPrismaNullableJsonValue(rest.tactic) }
+    : rest
   return db.match.create({
     data: {
-      ...rest,
+      ...normalizedRest,
       ...(plateauId ? { plateau: { connect: { id: plateauId } } } : {}),
       ...(auth?.id ? { user: { connect: { id: auth.id } } } : {}),
       ...(auth?.clubId ? { clubId: auth.clubId } : {}),
@@ -8465,7 +8469,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
         }
       }
       if (payload.opponentName !== undefined) matchPatch.opponentName = payload.opponentName
-      if (payload.tactic !== undefined) matchPatch.tactic = payload.tactic
+      if (payload.tactic !== undefined) matchPatch.tactic = toPrismaNullableJsonValue(payload.tactic)
       if (Object.keys(matchPatch).length > 0) {
         await tx.match.update({ where: { id: matchId }, data: matchPatch })
       }

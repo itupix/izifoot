@@ -20,6 +20,7 @@ const date_fns_1 = require("date-fns");
 const crypto_1 = require("crypto");
 const http2_1 = __importDefault(require("http2"));
 const matchday_metadata_1 = require("./matchday-metadata");
+const prisma_json_1 = require("./prisma-json");
 const attendance_1 = require("./attendance");
 const training_role_assignments_1 = require("./training-role-assignments");
 const tactics_1 = require("./tactics");
@@ -1366,9 +1367,12 @@ async function matchFindUniqueCompat(db, args) {
 async function matchCreateForUser(db, scopeOrUserId, data) {
     const auth = normalizeScopeInput(scopeOrUserId);
     const { plateauId, ...rest } = data;
+    const normalizedRest = Object.prototype.hasOwnProperty.call(rest, 'tactic')
+        ? { ...rest, tactic: (0, prisma_json_1.toPrismaNullableJsonValue)(rest.tactic) }
+        : rest;
     return db.match.create({
         data: {
-            ...rest,
+            ...normalizedRest,
             ...(plateauId ? { plateau: { connect: { id: plateauId } } } : {}),
             ...(auth?.id ? { user: { connect: { id: auth.id } } } : {}),
             ...(auth?.clubId ? { clubId: auth.clubId } : {}),
@@ -8056,7 +8060,7 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
             if (payload.opponentName !== undefined)
                 matchPatch.opponentName = payload.opponentName;
             if (payload.tactic !== undefined)
-                matchPatch.tactic = payload.tactic;
+                matchPatch.tactic = (0, prisma_json_1.toPrismaNullableJsonValue)(payload.tactic);
             if (Object.keys(matchPatch).length > 0) {
                 await tx.match.update({ where: { id: matchId }, data: matchPatch });
             }
