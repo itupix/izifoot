@@ -62,7 +62,7 @@ Restrictions: must maintain scoped player-team constraints.
 
 ## 6. User Flows
 - Main flow: create matchday -> set attendance/absences -> create matches -> update events/scores -> share.
-- Match variant: creating a `MATCH` matchday now requires `opponentName` and auto-creates the linked match in the same backend transaction.
+- Match variant: creating a `MATCH` matchday now requires `opponentName`, `matchVenue`, and auto-creates the linked match in the same backend transaction.
 - Variants: generate schedule automatically then commit.
 - Back navigation: return from match details to matchday overview.
 - Interruptions: stale match references, out-of-scope players.
@@ -72,7 +72,7 @@ Restrictions: must maintain scoped player-team constraints.
 ## 7. Functional Behavior
 - UI behavior: summary endpoint aggregates convocations and rotation context.
 - Actions: mutate matchday metadata, create/update/delete matches, add/remove events.
-- `POST /matchday` requires `opponentName` when `competitionType = MATCH` and seeds the initial `Match` with empty teams and a `PLANNED` status.
+- `POST /matchday` requires `opponentName` and `matchVenue` when `competitionType = MATCH`; `lieu` is required only when `matchVenue = AWAY`, and the route seeds the initial `Match` with empty teams and a `PLANNED` status.
 - States: matchday active/deleted; match `PLANNED/PLAYED/CANCELLED`.
 - Conditions: write requires admin/coach scope.
 - Validations: match payload + event payload validation helpers.

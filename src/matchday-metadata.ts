@@ -12,13 +12,14 @@ export const matchdayMetadataSchema = z.object({
   startTime: nullableHHMMSchema.optional(),
   meetingTime: nullableHHMMSchema.optional(),
   competitionType: z.enum(['PLATEAU', 'MATCH', 'TOURNOI']).optional(),
+  matchVenue: z.enum(['HOME', 'AWAY']).nullable().optional(),
   tournamentHasGroupStage: z.boolean().nullable().optional(),
   tournamentKnockoutMode: z.enum(['NONE', 'SINGLE', 'HOME_AWAY']).nullable().optional(),
 })
 
 export const matchdayCreateSchema = z.object({
   date: z.union([z.string(), z.date()]),
-  lieu: z.string().trim().min(1),
+  lieu: z.string().trim().optional(),
   teamId: z.string().trim().min(1).optional(),
   opponentName: z.string().trim().min(1).max(100).optional(),
 }).merge(matchdayMetadataSchema).superRefine((value, ctx) => {
@@ -29,6 +30,27 @@ export const matchdayCreateSchema = z.object({
       message: 'opponentName is required when competitionType is MATCH',
     })
   }
+  if (value.competitionType === 'MATCH' && !value.matchVenue) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['matchVenue'],
+      message: 'matchVenue is required when competitionType is MATCH',
+    })
+  }
+  if (value.competitionType === 'MATCH' && value.matchVenue === 'AWAY' && !value.lieu?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lieu'],
+      message: 'lieu is required when matchVenue is AWAY',
+    })
+  }
+  if (value.competitionType !== 'MATCH' && !value.lieu?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lieu'],
+      message: 'lieu is required',
+    })
+  }
 })
 
 export function buildMatchdayMetadataPatch(data: z.infer<typeof matchdayMetadataSchema>) {
@@ -37,6 +59,7 @@ export function buildMatchdayMetadataPatch(data: z.infer<typeof matchdayMetadata
     startTime?: string | null
     meetingTime?: string | null
     competitionType?: 'PLATEAU' | 'MATCH' | 'TOURNOI'
+    matchVenue?: 'HOME' | 'AWAY' | null
     tournamentHasGroupStage?: boolean | null
     tournamentKnockoutMode?: 'NONE' | 'SINGLE' | 'HOME_AWAY' | null
   } = {}
@@ -45,6 +68,7 @@ export function buildMatchdayMetadataPatch(data: z.infer<typeof matchdayMetadata
   if (Object.prototype.hasOwnProperty.call(data, 'startTime')) patch.startTime = data.startTime ?? null
   if (Object.prototype.hasOwnProperty.call(data, 'meetingTime')) patch.meetingTime = data.meetingTime ?? null
   if (Object.prototype.hasOwnProperty.call(data, 'competitionType') && data.competitionType) patch.competitionType = data.competitionType
+  if (Object.prototype.hasOwnProperty.call(data, 'matchVenue')) patch.matchVenue = data.matchVenue ?? null
   if (Object.prototype.hasOwnProperty.call(data, 'tournamentHasGroupStage')) patch.tournamentHasGroupStage = data.tournamentHasGroupStage ?? null
   if (Object.prototype.hasOwnProperty.call(data, 'tournamentKnockoutMode')) patch.tournamentKnockoutMode = data.tournamentKnockoutMode ?? null
 
@@ -68,6 +92,7 @@ export function toPublicMatchday(matchday: {
   startTime?: string | null
   meetingTime?: string | null
   competitionType?: 'PLATEAU' | 'MATCH' | 'TOURNOI' | null
+  matchVenue?: 'HOME' | 'AWAY' | null
   tournamentHasGroupStage?: boolean | null
   tournamentKnockoutMode?: 'NONE' | 'SINGLE' | 'HOME_AWAY' | null
 }) {
@@ -88,6 +113,7 @@ export function toPublicMatchday(matchday: {
     startTime: matchday.startTime ?? null,
     meetingTime: matchday.meetingTime ?? null,
     competitionType: matchday.competitionType ?? 'PLATEAU',
+    matchVenue: matchday.matchVenue ?? null,
     tournamentHasGroupStage: matchday.tournamentHasGroupStage ?? null,
     tournamentKnockoutMode: matchday.tournamentKnockoutMode ?? null,
   }

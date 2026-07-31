@@ -35,19 +35,54 @@ test('partial metadata patch updates only provided fields', () => {
 test('matchday create validation requires opponent for MATCH competitions', () => {
   const parsed = matchdayCreateSchema.safeParse({
     date: '2026-08-02T08:00:00.000Z',
-    lieu: 'Stade municipal',
     competitionType: 'MATCH',
+    matchVenue: 'HOME',
   })
 
   assert.equal(parsed.success, false)
 })
 
-test('matchday create validation accepts opponent for MATCH competitions', () => {
+test('matchday create validation requires matchVenue for MATCH competitions', () => {
+  const parsed = matchdayCreateSchema.safeParse({
+    date: '2026-08-02T08:00:00.000Z',
+    competitionType: 'MATCH',
+    opponentName: 'FC Montfermeil',
+  })
+
+  assert.equal(parsed.success, false)
+})
+
+test('matchday create validation requires lieu for away MATCH competitions', () => {
+  const parsed = matchdayCreateSchema.safeParse({
+    date: '2026-08-02T08:00:00.000Z',
+    competitionType: 'MATCH',
+    opponentName: 'FC Montfermeil',
+    matchVenue: 'AWAY',
+  })
+
+  assert.equal(parsed.success, false)
+})
+
+test('matchday create validation accepts home MATCH competitions without lieu', () => {
+  const parsed = matchdayCreateSchema.safeParse({
+    date: '2026-08-02T08:00:00.000Z',
+    competitionType: 'MATCH',
+    opponentName: 'FC Montfermeil',
+    matchVenue: 'HOME',
+  })
+
+  assert.equal(parsed.success, true)
+  if (!parsed.success) return
+  assert.equal(parsed.data.matchVenue, 'HOME')
+})
+
+test('matchday create validation accepts away MATCH competitions with lieu', () => {
   const parsed = matchdayCreateSchema.safeParse({
     date: '2026-08-02T08:00:00.000Z',
     lieu: 'Stade municipal',
     competitionType: 'MATCH',
     opponentName: 'FC Montfermeil',
+    matchVenue: 'AWAY',
   })
 
   assert.equal(parsed.success, true)
@@ -63,9 +98,11 @@ test('public matchday shape includes new metadata fields', () => {
     address: '1 rue du Stade',
     startTime: '10:00',
     meetingTime: '09:30',
+    matchVenue: 'AWAY',
   })
 
   assert.equal(matchday.address, '1 rue du Stade')
   assert.equal(matchday.startTime, '10:00')
   assert.equal(matchday.meetingTime, '09:30')
+  assert.equal(matchday.matchVenue, 'AWAY')
 })

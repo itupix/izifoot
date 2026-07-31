@@ -7102,10 +7102,13 @@ app.post('/matchday', authMiddleware, async (req: any, res) => {
   if (Number.isNaN(date.getTime())) return res.status(400).json({ error: 'Invalid date' })
   const season = await resolveSeasonForClubId(prisma, team.clubId, date)
   const opponentName = parsed.data.opponentName?.trim()
+  const persistedLieu = parsed.data.competitionType === 'MATCH' && parsed.data.matchVenue === 'HOME'
+    ? ''
+    : (parsed.data.lieu?.trim() || '')
   const matchdayId = await prisma.$transaction(async (tx) => {
     const createdMatchday = await matchdayCreateForUser(tx, req.auth, {
       date,
-      lieu: parsed.data.lieu,
+      lieu: persistedLieu,
       ...buildMatchdayMetadataPatch(parsed.data),
       seasonId: season?.id ?? null,
       clubId: team.clubId,
