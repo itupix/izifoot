@@ -14,7 +14,7 @@ import nodemailer from 'nodemailer'
 import { addDays } from 'date-fns'
 import { createPrivateKey, randomUUID } from 'crypto'
 import http2 from 'http2'
-import { HHMM_TIME_REGEX, buildMatchdayMetadataPatch, matchdayMetadataSchema, toPublicMatchday } from './matchday-metadata'
+import { HHMM_TIME_REGEX, buildMatchdayMetadataPatch, matchdayCreateSchema, matchdayMetadataSchema, toPublicMatchday } from './matchday-metadata'
 import {
   attendanceSessionTypeVariants,
   buildTrainingAttendanceSnapshot,
@@ -7090,12 +7090,7 @@ app.get('/matchday', async (req: any, res, next) => {
 
 app.post('/matchday', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const schema = z.object({
-    date: z.string().or(z.date()),
-    lieu: z.string().min(1),
-    teamId: z.string().min(1).optional(),
-  }).merge(matchdayMetadataSchema)
-  const parsed = schema.safeParse(req.body)
+  const parsed = matchdayCreateSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
   try {
@@ -7106,16 +7101,44 @@ app.post('/matchday', authMiddleware, async (req: any, res) => {
   const date = new Date(parsed.data.date as any)
   if (Number.isNaN(date.getTime())) return res.status(400).json({ error: 'Invalid date' })
   const season = await resolveSeasonForClubId(prisma, team.clubId, date)
-  const pl = await matchdayCreateForUser(prisma, req.auth, {
-    date,
-    lieu: parsed.data.lieu,
-    ...buildMatchdayMetadataPatch(parsed.data),
-    seasonId: season?.id ?? null,
-    clubId: team.clubId,
-    teamId: team.id
+  const opponentName = parsed.data.opponentName?.trim()
+  const matchdayId = await prisma.$transaction(async (tx) => {
+    const createdMatchday = await matchdayCreateForUser(tx, req.auth, {
+      date,
+      lieu: parsed.data.lieu,
+      ...buildMatchdayMetadataPatch(parsed.data),
+      seasonId: season?.id ?? null,
+      clubId: team.clubId,
+      teamId: team.id
+    })
+
+    if (parsed.data.competitionType === 'MATCH') {
+      const createdMatch = await matchCreateForUser(tx, req.auth, {
+        type: 'MATCH',
+        plateauId: createdMatchday.id,
+        date,
+        opponentName,
+        played: false,
+        status: 'PLANNED',
+        seasonId: season?.id ?? null,
+        rotationGameKey: null,
+        tactic: null,
+        clubId: team.clubId,
+        teamId: team.id,
+      })
+
+      await tx.matchTeam.createMany({
+        data: [
+          { matchId: createdMatch.id, side: 'home', score: 0 },
+          { matchId: createdMatch.id, side: 'away', score: 0 },
+        ],
+      })
+    }
+
+    return createdMatchday.id
   })
   const hydrated = await matchdayFindFirstForUser(prisma, req.auth, {
-    where: { id: pl.id },
+    where: { id: matchdayId },
     include: { season: true },
   })
   res.json(toEntityWithSeason(hydrated))

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildMatchdayMetadataPatch, matchdayMetadataSchema, toPublicMatchday } from '../matchday-metadata'
+import { buildMatchdayMetadataPatch, matchdayCreateSchema, matchdayMetadataSchema, toPublicMatchday } from '../matchday-metadata'
 
 test('matchday metadata validation accepts strict HH:MM and null values', () => {
   const parsed = matchdayMetadataSchema.safeParse({
@@ -30,6 +30,29 @@ test('partial metadata patch updates only provided fields', () => {
   assert.deepEqual(patch, { startTime: '10:15' })
   assert.equal('address' in patch, false)
   assert.equal('meetingTime' in patch, false)
+})
+
+test('matchday create validation requires opponent for MATCH competitions', () => {
+  const parsed = matchdayCreateSchema.safeParse({
+    date: '2026-08-02T08:00:00.000Z',
+    lieu: 'Stade municipal',
+    competitionType: 'MATCH',
+  })
+
+  assert.equal(parsed.success, false)
+})
+
+test('matchday create validation accepts opponent for MATCH competitions', () => {
+  const parsed = matchdayCreateSchema.safeParse({
+    date: '2026-08-02T08:00:00.000Z',
+    lieu: 'Stade municipal',
+    competitionType: 'MATCH',
+    opponentName: 'FC Montfermeil',
+  })
+
+  assert.equal(parsed.success, true)
+  if (!parsed.success) return
+  assert.equal(parsed.data.opponentName, 'FC Montfermeil')
 })
 
 test('public matchday shape includes new metadata fields', () => {

@@ -16,6 +16,21 @@ export const matchdayMetadataSchema = z.object({
   tournamentKnockoutMode: z.enum(['NONE', 'SINGLE', 'HOME_AWAY']).nullable().optional(),
 })
 
+export const matchdayCreateSchema = z.object({
+  date: z.union([z.string(), z.date()]),
+  lieu: z.string().trim().min(1),
+  teamId: z.string().trim().min(1).optional(),
+  opponentName: z.string().trim().min(1).max(100).optional(),
+}).merge(matchdayMetadataSchema).superRefine((value, ctx) => {
+  if (value.competitionType === 'MATCH' && !value.opponentName?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['opponentName'],
+      message: 'opponentName is required when competitionType is MATCH',
+    })
+  }
+})
+
 export function buildMatchdayMetadataPatch(data: z.infer<typeof matchdayMetadataSchema>) {
   const patch: {
     address?: string | null
