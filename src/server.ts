@@ -1516,13 +1516,14 @@ async function matchFindUniqueCompat(db: any, args: any): Promise<any> {
 
 async function matchCreateForUser(db: any, scopeOrUserId: any, data: any) {
   const auth = normalizeScopeInput(scopeOrUserId)
-  const { plateauId, ...rest } = data
+  const { plateauId, seasonId, ...rest } = data
   const normalizedRest = Object.prototype.hasOwnProperty.call(rest, 'tactic')
     ? { ...rest, tactic: toPrismaNullableJsonValue(rest.tactic) }
     : rest
   return db.match.create({
     data: {
       ...normalizedRest,
+      ...(seasonId ? { season: { connect: { id: seasonId } } } : {}),
       ...(plateauId ? { plateau: { connect: { id: plateauId } } } : {}),
       ...(auth?.id ? { user: { connect: { id: auth.id } } } : {}),
       ...(auth?.clubId ? { clubId: auth.clubId } : {}),
@@ -8453,7 +8454,9 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
           : { disconnect: true }
       }
       matchPatch.date = nextDate
-      matchPatch.seasonId = nextSeasonId
+      matchPatch.season = nextSeasonId
+        ? { connect: { id: nextSeasonId } }
+        : { disconnect: true }
       if (payload.rotationGameKey !== undefined) {
         const currentRotationGameKey = typeof (existing as any).rotationGameKey === 'string'
           ? (existing as any).rotationGameKey.trim()

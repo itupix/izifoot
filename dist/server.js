@@ -1366,13 +1366,14 @@ async function matchFindUniqueCompat(db, args) {
 }
 async function matchCreateForUser(db, scopeOrUserId, data) {
     const auth = normalizeScopeInput(scopeOrUserId);
-    const { plateauId, ...rest } = data;
+    const { plateauId, seasonId, ...rest } = data;
     const normalizedRest = Object.prototype.hasOwnProperty.call(rest, 'tactic')
         ? { ...rest, tactic: (0, prisma_json_1.toPrismaNullableJsonValue)(rest.tactic) }
         : rest;
     return db.match.create({
         data: {
             ...normalizedRest,
+            ...(seasonId ? { season: { connect: { id: seasonId } } } : {}),
             ...(plateauId ? { plateau: { connect: { id: plateauId } } } : {}),
             ...(auth?.id ? { user: { connect: { id: auth.id } } } : {}),
             ...(auth?.clubId ? { clubId: auth.clubId } : {}),
@@ -8041,7 +8042,9 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                     : { disconnect: true };
             }
             matchPatch.date = nextDate;
-            matchPatch.seasonId = nextSeasonId;
+            matchPatch.season = nextSeasonId
+                ? { connect: { id: nextSeasonId } }
+                : { disconnect: true };
             if (payload.rotationGameKey !== undefined) {
                 const currentRotationGameKey = typeof existing.rotationGameKey === 'string'
                     ? existing.rotationGameKey.trim()
