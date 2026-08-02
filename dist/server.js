@@ -624,6 +624,47 @@ function withTeamFormatAliases(team) {
         game_format: resolvedFormat.format,
     };
 }
+function resolveOptionalTeamFormat(rawFormat) {
+    if (typeof rawFormat !== 'string')
+        return null;
+    const parsed = (0, team_format_1.normalizeTeamFormat)(rawFormat);
+    return parsed.ok ? parsed.format : null;
+}
+function withMatchTeamFormatAliases(match, teamFormat) {
+    return {
+        ...match,
+        teamId: match.teamId ?? null,
+        teamFormat,
+        gameFormat: teamFormat,
+        game_format: teamFormat,
+    };
+}
+async function loadMatchTeamFormatById(db, teamId) {
+    if (!teamId)
+        return null;
+    const team = await db.team.findUnique({
+        where: { id: teamId },
+        select: { format: true },
+    });
+    return resolveOptionalTeamFormat(team?.format);
+}
+async function loadMatchTeamFormatLookup(db, teamIds) {
+    const ids = Array.from(new Set(teamIds
+        .filter((teamId) => typeof teamId === 'string')
+        .map((teamId) => teamId.trim())
+        .filter(Boolean)));
+    if (ids.length === 0)
+        return new Map();
+    const teams = await db.team.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, format: true },
+    });
+    const byId = new Map();
+    for (const team of teams) {
+        byId.set(team.id, resolveOptionalTeamFormat(team.format));
+    }
+    return byId;
+}
 function logTeamValidationFailure(endpoint, reason, details = {}) {
     console.warn(`[${endpoint}] team validation failed: ${reason}`, details);
 }
@@ -7165,12 +7206,14 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
             byTeam[row.matchTeamId].push(row);
         }
         const matchesRawWithContractKeys = (0, matchday_contract_1.ensureRotationGameKeysForContract)(matchesRaw, mode === 'ROTATION');
+        const teamFormatById = await loadMatchTeamFormatLookup(prisma, matchesRawWithContractKeys.map((match) => match.teamId));
         // Build enriched matches with teams[].players including player info
         const matches = matchesRawWithContractKeys.map((m) => {
             const status = (0, match_status_1.resolveMatchStatus)({ status: m.status, played: Boolean(m.played) });
             const { plateauId, season, ...rest } = m;
-            return {
+            return withMatchTeamFormatAliases({
                 ...rest,
+                teamId: m.teamId ?? null,
                 date: m.date ?? m.createdAt,
                 matchdayId: plateauId ?? null,
                 seasonId: m.seasonId ?? season?.id ?? null,
@@ -7186,7 +7229,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
                         player: p.player
                     }))
                 }))
-            };
+            }, teamFormatById.get(m.teamId ?? '') ?? null);
         });
         // Hydrate playersById from match teams and build convocations
         const convocatedMap = {};
@@ -7540,6 +7583,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
     });
     if (!match)
         return null;
+    const teamFormat = await loadMatchTeamFormatById(db, match.teamId);
     let eligiblePlayerIds = null;
     if (match.plateauId) {
         const attendanceRows = await attendanceFindManyForUser(db, scopeOrUserId, {
@@ -7611,9 +7655,10 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
     }));
     const events = await listMatchEventsByMatchId(db, id);
     const status = (0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) });
-    return {
+    return withMatchTeamFormatAliases({
         id: match.id,
         createdAt: match.createdAt,
+        teamId: match.teamId ?? null,
         date: match.date ?? match.createdAt,
         type: match.type,
         status,
@@ -7628,7 +7673,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         scorers,
         events,
         playersById
-    };
+    }, teamFormat);
 }
 app.get('/matches', authMiddleware, async (req, res) => {
     const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 });
@@ -7645,6 +7690,7 @@ app.get('/matches', authMiddleware, async (req, res) => {
         take: pagination.take,
         skip: pagination.skip,
     });
+    const teamFormatById = await loadMatchTeamFormatLookup(prisma, matches.map((match) => match.teamId));
     let hasPlanningRotation = false;
     const hasPersistedRotationKey = matches.some((match) => typeof match.rotationGameKey === 'string' && match.rotationGameKey.trim().length > 0);
     if (matchdayId && !hasPersistedRotationKey) {
@@ -7666,8 +7712,9 @@ app.get('/matches', authMiddleware, async (req, res) => {
         items: matchesWithContractKeys.map((match) => {
             const status = (0, match_status_1.resolveMatchStatus)({ status: match.status, played: Boolean(match.played) });
             const { plateauId, season, ...rest } = match;
-            return {
+            return withMatchTeamFormatAliases({
                 ...rest,
+                teamId: match.teamId ?? null,
                 date: match.date ?? match.createdAt,
                 matchdayId: plateauId ?? null,
                 seasonId: match.seasonId ?? season?.id ?? null,
@@ -7676,7 +7723,7 @@ app.get('/matches', authMiddleware, async (req, res) => {
                 played: (0, match_status_1.derivePlayedFromStatus)(status),
                 tactic: match.tactic ?? null,
                 rotationGameKey: match.rotationGameKey ?? null,
-            };
+            }, teamFormatById.get(match.teamId ?? '') ?? null);
         }),
         pagination: { limit: pagination.limit, offset: pagination.offset, returned: matches.length }
     });

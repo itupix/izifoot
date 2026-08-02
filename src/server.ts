@@ -725,6 +725,52 @@ function withTeamFormatAliases(team: any) {
   }
 }
 
+function resolveOptionalTeamFormat(rawFormat: unknown): string | null {
+  if (typeof rawFormat !== 'string') return null
+  const parsed = normalizeTeamFormat(rawFormat)
+  return parsed.ok ? parsed.format : null
+}
+
+function withMatchTeamFormatAliases(match: any, teamFormat: string | null) {
+  return {
+    ...match,
+    teamId: match.teamId ?? null,
+    teamFormat,
+    gameFormat: teamFormat,
+    game_format: teamFormat,
+  }
+}
+
+async function loadMatchTeamFormatById(db: any, teamId: string | null | undefined) {
+  if (!teamId) return null
+  const team = await db.team.findUnique({
+    where: { id: teamId },
+    select: { format: true },
+  })
+  return resolveOptionalTeamFormat(team?.format)
+}
+
+async function loadMatchTeamFormatLookup(db: any, teamIds: Array<string | null | undefined>) {
+  const ids = Array.from(new Set(
+    teamIds
+      .filter((teamId): teamId is string => typeof teamId === 'string')
+      .map((teamId) => teamId.trim())
+      .filter(Boolean),
+  ))
+  if (ids.length === 0) return new Map<string, string | null>()
+
+  const teams = await db.team.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, format: true },
+  })
+
+  const byId = new Map<string, string | null>()
+  for (const team of teams) {
+    byId.set(team.id, resolveOptionalTeamFormat(team.format))
+  }
+  return byId
+}
+
 function logTeamValidationFailure(endpoint: string, reason: string, details: Record<string, unknown> = {}) {
   console.warn(`[${endpoint}] team validation failed: ${reason}`, details)
 }
@@ -7579,12 +7625,14 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
     }
 
     const matchesRawWithContractKeys = ensureRotationGameKeysForContract(matchesRaw, mode === 'ROTATION')
+    const teamFormatById = await loadMatchTeamFormatLookup(prisma, matchesRawWithContractKeys.map((match: any) => match.teamId))
     // Build enriched matches with teams[].players including player info
     const matches = matchesRawWithContractKeys.map((m: any) => {
       const status = resolveMatchStatus({ status: m.status, played: Boolean(m.played) })
       const { plateauId, season, ...rest } = m
-      return {
+      return withMatchTeamFormatAliases({
         ...rest,
+        teamId: m.teamId ?? null,
         date: m.date ?? m.createdAt,
         matchdayId: plateauId ?? null,
         seasonId: m.seasonId ?? season?.id ?? null,
@@ -7600,7 +7648,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
             player: p.player
           }))
         }))
-      }
+      }, teamFormatById.get(m.teamId ?? '') ?? null)
     })
 
     // Hydrate playersById from match teams and build convocations
@@ -7944,6 +7992,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     include: { teams: true, scorers: true, season: true }
   })
   if (!match) return null
+  const teamFormat = await loadMatchTeamFormatById(db, match.teamId)
 
   let eligiblePlayerIds: Set<string> | null = null
   if (match.plateauId) {
@@ -8020,9 +8069,10 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
   const events = await listMatchEventsByMatchId(db, id)
   const status = resolveMatchStatus({ status: (match as any).status, played: Boolean(match.played) })
 
-  return {
+  return withMatchTeamFormatAliases({
     id: match.id,
     createdAt: match.createdAt,
+    teamId: match.teamId ?? null,
     date: match.date ?? match.createdAt,
     type: match.type,
     status,
@@ -8037,7 +8087,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     scorers,
     events,
     playersById
-  }
+  }, teamFormat)
 }
 
 app.get('/matches', authMiddleware, async (req: any, res) => {
@@ -8055,6 +8105,7 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
     take: pagination.take,
     skip: pagination.skip,
   })
+  const teamFormatById = await loadMatchTeamFormatLookup(prisma, matches.map((match: any) => match.teamId))
   let hasPlanningRotation = false
   const hasPersistedRotationKey = matches.some((match: any) => typeof match.rotationGameKey === 'string' && match.rotationGameKey.trim().length > 0)
   if (matchdayId && !hasPersistedRotationKey) {
@@ -8076,8 +8127,9 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
     items: matchesWithContractKeys.map((match: any) => {
       const status = resolveMatchStatus({ status: match.status, played: Boolean(match.played) })
       const { plateauId, season, ...rest } = match
-      return {
+      return withMatchTeamFormatAliases({
         ...rest,
+        teamId: match.teamId ?? null,
         date: match.date ?? match.createdAt,
         matchdayId: plateauId ?? null,
         seasonId: match.seasonId ?? season?.id ?? null,
@@ -8086,7 +8138,7 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
         played: derivePlayedFromStatus(status),
         tactic: match.tactic ?? null,
         rotationGameKey: match.rotationGameKey ?? null,
-      }
+      }, teamFormatById.get(match.teamId ?? '') ?? null)
     }),
     pagination: { limit: pagination.limit, offset: pagination.offset, returned: matches.length }
   })
