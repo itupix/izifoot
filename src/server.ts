@@ -7723,15 +7723,16 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
       return { player: pl, status, present: status === 'present' }
     })
 
-    // Add scorersDetailed to each match, resolving playerName from playersById
-    const matchesEnriched = matches.map(m => ({
-      ...m,
-      scorersDetailed: m.scorers.map((s: any) => ({
-        ...s,
-        playerName: playersById[s.playerId]?.name || null,
-        assistName: s.assistId ? (playersById[s.assistId]?.name || null) : null
-      }))
-    }))
+    // Keep scorer names directly on `scorers` for native clients and expose the
+    // detailed alias for older consumers.
+    const matchesEnriched = matches.map(m => {
+      const scorersWithNames = withHistoricalScorerNames(m.scorers, playersById)
+      return {
+        ...m,
+        scorers: scorersWithNames,
+        scorersDetailed: scorersWithNames,
+      }
+    })
     const stats = {
       matchesTotal: matchesEnriched.length,
       matchesPlayed: countPlayedMatchesExcludingCancelled(matchesEnriched),
@@ -8020,6 +8021,23 @@ async function hydratePlayersByIdsForUser(
   for (const player of players) upsertPlayerSummary(target, player)
 }
 
+function withHistoricalScorerNames(
+  scorers: any[],
+  playersById: Record<string, { id: string; name: string }>
+) {
+  return scorers.map((scorer: any) => ({
+    ...scorer,
+    playerName: typeof scorer.playerName === 'string' && scorer.playerName.trim()
+      ? scorer.playerName.trim()
+      : (playersById[scorer.playerId]?.name || null),
+    assistName: scorer.assistId
+      ? (typeof scorer.assistName === 'string' && scorer.assistName.trim()
+        ? scorer.assistName.trim()
+        : (playersById[scorer.assistId]?.name || null))
+      : null,
+  }))
+}
+
 async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
   const match = await matchFindFirstForUser(db, scopeOrUserId, {
     where: { id },
@@ -8137,6 +8155,30 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
     take: pagination.take,
     skip: pagination.skip,
   })
+  const scorerPlayersById: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null; email?: string | null; phone?: string | null }> = {}
+  const allTeamIds = matches.flatMap((match: any) => (match.teams || []).map((team: any) => team.id))
+  const teamPlayers = allTeamIds.length ? await prisma.matchTeamPlayer.findMany({
+    where: { matchTeamId: { in: allTeamIds } },
+    select: {
+      player: {
+        select: {
+          id: true,
+          name: true,
+          primary_position: true,
+          secondary_position: true,
+          email: true,
+          phone: true,
+        },
+      },
+    },
+  }) : []
+  for (const row of teamPlayers) upsertPlayerSummary(scorerPlayersById, row.player)
+  await hydratePlayersByIdsForUser(
+    prisma,
+    req.auth,
+    scorerPlayersById,
+    matches.flatMap((match: any) => (match.scorers || []).flatMap((scorer: any) => [scorer.playerId, scorer.assistId ?? null]))
+  )
   const teamFormatById = await loadMatchTeamFormatLookup(prisma, matches.map((match: any) => match.teamId))
   let hasPlanningRotation = false
   const hasPersistedRotationKey = matches.some((match: any) => typeof match.rotationGameKey === 'string' && match.rotationGameKey.trim().length > 0)
@@ -8161,6 +8203,7 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
       const { plateauId, season, ...rest } = match
       return withMatchTeamFormatAliases({
         ...rest,
+        scorers: withHistoricalScorerNames(match.scorers || [], scorerPlayersById),
         teamId: match.teamId ?? null,
         date: match.date ?? match.createdAt,
         matchdayId: plateauId ?? null,
