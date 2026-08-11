@@ -73,6 +73,7 @@ Restrictions: must maintain scoped player-team constraints.
 - UI behavior: summary endpoint aggregates convocations and rotation context.
 - Actions: mutate matchday metadata, create/update/delete matches, add/remove events.
 - `POST /matchday` requires `opponentName` and `matchVenue` when `competitionType = MATCH`; `lieu` is required only when `matchVenue = AWAY`, and the route seeds the initial `Match` with empty teams and a `PLANNED` status.
+- Summary and match detail payloads preserve historical scorer and assist display names (`playerName`, `assistName`) even when the player has since changed team.
 - States: matchday active/deleted; match `PLANNED/PLAYED/CANCELLED`.
 - Conditions: write requires admin/coach scope.
 - Validations: match payload + event payload validation helpers.

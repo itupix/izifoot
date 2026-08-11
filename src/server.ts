@@ -7549,14 +7549,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
     const attendancePlayers = attendance.map(a => a.player).filter(Boolean) as any[]
     const playersById: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null; email?: string | null; phone?: string | null }> = {}
     for (const pl of attendancePlayers) {
-      playersById[pl.id] = {
-        id: pl.id,
-        name: pl.name,
-        primary_position: pl.primary_position ?? null,
-        secondary_position: pl.secondary_position ?? null,
-        email: (pl as any).email ?? null,
-        phone: (pl as any).phone ?? null
-      }
+      upsertPlayerSummary(playersById, pl)
     }
 
     // Matches for this matchday (with teams and scorers first)
@@ -7658,14 +7651,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
         for (const p of t.players) {
           const pl = p.player as any
           if (pl) {
-            playersById[pl.id] = playersById[pl.id] || {
-              id: pl.id,
-              name: pl.name,
-              primary_position: pl.primary_position ?? null,
-              secondary_position: pl.secondary_position ?? null,
-              email: (pl as any).email ?? null,
-              phone: (pl as any).phone ?? null
-            }
+            upsertPlayerSummary(playersById, pl)
             if (!convocatedMap[pl.id]) convocatedMap[pl.id] = playersById[pl.id]
           }
         }
@@ -7705,6 +7691,13 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
         console.warn('[summary] failed to include full players list', (e as any)?.message || e)
       }
     }
+
+    await hydratePlayersByIdsForUser(
+      prisma,
+      req.auth,
+      playersById,
+      matches.flatMap((match: any) => match.scorers.flatMap((scorer: any) => [scorer.playerId, scorer.assistId ?? null]))
+    )
 
     // Mark presence/absence and convocation using attendance
     const attendanceMap = new Map<string, boolean | null>()
@@ -7986,6 +7979,47 @@ async function assertPlayerIdsInMatchTeams(db: any, matchId: string, playerIds: 
   throw err
 }
 
+function upsertPlayerSummary(
+  target: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null; email?: string | null; phone?: string | null }>,
+  player: any
+) {
+  if (!player?.id) return
+  target[player.id] = target[player.id] || {
+    id: player.id,
+    name: player.name,
+    primary_position: player.primary_position ?? null,
+    secondary_position: player.secondary_position ?? null,
+    email: player.email ?? null,
+    phone: player.phone ?? null,
+  }
+}
+
+async function hydratePlayersByIdsForUser(
+  db: any,
+  scopeOrUserId: any,
+  target: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null; email?: string | null; phone?: string | null }>,
+  playerIds: Array<string | null | undefined>
+) {
+  const missingIds = Array.from(new Set(
+    playerIds.filter((playerId): playerId is string => typeof playerId === 'string' && playerId.trim().length > 0)
+  )).filter((playerId) => !target[playerId])
+  if (!missingIds.length) return
+
+  const players = await playerFindManyForUser(db, scopeOrUserId, {
+    where: { id: { in: missingIds } },
+    select: {
+      id: true,
+      name: true,
+      primary_position: true,
+      secondary_position: true,
+      email: true,
+      phone: true,
+    },
+  })
+
+  for (const player of players) upsertPlayerSummary(target, player)
+}
+
 async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
   const match = await matchFindFirstForUser(db, scopeOrUserId, {
     where: { id },
@@ -8025,12 +8059,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
   for (const row of teamPlayers) {
     const pl = row.player
     if (!pl) continue
-    allPlayersById[pl.id] = allPlayersById[pl.id] || {
-      id: pl.id,
-      name: pl.name,
-      primary_position: pl.primary_position ?? null,
-      secondary_position: pl.secondary_position ?? null
-    }
+    upsertPlayerSummary(allPlayersById, pl)
   }
 
   const playersById: Record<string, { id: string; name: string; primary_position: string | null; secondary_position: string | null }> = {}
@@ -8043,12 +8072,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     }).map((row: any) => {
       const pl = row.player
       if (pl) {
-        playersById[pl.id] = playersById[pl.id] || {
-          id: pl.id,
-          name: pl.name,
-          primary_position: pl.primary_position ?? null,
-          secondary_position: pl.secondary_position ?? null
-        }
+        upsertPlayerSummary(playersById, pl)
       }
       return {
         playerId: row.playerId,
@@ -8057,6 +8081,14 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
       }
     })
   }))
+
+  const scorerRelatedPlayerIds = (match.scorers || []).flatMap((scorer: any) => [scorer.playerId, scorer.assistId ?? null])
+  await hydratePlayersByIdsForUser(db, scopeOrUserId, allPlayersById, scorerRelatedPlayerIds)
+  for (const playerId of scorerRelatedPlayerIds) {
+    if (typeof playerId === 'string' && allPlayersById[playerId] && !playersById[playerId]) {
+      playersById[playerId] = allPlayersById[playerId]
+    }
+  }
 
   const scorers = (match.scorers || []).map((s: any) => ({
     id: s.id,
