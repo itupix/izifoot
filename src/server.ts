@@ -86,6 +86,7 @@ import {
   normalizeRotationForContract,
 } from './matchday-contract'
 import { toDrillDescriptionHtml, withDrillDescriptionHtml } from './drill-description'
+import { DRILL_CATEGORIES, drillCategorySchema, drillCreateSchema, drillUpdateSchema, trainingDrillCreateSchema, trainingDrillUpdateSchema } from './drill-contract'
 import {
   buildMobileAuthAppCallbackUrl,
   buildMobileAuthCallbackUrl,
@@ -2362,9 +2363,7 @@ function inferAgeBandFromTeamName(teamName: string | null | undefined) {
 
 const aiGeneratedDrillSchema = z.object({
   t: z.string().min(1).max(100),
-  c: z.string().min(1).max(500),
-  m: z.number().int().min(6).max(40),
-  p: z.string().min(1).max(500),
+  c: drillCategorySchema,
   s: z.string().min(1).max(2000),
   g: z.array(z.string().min(1).max(64)).max(8),
   a: z.object({
@@ -2397,17 +2396,6 @@ function readFirstString(...values: any[]) {
     if (typeof value === 'string' && value.trim()) return value.trim()
   }
   return ''
-}
-
-function readFirstInt(...values: any[]) {
-  for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
-    if (typeof value === 'string' && value.trim()) {
-      const n = Number(value)
-      if (Number.isFinite(n)) return Math.trunc(n)
-    }
-  }
-  return 0
 }
 
 function readTags(value: any) {
@@ -2555,9 +2543,7 @@ function normalizeAiDrillValue(
   ctx: { ageBand: string, objective: string }
 ) {
   const title = value.t.trim().slice(0, 100)
-  const category = value.c.trim().slice(0, 50)
-  const duration = Math.max(6, Math.min(40, Math.trunc(value.m)))
-  const players = value.p.trim().slice(0, 50)
+  const category = value.c
   const description = buildDetailedDescription(value.s, title, ctx.ageBand, ctx.objective).slice(0, 1200)
   const tags = Array.from(
     new Set(
@@ -2617,8 +2603,6 @@ function normalizeAiDrillValue(
   return {
     title,
     category,
-    duration,
-    players,
     description: formattedDescription,
     descriptionHtml,
     tags,
@@ -2641,8 +2625,6 @@ function coerceOpenAiBundle(raw: any) {
   const mapped = list.slice(0, 5).map((item: any) => ({
     t: readFirstString(item?.t, item?.title, item?.name),
     c: readFirstString(item?.c, item?.category, item?.theme, item?.type),
-    m: readFirstInt(item?.m, item?.minutes, item?.duration),
-    p: readFirstString(item?.p, item?.players, item?.group, item?.format),
     s: readFirstString(item?.s, item?.description, item?.consigne, item?.instructions),
     g: readTags(item?.g ?? item?.tags ?? item?.keywords),
     a: {
@@ -2932,11 +2914,11 @@ async function generateDrillsWithOpenAI(
   const teamName = params.teamName.trim()
   const includeVisualPlan = !!opts.includeVisualPlan
   const systemFormat = includeVisualPlan
-    ? 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":[""],"v":{"c":[[20,30],[80,50],[45,80]],"f":[{"p1":[10,70],"p2":[30,80],"b":[10,70]}]},"k":{"f":[{"a":"PASS","t":[30,60]},{"a":"DRIBBLE","t":[60,45]},{"a":"FINISH","t":[85,35]}]},"a":{"p":[[0,0],[100,100]],"s":[[0,0],[100,100]],"c":[[20,30],[80,60],[40,80]]}}]} avec exactement 5 exercices.'
-    : 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":[""]}]} avec exactement 5 exercices.'
+    ? 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","s":"","g":[""],"v":{"c":[[20,30],[80,50],[45,80]],"f":[{"p1":[10,70],"p2":[30,80],"b":[10,70]}]},"k":{"f":[{"a":"PASS","t":[30,60]},{"a":"DRIBBLE","t":[60,45]},{"a":"FINISH","t":[85,35]}]},"a":{"p":[[0,0],[100,100]],"s":[[0,0],[100,100]],"c":[[20,30],[80,60],[40,80]]}}]} avec exactement 5 exercices.'
+    : 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","s":"","g":[""]}]} avec exactement 5 exercices.'
   const userConstraints = includeVisualPlan
-    ? `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères; k obligatoire: 3 à 5 phases ordonnées (a+t) cohérentes avec la description; v obligatoire: 10 frames (f) avec p1/p2/b en 0..100 + 2-3 cônes (c); les 5 exercices doivent avoir des schémas visuels nettement différents (zones, trajectoires et orientation).`
-    : `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères.`
+    ? `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; c parmi collectif, technique, jeu, autres; ne pas attribuer de durée ni de nombre de joueurs; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères; k obligatoire: 3 à 5 phases ordonnées (a+t) cohérentes avec la description; v obligatoire: 10 frames (f) avec p1/p2/b en 0..100 + 2-3 cônes (c); les 5 exercices doivent avoir des schémas visuels nettement différents (zones, trajectoires et orientation).`
+    : `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; c parmi collectif, technique, jeu, autres; ne pas attribuer de durée ni de nombre de joueurs; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères.`
   const input = [
     {
       role: 'system',
@@ -5423,6 +5405,9 @@ app.get('/drills', authMiddleware, async (req: any, res) => {
       ],
     })
   }
+  if (cat && !drillCategorySchema.safeParse(cat).success) {
+    return res.status(400).json({ error: 'Invalid drill category' })
+  }
   if (cat) and.push({ category: { equals: cat, mode: 'insensitive' } })
   if (tag) and.push({ tags: { has: tag } })
   if (and.length > 0) where.AND = and
@@ -5441,7 +5426,7 @@ app.get('/drills', authMiddleware, async (req: any, res) => {
 
   res.json({
     items: renderedItems,
-    categories: Array.from(new Set(renderedCatalog.map(d => d.category))).sort(),
+    categories: DRILL_CATEGORIES,
     tags: Array.from(new Set(renderedCatalog.flatMap(d => d.tags))).sort(),
     pagination: { limit: pagination.limit, offset: pagination.offset, returned: renderedItems.length }
   })
@@ -5458,22 +5443,13 @@ app.put('/drills/:id', authMiddleware, async (req: any, res) => {
   const existing = await drillFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
   if (!existing) return res.status(404).json({ error: 'Not found' })
 
-  const schema = z.object({
-    title: z.string().min(1).max(100).optional(),
-    category: z.string().min(1).max(50).optional(),
-    duration: z.coerce.number().int().min(1).max(180).optional(),
-    players: z.string().min(1).max(50).optional(),
-    description: z.string().min(1).max(2000).optional(),
-    tags: z.array(z.string().min(1).max(32)).max(20).optional()
-  })
+  const schema = drillUpdateSchema
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
 
   const patch: any = {}
   if (parsed.data.title !== undefined) patch.title = parsed.data.title
   if (parsed.data.category !== undefined) patch.category = parsed.data.category
-  if (parsed.data.duration !== undefined) patch.duration = parsed.data.duration
-  if (parsed.data.players !== undefined) patch.players = parsed.data.players
   if (parsed.data.description !== undefined) patch.description = parsed.data.description
   if (parsed.data.tags !== undefined) patch.tags = parsed.data.tags
 
@@ -5507,14 +5483,7 @@ app.delete('/drills/:id', authMiddleware, async (req: any, res) => {
 
 app.post('/drills', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
-  const schema = z.object({
-    title: z.string().min(1).max(100),
-    category: z.string().min(1).max(50),
-    duration: z.coerce.number().int().min(1).max(180),
-    players: z.string().min(1).max(50),
-    description: z.string().min(1).max(2000),
-    tags: z.array(z.string().min(1).max(32)).max(20).optional()
-  })
+  const schema = drillCreateSchema
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   let team: any
@@ -5533,8 +5502,6 @@ app.post('/drills', authMiddleware, async (req: any, res) => {
       teamId: team.id,
       title: parsed.data.title,
       category: parsed.data.category,
-      duration: parsed.data.duration,
-      players: parsed.data.players,
       description: parsed.data.description,
       tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
     })
@@ -8835,8 +8802,6 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
   let generated: Array<{
     title: string,
     category: string,
-    duration: number,
-    players: string,
     description: string,
     descriptionHtml: string,
     tags: string[],
@@ -8902,8 +8867,6 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
         teamId: training.teamId,
         title: item.title,
         category: item.category,
-        duration: item.duration,
-        players: item.players,
         description: item.description,
         tags: item.tags,
       })
@@ -8911,7 +8874,6 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
       const trainingDrill = await trainingDrillCreateForUser(tx, req.auth, {
         trainingId,
         drillId: drill.id,
-        duration: item.duration,
         notes: null,
         order: nextOrder++,
       })
@@ -8964,14 +8926,7 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   const trainingId = req.params.id
   const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: trainingId } })
   if (!training) return res.status(404).json({ error: 'Training not found' })
-  const schema = z.object({
-    drillId: z.string().min(1),
-    duration: z.number().int().min(1).max(120).optional(),
-    notes: z.string().max(1000).optional(),
-    trainingDrillId: z.string().min(1).optional(),
-    replaceTrainingDrillId: z.string().min(1).optional(),
-    id: z.string().min(1).optional()
-  })
+  const schema = trainingDrillCreateSchema
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   const drill = await drillFindFirstForUser(prisma, req.auth, { where: { id: parsed.data.drillId } })
@@ -8989,7 +8944,6 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
       where: { id: existing.id },
       data: {
         drillId: parsed.data.drillId,
-        ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration } : {}),
         ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
       }
     })
@@ -9005,32 +8959,20 @@ app.post('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
     const nextOrder = existingRows.reduce((max: number, currentRow: any) => Math.max(max, currentRow.order ?? -1), -1) + 1
 
     return trainingDrillCreateForUser(tx, req.auth, {
-      trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder
+      trainingId, drillId: parsed.data.drillId, notes: parsed.data.notes, order: nextOrder
     })
   })
   const meta = drill
   res.json({ ...row, meta })
 })
 
-// Modifier (notes/duration/order)
+// Modifier (notes/order)
 app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: any, res) => {
   const trainingId = req.params.id
   const trainingDrillId = req.params.trainingDrillId
   const existing = await resolveTrainingDrillForRouteRef(prisma, req.auth, trainingId, trainingDrillId)
   if (!existing) return res.status(404).json({ error: 'Not found' })
-  const schema = z.object({
-    drillId: z.string().min(1).optional(),
-    duration: z.number().int().min(1).max(120).nullable().optional(),
-    notes: z.string().max(1000).nullable().optional(),
-    order: z.number().int().min(0).optional()
-  }).refine((data) => (
-    data.drillId !== undefined ||
-    data.duration !== undefined ||
-    data.notes !== undefined ||
-    data.order !== undefined
-  ), {
-    message: 'At least one field must be provided',
-  })
+  const schema = trainingDrillUpdateSchema
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
   if (parsed.data.drillId !== undefined) {
@@ -9041,7 +8983,6 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req: an
   try {
     const updateData = {
       ...(parsed.data.drillId !== undefined ? { drillId: parsed.data.drillId } : {}),
-      ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration ?? null } : {}),
       ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes ?? null } : {}),
     }
 

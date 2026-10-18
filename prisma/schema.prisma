@@ -449,7 +449,6 @@ model TrainingDrill {
   trainingId String
   drillId    String // id d'un drill du catalogue (seed ou personnalisé)
   order      Int      @default(0)
-  duration   Int? // override (minutes) pour cette séance
   notes      String?
 
   @@index([trainingId])
@@ -483,9 +482,7 @@ model Drill {
   clubId      String?
   teamId      String
   title       String
-  category    String
-  duration    Int
-  players     String
+  category    String   @default("autres")
   description String
   tags        String[] @default([])
   createdAt   DateTime @default(now())

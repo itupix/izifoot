@@ -45,6 +45,7 @@ const coach_management_1 = require("./coach-management");
 const coach_invite_list_1 = require("./coach-invite-list");
 const matchday_contract_1 = require("./matchday-contract");
 const drill_description_1 = require("./drill-description");
+const drill_contract_1 = require("./drill-contract");
 const mobile_auth_1 = require("./mobile-auth");
 const season_1 = require("./season");
 const app = (0, express_1.default)();
@@ -2174,9 +2175,7 @@ function inferAgeBandFromTeamName(teamName) {
 }
 const aiGeneratedDrillSchema = zod_1.z.object({
     t: zod_1.z.string().min(1).max(100),
-    c: zod_1.z.string().min(1).max(500),
-    m: zod_1.z.number().int().min(6).max(40),
-    p: zod_1.z.string().min(1).max(500),
+    c: drill_contract_1.drillCategorySchema,
     s: zod_1.z.string().min(1).max(2000),
     g: zod_1.z.array(zod_1.z.string().min(1).max(64)).max(8),
     a: zod_1.z.object({
@@ -2208,18 +2207,6 @@ function readFirstString(...values) {
             return value.trim();
     }
     return '';
-}
-function readFirstInt(...values) {
-    for (const value of values) {
-        if (typeof value === 'number' && Number.isFinite(value))
-            return Math.trunc(value);
-        if (typeof value === 'string' && value.trim()) {
-            const n = Number(value);
-            if (Number.isFinite(n))
-                return Math.trunc(n);
-        }
-    }
-    return 0;
 }
 function readTags(value) {
     if (!Array.isArray(value))
@@ -2357,9 +2344,7 @@ function formatDrillDescription(raw) {
 }
 function normalizeAiDrillValue(value, ctx) {
     const title = value.t.trim().slice(0, 100);
-    const category = value.c.trim().slice(0, 50);
-    const duration = Math.max(6, Math.min(40, Math.trunc(value.m)));
-    const players = value.p.trim().slice(0, 50);
+    const category = value.c;
     const description = buildDetailedDescription(value.s, title, ctx.ageBand, ctx.objective).slice(0, 1200);
     const tags = Array.from(new Set(value.g
         .map((tag) => tag.trim().toLowerCase().slice(0, 24))
@@ -2417,8 +2402,6 @@ function normalizeAiDrillValue(value, ctx) {
     return {
         title,
         category,
-        duration,
-        players,
         description: formattedDescription,
         descriptionHtml,
         tags,
@@ -2438,8 +2421,6 @@ function coerceOpenAiBundle(raw) {
     const mapped = list.slice(0, 5).map((item) => ({
         t: readFirstString(item?.t, item?.title, item?.name),
         c: readFirstString(item?.c, item?.category, item?.theme, item?.type),
-        m: readFirstInt(item?.m, item?.minutes, item?.duration),
-        p: readFirstString(item?.p, item?.players, item?.group, item?.format),
         s: readFirstString(item?.s, item?.description, item?.consigne, item?.instructions),
         g: readTags(item?.g ?? item?.tags ?? item?.keywords),
         a: {
@@ -2704,11 +2685,11 @@ async function generateDrillsWithOpenAI(params, opts = {}) {
     const teamName = params.teamName.trim();
     const includeVisualPlan = !!opts.includeVisualPlan;
     const systemFormat = includeVisualPlan
-        ? 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":[""],"v":{"c":[[20,30],[80,50],[45,80]],"f":[{"p1":[10,70],"p2":[30,80],"b":[10,70]}]},"k":{"f":[{"a":"PASS","t":[30,60]},{"a":"DRIBBLE","t":[60,45]},{"a":"FINISH","t":[85,35]}]},"a":{"p":[[0,0],[100,100]],"s":[[0,0],[100,100]],"c":[[20,30],[80,60],[40,80]]}}]} avec exactement 5 exercices.'
-        : 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","m":0,"p":"","s":"","g":[""]}]} avec exactement 5 exercices.';
+        ? 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","s":"","g":[""],"v":{"c":[[20,30],[80,50],[45,80]],"f":[{"p1":[10,70],"p2":[30,80],"b":[10,70]}]},"k":{"f":[{"a":"PASS","t":[30,60]},{"a":"DRIBBLE","t":[60,45]},{"a":"FINISH","t":[85,35]}]},"a":{"p":[[0,0],[100,100]],"s":[[0,0],[100,100]],"c":[[20,30],[80,60],[40,80]]}}]} avec exactement 5 exercices.'
+        : 'Tu es un coach football jeunes. Réponds uniquement en JSON compact valide sans markdown. Format strict: {"d":[{"t":"","c":"","s":"","g":[""]}]} avec exactement 5 exercices.';
     const userConstraints = includeVisualPlan
-        ? `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères; k obligatoire: 3 à 5 phases ordonnées (a+t) cohérentes avec la description; v obligatoire: 10 frames (f) avec p1/p2/b en 0..100 + 2-3 cônes (c); les 5 exercices doivent avoir des schémas visuels nettement différents (zones, trajectoires et orientation).`
-        : `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; m en minutes entières; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères.`;
+        ? `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; c parmi collectif, technique, jeu, autres; ne pas attribuer de durée ni de nombre de joueurs; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères; k obligatoire: 3 à 5 phases ordonnées (a+t) cohérentes avec la description; v obligatoire: 10 frames (f) avec p1/p2/b en 0..100 + 2-3 cônes (c); les 5 exercices doivent avoir des schémas visuels nettement différents (zones, trajectoires et orientation).`
+        : `Objectif:${objective}\nAge:${ageBand}\nEquipe:${teamName}\nContraintes: français; adaptés à l'âge; progression simple->complexe; sécurité; pas de doublons; c parmi collectif, technique, jeu, autres; ne pas attribuer de durée ni de nombre de joueurs; g max 3 tags courts; s très détaillée et opérationnelle (organisation, consignes, déroulé, variables, vigilance), entre 420 et 1000 caractères.`;
     const input = [
         {
             role: 'system',
@@ -5067,6 +5048,9 @@ app.get('/drills', authMiddleware, async (req, res) => {
             ],
         });
     }
+    if (cat && !drill_contract_1.drillCategorySchema.safeParse(cat).success) {
+        return res.status(400).json({ error: 'Invalid drill category' });
+    }
     if (cat)
         and.push({ category: { equals: cat, mode: 'insensitive' } });
     if (tag)
@@ -5086,7 +5070,7 @@ app.get('/drills', authMiddleware, async (req, res) => {
     const renderedCatalog = catalog.map((d) => (0, drill_description_1.withDrillDescriptionHtml)(d));
     res.json({
         items: renderedItems,
-        categories: Array.from(new Set(renderedCatalog.map(d => d.category))).sort(),
+        categories: drill_contract_1.DRILL_CATEGORIES,
         tags: Array.from(new Set(renderedCatalog.flatMap(d => d.tags))).sort(),
         pagination: { limit: pagination.limit, offset: pagination.offset, returned: renderedItems.length }
     });
@@ -5103,14 +5087,7 @@ app.put('/drills/:id', authMiddleware, async (req, res) => {
     const existing = await drillFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
     if (!existing)
         return res.status(404).json({ error: 'Not found' });
-    const schema = zod_1.z.object({
-        title: zod_1.z.string().min(1).max(100).optional(),
-        category: zod_1.z.string().min(1).max(50).optional(),
-        duration: zod_1.z.coerce.number().int().min(1).max(180).optional(),
-        players: zod_1.z.string().min(1).max(50).optional(),
-        description: zod_1.z.string().min(1).max(2000).optional(),
-        tags: zod_1.z.array(zod_1.z.string().min(1).max(32)).max(20).optional()
-    });
+    const schema = drill_contract_1.drillUpdateSchema;
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
@@ -5119,10 +5096,6 @@ app.put('/drills/:id', authMiddleware, async (req, res) => {
         patch.title = parsed.data.title;
     if (parsed.data.category !== undefined)
         patch.category = parsed.data.category;
-    if (parsed.data.duration !== undefined)
-        patch.duration = parsed.data.duration;
-    if (parsed.data.players !== undefined)
-        patch.players = parsed.data.players;
     if (parsed.data.description !== undefined)
         patch.description = parsed.data.description;
     if (parsed.data.tags !== undefined)
@@ -5154,14 +5127,7 @@ app.delete('/drills/:id', authMiddleware, async (req, res) => {
 app.post('/drills', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
-    const schema = zod_1.z.object({
-        title: zod_1.z.string().min(1).max(100),
-        category: zod_1.z.string().min(1).max(50),
-        duration: zod_1.z.coerce.number().int().min(1).max(180),
-        players: zod_1.z.string().min(1).max(50),
-        description: zod_1.z.string().min(1).max(2000),
-        tags: zod_1.z.array(zod_1.z.string().min(1).max(32)).max(20).optional()
-    });
+    const schema = drill_contract_1.drillCreateSchema;
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
@@ -5180,8 +5146,6 @@ app.post('/drills', authMiddleware, async (req, res) => {
             teamId: team.id,
             title: parsed.data.title,
             category: parsed.data.category,
-            duration: parsed.data.duration,
-            players: parsed.data.players,
             description: parsed.data.description,
             tags: (parsed.data.tags && parsed.data.tags.length) ? parsed.data.tags : []
         });
@@ -8399,15 +8363,12 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req, res) =
                 teamId: training.teamId,
                 title: item.title,
                 category: item.category,
-                duration: item.duration,
-                players: item.players,
                 description: item.description,
                 tags: item.tags,
             });
             const trainingDrill = await trainingDrillCreateForUser(tx, req.auth, {
                 trainingId,
                 drillId: drill.id,
-                duration: item.duration,
                 notes: null,
                 order: nextOrder++,
             });
@@ -8457,14 +8418,7 @@ app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: trainingId } });
     if (!training)
         return res.status(404).json({ error: 'Training not found' });
-    const schema = zod_1.z.object({
-        drillId: zod_1.z.string().min(1),
-        duration: zod_1.z.number().int().min(1).max(120).optional(),
-        notes: zod_1.z.string().max(1000).optional(),
-        trainingDrillId: zod_1.z.string().min(1).optional(),
-        replaceTrainingDrillId: zod_1.z.string().min(1).optional(),
-        id: zod_1.z.string().min(1).optional()
-    });
+    const schema = drill_contract_1.trainingDrillCreateSchema;
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
@@ -8482,7 +8436,6 @@ app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
             where: { id: existing.id },
             data: {
                 drillId: parsed.data.drillId,
-                ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration } : {}),
                 ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
             }
         });
@@ -8496,30 +8449,20 @@ app.post('/trainings/:id/drills', authMiddleware, async (req, res) => {
         });
         const nextOrder = existingRows.reduce((max, currentRow) => Math.max(max, currentRow.order ?? -1), -1) + 1;
         return trainingDrillCreateForUser(tx, req.auth, {
-            trainingId, drillId: parsed.data.drillId, duration: parsed.data.duration, notes: parsed.data.notes, order: nextOrder
+            trainingId, drillId: parsed.data.drillId, notes: parsed.data.notes, order: nextOrder
         });
     });
     const meta = drill;
     res.json({ ...row, meta });
 });
-// Modifier (notes/duration/order)
+// Modifier (notes/order)
 app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
     const trainingDrillId = req.params.trainingDrillId;
     const existing = await resolveTrainingDrillForRouteRef(prisma, req.auth, trainingId, trainingDrillId);
     if (!existing)
         return res.status(404).json({ error: 'Not found' });
-    const schema = zod_1.z.object({
-        drillId: zod_1.z.string().min(1).optional(),
-        duration: zod_1.z.number().int().min(1).max(120).nullable().optional(),
-        notes: zod_1.z.string().max(1000).nullable().optional(),
-        order: zod_1.z.number().int().min(0).optional()
-    }).refine((data) => (data.drillId !== undefined ||
-        data.duration !== undefined ||
-        data.notes !== undefined ||
-        data.order !== undefined), {
-        message: 'At least one field must be provided',
-    });
+    const schema = drill_contract_1.trainingDrillUpdateSchema;
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: parsed.error.flatten() });
@@ -8531,7 +8474,6 @@ app.put('/trainings/:id/drills/:trainingDrillId', authMiddleware, async (req, re
     try {
         const updateData = {
             ...(parsed.data.drillId !== undefined ? { drillId: parsed.data.drillId } : {}),
-            ...(parsed.data.duration !== undefined ? { duration: parsed.data.duration ?? null } : {}),
             ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes ?? null } : {}),
         };
         const updated = await prisma.$transaction(async (tx) => {

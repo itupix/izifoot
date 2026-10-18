@@ -183,3 +183,7 @@ Constraints: team scoped.
 - `src/tactics.ts`
 - `src/match-tactic.ts`
 - `prisma/schema.prisma`
+
+## Exercise metadata simplification (18 October 2026)
+
+Exercises no longer expose duration or player-count metadata, including training overrides and AI generation. Categories are fixed to collectif, technique, jeu and autres. All existing exercises migrate to autres. See [the authoritative API contract](../contracts/drills.md) for requests, responses, compatibility and deployment.
