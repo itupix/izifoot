@@ -3,6 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+const training_summary_1 = require("./training-summary");
 require("dotenv/config");
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
@@ -6142,6 +6143,35 @@ app.get('/trainings/:id', authMiddleware, async (req, res) => {
     catch (e) {
         console.error('[GET /trainings/:id] failed', e);
         return res.status(500).json({ error: 'Failed to fetch training' });
+    }
+});
+app.get('/trainings/:id/summary.pdf', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    let timeZone;
+    try {
+        timeZone = (0, training_summary_1.summaryTimeZone)(req.query.timeZone);
+    }
+    catch {
+        return res.status(400).json({ error: 'Invalid time zone' });
+    }
+    try {
+        const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
+        if (!training)
+            return res.status(404).json({ error: 'Training not found' });
+        const summary = await (0, training_summary_1.loadTrainingSummary)(prisma, req.auth, training, {
+            attendance: attendanceFindManyForUser, drills: listTrainingDrillsInOrder, catalog: drillFindManyForUser,
+        });
+        const pdf = await (0, training_summary_1.renderTrainingSummary)(summary, timeZone);
+        const date = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(training.date));
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="resume-seance-${date}.pdf"`);
+        res.setHeader('Cache-Control', 'private, no-store');
+        return res.send(pdf);
+    }
+    catch (error) {
+        console.error('[GET /trainings/:id/summary.pdf] failed', error);
+        return res.status(500).json({ error: 'Failed to generate training summary' });
     }
 });
 app.get('/trainings/:id/intent', authMiddleware, async (req, res) => {
