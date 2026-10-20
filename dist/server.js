@@ -6280,6 +6280,7 @@ app.post('/trainings', authMiddleware, async (req, res) => {
     const schema = zod_1.z.object({
         date: zod_1.z.string().or(zod_1.z.date()),
         endTime: zod_1.z.union([zod_1.z.string().regex(matchday_metadata_1.HHMM_TIME_REGEX, 'Invalid time format, expected HH:MM'), zod_1.z.null()]).optional(),
+        observations: zod_1.z.string().nullable().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -6393,6 +6394,7 @@ app.post('/trainings', authMiddleware, async (req, res) => {
         endTime: Object.prototype.hasOwnProperty.call(parsed.data, 'endTime')
             ? (parsed.data.endTime ?? null)
             : (previousTraining?.endTime ?? null),
+        observations: parsed.data.observations ?? null,
         status: 'PLANNED',
         seasonId: (await resolveSeasonForClubId(prisma, team.clubId, dateWithDefaultSchedule))?.id ?? null,
         clubId: team.clubId,
@@ -6428,6 +6430,7 @@ app.put('/trainings/:id', authMiddleware, async (req, res) => {
         date: zod_1.z.string().or(zod_1.z.date()).optional(),
         status: zod_1.z.enum(['PLANNED', 'CANCELLED']).optional(),
         endTime: zod_1.z.union([zod_1.z.string().regex(matchday_metadata_1.HHMM_TIME_REGEX, 'Invalid time format, expected HH:MM'), zod_1.z.null()]).optional(),
+        observations: zod_1.z.string().nullable().optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success)
@@ -6437,6 +6440,8 @@ app.put('/trainings/:id', authMiddleware, async (req, res) => {
         data.date = new Date(parsed.data.date);
     if (parsed.data.status !== undefined)
         data.status = parsed.data.status;
+    if (parsed.data.observations !== undefined)
+        data.observations = parsed.data.observations;
     if (Object.prototype.hasOwnProperty.call(parsed.data, 'endTime'))
         data.endTime = parsed.data.endTime ?? null;
     try {

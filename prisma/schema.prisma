@@ -282,6 +282,7 @@ model Training {
   teamId                  String
   date                    DateTime
   endTime                 String?                  @map("end_time") @db.VarChar(5)
+  observations            String?                  @db.Text
   status                  String                   @default("PLANNED") // <= DOIT être là
   attendance              Attendance[]
   createdAt               DateTime                 @default(now())

@@ -6661,6 +6661,7 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
   const schema = z.object({
     date: z.string().or(z.date()),
     endTime: z.union([z.string().regex(HHMM_TIME_REGEX, 'Invalid time format, expected HH:MM'), z.null()]).optional(),
+    observations: z.string().nullable().optional(),
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
@@ -6782,6 +6783,7 @@ app.post('/trainings', authMiddleware, async (req: any, res) => {
     endTime: Object.prototype.hasOwnProperty.call(parsed.data, 'endTime')
       ? (parsed.data.endTime ?? null)
       : (previousTraining?.endTime ?? null),
+    observations: parsed.data.observations ?? null,
     status: 'PLANNED',
     seasonId: (await resolveSeasonForClubId(prisma, team.clubId, dateWithDefaultSchedule))?.id ?? null,
     clubId: team.clubId,
@@ -6820,6 +6822,7 @@ app.put('/trainings/:id', authMiddleware, async (req: any, res) => {
     date: z.string().or(z.date()).optional(),
     status: z.enum(['PLANNED', 'CANCELLED']).optional(),
     endTime: z.union([z.string().regex(HHMM_TIME_REGEX, 'Invalid time format, expected HH:MM'), z.null()]).optional(),
+    observations: z.string().nullable().optional(),
   })
   const parsed = schema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
@@ -6827,6 +6830,7 @@ app.put('/trainings/:id', authMiddleware, async (req: any, res) => {
   const data: any = {}
   if (parsed.data.date !== undefined) data.date = new Date(parsed.data.date as any)
   if (parsed.data.status !== undefined) data.status = parsed.data.status
+  if (parsed.data.observations !== undefined) data.observations = parsed.data.observations
   if (Object.prototype.hasOwnProperty.call(parsed.data, 'endTime')) data.endTime = parsed.data.endTime ?? null
 
   try {

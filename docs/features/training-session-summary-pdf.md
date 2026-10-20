@@ -21,3 +21,11 @@ Exercises are saved `TrainingDrill` attachments in existing `order ASC, id ASC` 
 ## Validation
 
 `npm test` covers timezone validation, actual attendance scoping/deduplication, exercise ordering/placeholders, rich description conversion and multipage rendering. Visual PDF review covers long exercises, lists, accents and empty/cancelled sessions.
+
+## Observations
+
+Training objects returned by `GET /trainings` (inside `items`), `GET /trainings/:id`, `POST /trainings` and `PUT /trainings/:id` include `observations: string | null`. Both write endpoints accept optional `observations` as a plain-text string or null. Omission on creation stores null; omission on update preserves the saved value. Null and empty strings clear the field. Whitespace and line breaks are preserved, with no additional character limit beyond the existing 1 MB JSON request limit. Invalid types produce the existing Zod `400 {error: ...}` response. Existing cookie/Bearer authentication, staff write permissions, and club/team scope apply unchanged.
+
+The PDF includes an **Observations** section after session information and before players/exercises. It displays the saved plain text, preserving internal line breaks and accents with automatic pagination; empty or whitespace-only values display `Aucune observation.`. Observations are visible under the existing session read permissions, so they are not a private staff note.
+
+Deploy migration `20261020100000_add_training_observations` before the updated server and regenerate the Prisma client. Existing sessions receive null.

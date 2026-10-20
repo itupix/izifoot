@@ -78,6 +78,8 @@ function renderTrainingSummary(summary, timeZone) {
         text(`Horaires : ${new Intl.DateTimeFormat('fr-FR', { timeZone, hour: '2-digit', minute: '2-digit' }).format(date)} - ${summary.endTime || 'Heure de fin non renseignée'}`);
         if (summary.status === 'CANCELLED')
             text('Statut : Annulée');
+        heading('Observations');
+        text(summary.observations?.trim() ? summary.observations : 'Aucune observation.');
         heading(`Joueurs présents (${summary.players.length})`);
         text(summary.players.length ? summary.players.join('\n') : 'Aucun joueur présent enregistré.');
         heading('Exercices de la séance');

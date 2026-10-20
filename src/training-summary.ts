@@ -64,6 +64,8 @@ export function renderTrainingSummary(summary: any, timeZone: string): Promise<B
     text(`Date : ${new Intl.DateTimeFormat('fr-FR', { timeZone, day: '2-digit', month: '2-digit', year: 'numeric' }).format(date)}`)
     text(`Horaires : ${new Intl.DateTimeFormat('fr-FR', { timeZone, hour: '2-digit', minute: '2-digit' }).format(date)} - ${summary.endTime || 'Heure de fin non renseignée'}`)
     if (summary.status === 'CANCELLED') text('Statut : Annulée')
+    heading('Observations')
+    text(summary.observations?.trim() ? summary.observations : 'Aucune observation.')
     heading(`Joueurs présents (${summary.players.length})`)
     text(summary.players.length ? summary.players.join('\n') : 'Aucun joueur présent enregistré.')
     heading('Exercices de la séance')

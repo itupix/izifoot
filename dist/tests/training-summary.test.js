@@ -16,7 +16,7 @@ const training_summary_1 = require("../training-summary");
     strict_1.default.equal((0, training_summary_1.descriptionText)('<p>Passes &amp; contrôle</p><ul><li>À deux</li><li>Tirer</li></ul><script>alert(1)</script>'), 'Passes & contrôle\n\n- À deux\n- Tirer');
 });
 (0, node_test_1.default)('uses actual attendance, deduplicates players, preserves drill ordering and missing items', async () => {
-    const training = { id: 't1', teamId: 'team1', clubId: 'club1' };
+    const training = { id: 't1', teamId: 'team1', clubId: 'club1', observations: 'À revoir <texte libre>\nDeuxième ligne' };
     const result = await (0, training_summary_1.loadTrainingSummary)({}, { id: 'u1' }, training, {
         attendance: async (_db, scope, args) => {
             strict_1.default.equal(scope.teamId, 'team1');
@@ -27,6 +27,7 @@ const training_summary_1 = require("../training-summary");
         drills: async () => [{ drillId: 'd2' }, { drillId: 'missing' }, { drillId: 'd1' }],
         catalog: async () => [{ id: 'd1', title: 'Premier catalogue', description: 'Un' }, { id: 'd2', title: 'Premier séance', description: '<p>Deux</p>' }],
     });
+    strict_1.default.equal(result.observations, training.observations);
     strict_1.default.deepEqual(result.players, ['Ana', 'Zoé']);
     strict_1.default.deepEqual(result.drills.map((drill) => drill.title), ['Premier séance', 'Exercice indisponible', 'Premier catalogue']);
 });
@@ -34,6 +35,6 @@ const training_summary_1 = require("../training-summary");
     const base = { date: '2026-10-20T16:00:00.000Z', endTime: null, status: 'CANCELLED', players: [], drills: [] };
     const empty = await (0, training_summary_1.renderTrainingSummary)(base, 'Europe/Paris');
     strict_1.default.equal(empty.subarray(0, 5).toString(), '%PDF-');
-    const long = await (0, training_summary_1.renderTrainingSummary)({ ...base, players: ['Éloïse Łukasz'], drills: [{ title: 'Contrôle', description: 'Une consigne détaillée. '.repeat(2000) }] }, 'Europe/Paris');
+    const long = await (0, training_summary_1.renderTrainingSummary)({ ...base, observations: 'À revoir : contrôle.\n'.repeat(200), players: ['Éloïse Łukasz'], drills: [{ title: 'Contrôle', description: 'Une consigne détaillée. '.repeat(2000) }] }, 'Europe/Paris');
     strict_1.default.ok(long.length > empty.length);
 });
