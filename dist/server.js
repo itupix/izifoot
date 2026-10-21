@@ -6160,7 +6160,7 @@ app.get('/trainings/:id/summary.pdf', authMiddleware, async (req, res) => {
         if (!training)
             return res.status(404).json({ error: 'Training not found' });
         const summary = await (0, training_summary_1.loadTrainingSummary)(prisma, req.auth, training, {
-            attendance: attendanceFindManyForUser, drills: listTrainingDrillsInOrder, catalog: drillFindManyForUser,
+            attendance: attendanceFindManyForUser, drills: listTrainingDrillsInOrder, catalog: drillFindManyForUser, diagrams: diagramFindManyForUser,
         });
         const pdf = await (0, training_summary_1.renderTrainingSummary)(summary, timeZone);
         const date = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(training.date));

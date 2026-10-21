@@ -6532,7 +6532,7 @@ app.get('/trainings/:id/summary.pdf', authMiddleware, async (req: any, res) => {
     const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
     if (!training) return res.status(404).json({ error: 'Training not found' })
     const summary = await loadTrainingSummary(prisma, req.auth, training, {
-      attendance: attendanceFindManyForUser, drills: listTrainingDrillsInOrder, catalog: drillFindManyForUser,
+      attendance: attendanceFindManyForUser, drills: listTrainingDrillsInOrder, catalog: drillFindManyForUser, diagrams: diagramFindManyForUser,
     })
     const pdf = await renderTrainingSummary(summary, timeZone)
     const date = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(training.date))

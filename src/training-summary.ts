@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit'
+import { parseSummaryDiagram, drawSummaryDiagram } from './training-summary-diagram'
 
 export function summaryTimeZone(value: unknown): string {
   if (value === undefined) return 'Europe/Paris'
@@ -21,7 +22,7 @@ export function descriptionText(value: string): string {
 }
 
 export async function loadTrainingSummary(db: any, auth: any, training: any, io: {
-  attendance: Function, drills: Function, catalog: Function,
+  attendance: Function, drills: Function, catalog: Function, diagrams?: Function,
 }) {
   const scope = { ...auth, teamId: training.teamId, clubId: training.clubId ?? auth.clubId }
   const [attendance, rows, catalog] = await Promise.all([
@@ -29,6 +30,10 @@ export async function loadTrainingSummary(db: any, auth: any, training: any, io:
     io.drills(db, scope, training.id),
     io.catalog(db, scope, {}),
   ])
+  const diagrams = io.diagrams && rows.length ? await io.diagrams(db, scope, {
+    where: { OR: [{ trainingDrillId: { in: rows.map((row: any) => row.id) } }, { drillId: { in: rows.map((row: any) => row.drillId) }, trainingDrillId: null }] },
+    orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+  }) : []
   const players = new Map<string, string>()
   for (const row of attendance) {
     if (row.player?.teamId === training.teamId) players.set(row.playerId, row.player.name)
@@ -39,7 +44,9 @@ export async function loadTrainingSummary(db: any, auth: any, training: any, io:
     players: [...players.values()].sort((a, b) => a.localeCompare(b, 'fr')),
     drills: rows.map((row: any) => {
       const drill = byId.get(row.drillId) as any
-      return { title: drill?.title || 'Exercice indisponible', description: descriptionText(drill?.description || '') || 'Descriptif indisponible' }
+      const sessionDiagram = diagrams.find((diagram: any) => diagram.trainingDrillId === row.id)
+      const diagram = sessionDiagram ?? diagrams.find((diagram: any) => !diagram.trainingDrillId && diagram.drillId === row.drillId)
+      return { diagram: diagram ? parseSummaryDiagram(diagram.data) : null, diagramSource: diagram && !sessionDiagram ? 'catalog' : 'session', title: drill?.title || 'Exercice indisponible', description: descriptionText(drill?.description || '') || 'Descriptif indisponible' }
     }),
   }
 }
@@ -75,6 +82,28 @@ export function renderTrainingSummary(summary: any, timeZone: string): Promise<B
       doc.font('Bold').fontSize(12).fillColor('#223047').text(`${index + 1}. ${drill.title}`, { lineGap: 3 })
       doc.moveDown(0.4)
       text(drill.description)
+      if (drill.diagram) {
+        const diagram = drill.diagram
+        if (diagram.invalid) text('Diagramme indisponible.', 10)
+        for (const frame of diagram.frames) {
+          const availableWidth = doc.page.width - 96
+          const diagramHeight = Math.min(440, availableWidth * diagram.height / diagram.width)
+          const caption = `${drill.diagramSource === 'catalog' ? 'Diagramme du catalogue' : 'Diagramme'}${frame.step === null ? '' : ` - Étape ${frame.step}${frame.name ? ` - ${frame.name.slice(0, 100)}` : ''}`}`
+          doc.font('Body').fontSize(10)
+          const captionHeight = doc.heightOfString(caption, { width: availableWidth, lineGap: 3 })
+          if (doc.y + captionHeight + diagramHeight + 18 > doc.page.height - 48) {
+            doc.addPage()
+            doc.font('Bold').fontSize(12).fillColor('#223047').text(`${index + 1}. ${drill.title} (suite)`, { lineGap: 3 })
+            doc.moveDown(0.5)
+          }
+          doc.font('Body').fontSize(10).fillColor('#667085').text(caption, { lineGap: 3 })
+          doc.moveDown(0.4)
+          const top = doc.y
+          drawSummaryDiagram(doc, diagram, frame, 48, top, availableWidth, diagramHeight)
+          doc.x = 48
+          doc.y = top + diagramHeight + 12
+        }
+      }
     })
     const pages = doc.bufferedPageRange()
     for (let index = pages.start; index < pages.start + pages.count; index++) {
