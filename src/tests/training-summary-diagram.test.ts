@@ -4,14 +4,17 @@ import { parseSummaryDiagram } from '../training-summary-diagram'
 import { loadTrainingSummary, renderTrainingSummary } from '../training-summary'
 const player = { type: 'player', id: 'p', x: 100, y: 80, label: 'J1', side: 'away' }
 
-test('keeps every nonempty existing step in original order and supports legacy data', () => {
+test('keeps only frame zero and supports legacy data', () => {
   const result = parseSummaryDiagram(JSON.stringify({ orientation: 'portrait', rotationQuarterTurns: 3, frames: [{ name: 'Départ', items: [player] }, { items: [] }, { name: 'Arrivée', items: [player] }] }))
   assert.equal(result.width, 380)
   assert.equal(result.height, 600)
-  assert.deepEqual(result.frames.map(frame => frame.step), [1, 3])
+  assert.deepEqual(result.frames.map(frame => frame.step), [1])
   assert.equal(result.frames[0].items[0].color, 'red')
   assert.equal(result.frames[0].items[0].x, 100) // Coordinates are already rotated.
   assert.equal(parseSummaryDiagram({ items: [player] }).frames[0].step, null)
+  assert.deepEqual(parseSummaryDiagram({ frames: [{ items: [] }, { items: [player] }] }).frames, [])
+  assert.deepEqual(parseSummaryDiagram({ frames: [null, { items: [player] }] }).frames, [])
+  assert.equal(parseSummaryDiagram({ frames: [{ items: [player] }, null] }).invalid, false)
   assert.equal(parseSummaryDiagram('{broken').invalid, true)
   assert.equal(parseSummaryDiagram({ frames: [{ items: [] }] }).invalid, false)
   assert.equal(parseSummaryDiagram({ items: [{ type: 'ball', x: 'NaN', y: 1 }] }).invalid, true)
@@ -46,10 +49,12 @@ test('loads scoped diagrams once, prefers latest session diagram and falls back 
   assert.equal(result.drills[3].diagram, null)
 })
 
-test('renders all nonempty diagram steps on separate pages without corrupt diagram failure', async () => {
+test('renders only the first diagram frame without corrupt diagram failure', async () => {
   const data = parseSummaryDiagram({ frames: Array.from({ length: 10 }, (_, index) => ({ name: `Position ${index + 1}`, items: [player, { type: 'arrow', from: { x: 20, y: 20 }, to: { x: 200, y: 100 } }] })) })
   const pdf = await renderTrainingSummary({ date: '2026-10-21T16:00:00Z', players: [], drills: [{ title: 'Passes', description: 'À deux.', diagram: data }, { title: 'Invalide', description: '', diagram: parseSummaryDiagram('no json') }] }, 'Europe/Paris')
   assert.equal(pdf.subarray(0, 5).toString(), '%PDF-')
   const pages = pdf.toString('latin1').match(/\/Type \/Page\b/g) || []
-  assert.ok(pages.length >= 5)
+  assert.equal(data.frames.length, 1)
+  assert.equal(data.frames[0].name, 'Position 1')
+  assert.equal(pages.length, 1)
 })

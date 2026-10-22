@@ -18,7 +18,7 @@ export function parseSummaryDiagram(input: unknown): SummaryDiagram {
       return { x: Math.max(5, Math.min(width - 5, Number(raw.x))), y: Math.max(5, Math.min(height - 5, Number(raw.y))) }
     }
     let invalid = false
-    const frames = Array.isArray(data.frames) && data.frames.length ? data.frames.slice(0, 10) : Array.isArray(data.items) ? [{ items: data.items }] : null
+    const frames = Array.isArray(data.frames) && data.frames.length ? data.frames.slice(0, 1) : Array.isArray(data.items) ? [{ items: data.items }] : null
     if (!frames) return empty
     const legacy = !(Array.isArray(data.frames) && data.frames.length)
     const normalized = frames.flatMap((frame: any, index: number) => {

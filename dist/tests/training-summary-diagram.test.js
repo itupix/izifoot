@@ -8,14 +8,17 @@ const strict_1 = __importDefault(require("node:assert/strict"));
 const training_summary_diagram_1 = require("../training-summary-diagram");
 const training_summary_1 = require("../training-summary");
 const player = { type: 'player', id: 'p', x: 100, y: 80, label: 'J1', side: 'away' };
-(0, node_test_1.default)('keeps every nonempty existing step in original order and supports legacy data', () => {
+(0, node_test_1.default)('keeps only frame zero and supports legacy data', () => {
     const result = (0, training_summary_diagram_1.parseSummaryDiagram)(JSON.stringify({ orientation: 'portrait', rotationQuarterTurns: 3, frames: [{ name: 'Départ', items: [player] }, { items: [] }, { name: 'Arrivée', items: [player] }] }));
     strict_1.default.equal(result.width, 380);
     strict_1.default.equal(result.height, 600);
-    strict_1.default.deepEqual(result.frames.map(frame => frame.step), [1, 3]);
+    strict_1.default.deepEqual(result.frames.map(frame => frame.step), [1]);
     strict_1.default.equal(result.frames[0].items[0].color, 'red');
     strict_1.default.equal(result.frames[0].items[0].x, 100); // Coordinates are already rotated.
     strict_1.default.equal((0, training_summary_diagram_1.parseSummaryDiagram)({ items: [player] }).frames[0].step, null);
+    strict_1.default.deepEqual((0, training_summary_diagram_1.parseSummaryDiagram)({ frames: [{ items: [] }, { items: [player] }] }).frames, []);
+    strict_1.default.deepEqual((0, training_summary_diagram_1.parseSummaryDiagram)({ frames: [null, { items: [player] }] }).frames, []);
+    strict_1.default.equal((0, training_summary_diagram_1.parseSummaryDiagram)({ frames: [{ items: [player] }, null] }).invalid, false);
     strict_1.default.equal((0, training_summary_diagram_1.parseSummaryDiagram)('{broken').invalid, true);
     strict_1.default.equal((0, training_summary_diagram_1.parseSummaryDiagram)({ frames: [{ items: [] }] }).invalid, false);
     strict_1.default.equal((0, training_summary_diagram_1.parseSummaryDiagram)({ items: [{ type: 'ball', x: 'NaN', y: 1 }] }).invalid, true);
@@ -48,10 +51,12 @@ const player = { type: 'player', id: 'p', x: 100, y: 80, label: 'J1', side: 'awa
     strict_1.default.equal(result.drills[2].diagram.invalid, true);
     strict_1.default.equal(result.drills[3].diagram, null);
 });
-(0, node_test_1.default)('renders all nonempty diagram steps on separate pages without corrupt diagram failure', async () => {
+(0, node_test_1.default)('renders only the first diagram frame without corrupt diagram failure', async () => {
     const data = (0, training_summary_diagram_1.parseSummaryDiagram)({ frames: Array.from({ length: 10 }, (_, index) => ({ name: `Position ${index + 1}`, items: [player, { type: 'arrow', from: { x: 20, y: 20 }, to: { x: 200, y: 100 } }] })) });
     const pdf = await (0, training_summary_1.renderTrainingSummary)({ date: '2026-10-21T16:00:00Z', players: [], drills: [{ title: 'Passes', description: 'À deux.', diagram: data }, { title: 'Invalide', description: '', diagram: (0, training_summary_diagram_1.parseSummaryDiagram)('no json') }] }, 'Europe/Paris');
     strict_1.default.equal(pdf.subarray(0, 5).toString(), '%PDF-');
     const pages = pdf.toString('latin1').match(/\/Type \/Page\b/g) || [];
-    strict_1.default.ok(pages.length >= 5);
+    strict_1.default.equal(data.frames.length, 1);
+    strict_1.default.equal(data.frames[0].name, 'Position 1');
+    strict_1.default.equal(pages.length, 1);
 });
