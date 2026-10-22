@@ -58,3 +58,11 @@ test('renders only the first diagram frame without corrupt diagram failure', asy
   assert.equal(data.frames[0].name, 'Position 1')
   assert.equal(pages.length, 1)
 })
+
+test('paginates a long exercise description beside a portrait diagram', async () => {
+  const diagram = parseSummaryDiagram({ orientation: 'portrait', frames: [{ name: 'Hidden caption', items: [player] }] })
+  const pdf = await renderTrainingSummary({ date: '2026-10-22T16:00:00Z', players: [], drills: [{ title: 'Long exercice', description: 'Contrôler puis passer et se déplacer. '.repeat(160), diagram }, { title: 'Suivant', description: 'Fin.' }] }, 'Europe/Paris')
+  const pages = pdf.toString('latin1').match(/\/Type \/Page\b/g) || []
+  assert.ok(pages.length > 1)
+  assert.ok(pages.length < 10)
+})

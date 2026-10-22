@@ -60,3 +60,10 @@ const player = { type: 'player', id: 'p', x: 100, y: 80, label: 'J1', side: 'awa
     strict_1.default.equal(data.frames[0].name, 'Position 1');
     strict_1.default.equal(pages.length, 1);
 });
+(0, node_test_1.default)('paginates a long exercise description beside a portrait diagram', async () => {
+    const diagram = (0, training_summary_diagram_1.parseSummaryDiagram)({ orientation: 'portrait', frames: [{ name: 'Hidden caption', items: [player] }] });
+    const pdf = await (0, training_summary_1.renderTrainingSummary)({ date: '2026-10-22T16:00:00Z', players: [], drills: [{ title: 'Long exercice', description: 'Contrôler puis passer et se déplacer. '.repeat(160), diagram }, { title: 'Suivant', description: 'Fin.' }] }, 'Europe/Paris');
+    const pages = pdf.toString('latin1').match(/\/Type \/Page\b/g) || [];
+    strict_1.default.ok(pages.length > 1);
+    strict_1.default.ok(pages.length < 10);
+});

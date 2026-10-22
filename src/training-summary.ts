@@ -78,32 +78,60 @@ export function renderTrainingSummary(summary: any, timeZone: string): Promise<B
     heading('Exercices de la séance')
     if (!summary.drills.length) text('Aucun exercice enregistré.')
     summary.drills.forEach((drill: any, index: number) => {
-      if (doc.y > doc.page.height - 130) doc.addPage()
-      doc.font('Bold').fontSize(12).fillColor('#223047').text(`${index + 1}. ${drill.title}`, { lineGap: 3 })
-      doc.moveDown(0.4)
-      text(drill.description)
-      if (drill.diagram) {
-        const diagram = drill.diagram
-        if (diagram.invalid) text('Diagramme indisponible.', 10)
-        for (const frame of diagram.frames) {
-          const availableWidth = doc.page.width - 96
-          const diagramHeight = Math.min(440, availableWidth * diagram.height / diagram.width)
-          const caption = `${drill.diagramSource === 'catalog' ? 'Diagramme du catalogue' : 'Diagramme'}${frame.step === null ? '' : ` - Étape ${frame.step}${frame.name ? ` - ${frame.name.slice(0, 100)}` : ''}`}`
-          doc.font('Body').fontSize(10)
-          const captionHeight = doc.heightOfString(caption, { width: availableWidth, lineGap: 3 })
-          if (doc.y + captionHeight + diagramHeight + 18 > doc.page.height - 48) {
-            doc.addPage()
-            doc.font('Bold').fontSize(12).fillColor('#223047').text(`${index + 1}. ${drill.title} (suite)`, { lineGap: 3 })
-            doc.moveDown(0.5)
+      const frame = drill.diagram?.frames[0]
+      const width = doc.page.width - 96
+      const columnWidth = (width - 18) / 2
+      const diagramHeight = frame ? columnWidth * drill.diagram.height / drill.diagram.width : 0
+      const title = `${index + 1}. ${drill.title}`
+      doc.font('Bold').fontSize(12)
+      const titleHeight = doc.heightOfString(title, { width, lineGap: 3 }) + 10
+      if (doc.y + titleHeight + Math.max(45, diagramHeight) > doc.page.height - 48) doc.addPage()
+      const exerciseTitle = (continued = false) => {
+        doc.font('Bold').fontSize(12).fillColor('#223047').text(`${title}${continued ? ' (suite)' : ''}`, 48, doc.y, { width, lineGap: 3 })
+        doc.moveDown(0.4)
+      }
+      exerciseTitle()
+      if (!frame) {
+        text(drill.description)
+        if (drill.diagram?.invalid) text('Diagramme indisponible.', 10)
+        return
+      }
+      const top = doc.y
+      drawSummaryDiagram(doc, drill.diagram, frame, 48 + columnWidth + 18, top, columnWidth, diagramHeight)
+      doc.x = 48
+      doc.y = top
+      let remaining = drill.description.trim()
+      let firstPage = true
+      while (remaining) {
+        const startY = doc.y
+        const availableHeight = doc.page.height - 48 - startY
+        doc.font('Body').fontSize(11)
+        const options = { width: columnWidth, lineGap: 4 }
+        let end = remaining.length
+        if (doc.heightOfString(remaining, options) > availableHeight) {
+          let low = 0, high = remaining.length
+          while (low < high) {
+            const middle = Math.ceil((low + high) / 2)
+            if (doc.heightOfString(remaining.slice(0, middle), options) <= availableHeight) low = middle
+            else high = middle - 1
           }
-          doc.font('Body').fontSize(10).fillColor('#667085').text(caption, { lineGap: 3 })
-          doc.moveDown(0.4)
-          const top = doc.y
-          drawSummaryDiagram(doc, diagram, frame, 48, top, availableWidth, diagramHeight)
-          doc.x = 48
-          doc.y = top + diagramHeight + 12
+          end = low
+          const breakAt = Math.max(remaining.lastIndexOf(' ', end), remaining.lastIndexOf('\n', end))
+          if (breakAt > end / 2) end = breakAt + 1
+          if (end > 0 && /[\uD800-\uDBFF]/.test(remaining[end - 1])) end--
+        }
+        if (!end) { doc.addPage(); exerciseTitle(true); firstPage = false; continue }
+        doc.fillColor('#223047').text(remaining.slice(0, end).trimEnd(), 48, startY, options)
+        remaining = remaining.slice(end).trimStart()
+        if (remaining) {
+          doc.addPage()
+          exerciseTitle(true)
+          firstPage = false
         }
       }
+      doc.y = Math.max(doc.y, firstPage ? top + diagramHeight : doc.y) + 12
+      doc.x = 48
+      if (drill.diagram.invalid) text('Diagramme indisponible.', 10)
     })
     const pages = doc.bufferedPageRange()
     for (let index = pages.start; index < pages.start + pages.count; index++) {
