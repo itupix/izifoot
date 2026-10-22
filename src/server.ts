@@ -1,4 +1,4 @@
-import { summaryTimeZone, loadTrainingSummary, renderTrainingSummary } from './training-summary'
+import { summaryTimeZone, loadTrainingSummary, renderTrainingSummary, trainingSummaryVersion } from './training-summary'
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
@@ -6522,6 +6522,26 @@ app.get('/trainings/:id', authMiddleware, async (req: any, res) => {
   }
 })
 
+app.get('/trainings/:id/summary-version', authMiddleware, async (req: any, res) => {
+  if (!ensureStaff(req, res)) return
+  let timeZone: string
+  try { timeZone = summaryTimeZone(req.query.timeZone) } catch {
+    return res.status(400).json({ error: 'Invalid time zone' })
+  }
+  try {
+    const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
+    if (!training) return res.status(404).json({ error: 'Training not found' })
+    const summary = await loadTrainingSummary(prisma, req.auth, training, {
+      attendance: attendanceFindManyForUser, drills: listTrainingDrillsInOrder, catalog: drillFindManyForUser, diagrams: diagramFindManyForUser,
+    })
+    res.setHeader('Cache-Control', 'private, no-store')
+    return res.json({ version: trainingSummaryVersion(summary, timeZone), timeZone })
+  } catch (error) {
+    console.error('[GET /trainings/:id/summary-version] failed', error)
+    return res.status(500).json({ error: 'Failed to fetch training summary version' })
+  }
+})
+
 app.get('/trainings/:id/summary.pdf', authMiddleware, async (req: any, res) => {
   if (!ensureStaff(req, res)) return
   let timeZone: string
@@ -6538,7 +6558,8 @@ app.get('/trainings/:id/summary.pdf', authMiddleware, async (req: any, res) => {
     const date = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(training.date))
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="resume-seance-${date}.pdf"`)
-    res.setHeader('Cache-Control', 'private, no-store')
+    res.setHeader('X-Training-Summary-Version', trainingSummaryVersion(summary, timeZone))
+    res.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate')
     return res.send(pdf)
   } catch (error) {
     console.error('[GET /trainings/:id/summary.pdf] failed', error)

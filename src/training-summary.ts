@@ -1,11 +1,35 @@
 import PDFDocument from 'pdfkit'
+import { createHash } from 'node:crypto'
 import { parseSummaryDiagram, drawSummaryDiagram } from './training-summary-diagram'
 
 export function summaryTimeZone(value: unknown): string {
   if (value === undefined) return 'Europe/Paris'
   if (typeof value !== 'string' || !value.trim()) throw new Error('Invalid time zone')
   try { new Intl.DateTimeFormat('fr-FR', { timeZone: value }).format() } catch { throw new Error('Invalid time zone') }
-  return value
+  return new Intl.DateTimeFormat('fr-FR', { timeZone: value }).resolvedOptions().timeZone
+}
+
+// Bump when rendering, fonts, or content semantics change to invalidate saved PDFs.
+export const TRAINING_SUMMARY_RENDERER_VERSION = '2-columns-first-frame-v1'
+
+function canonicalJSON(value: any): string {
+  if (value === undefined) return 'null'
+  if (value instanceof Date) return JSON.stringify(value.toISOString())
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(',')}}`
+  return JSON.stringify(value)
+}
+
+export function trainingSummaryVersion(summary: any, timeZone: string): string {
+  const content = {
+    renderer: TRAINING_SUMMARY_RENDERER_VERSION,
+    timeZone: summaryTimeZone(timeZone),
+    training: { id: summary.id, teamId: summary.teamId, clubId: summary.clubId, date: new Date(summary.date).toISOString(), endTime: summary.endTime ?? null, status: summary.status, observations: summary.observations ?? null, updatedAt: summary.updatedAt ?? null },
+    players: summary.players,
+    drills: summary.drills,
+    dependencies: summary.versionDependencies ?? [],
+  }
+  return createHash('sha256').update(canonicalJSON(content)).digest('hex')
 }
 
 export function descriptionText(value: string): string {
@@ -41,6 +65,11 @@ export async function loadTrainingSummary(db: any, auth: any, training: any, io:
   const byId = new Map(catalog.map((drill: any) => [drill.id, drill]))
   return {
     ...training,
+    versionDependencies: rows.map((row: any) => {
+      const selected = diagrams.find((diagram: any) => diagram.trainingDrillId === row.id)
+        ?? diagrams.find((diagram: any) => !diagram.trainingDrillId && diagram.drillId === row.drillId)
+      return { id: row.id, drillId: row.drillId, order: row.order, notes: row.notes ?? null, diagram: selected ? { id: selected.id, data: selected.data, updatedAt: selected.updatedAt } : null }
+    }),
     players: [...players.values()].sort((a, b) => a.localeCompare(b, 'fr')),
     drills: rows.map((row: any) => {
       const drill = byId.get(row.drillId) as any

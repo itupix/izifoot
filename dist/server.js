@@ -6145,6 +6145,31 @@ app.get('/trainings/:id', authMiddleware, async (req, res) => {
         return res.status(500).json({ error: 'Failed to fetch training' });
     }
 });
+app.get('/trainings/:id/summary-version', authMiddleware, async (req, res) => {
+    if (!ensureStaff(req, res))
+        return;
+    let timeZone;
+    try {
+        timeZone = (0, training_summary_1.summaryTimeZone)(req.query.timeZone);
+    }
+    catch {
+        return res.status(400).json({ error: 'Invalid time zone' });
+    }
+    try {
+        const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
+        if (!training)
+            return res.status(404).json({ error: 'Training not found' });
+        const summary = await (0, training_summary_1.loadTrainingSummary)(prisma, req.auth, training, {
+            attendance: attendanceFindManyForUser, drills: listTrainingDrillsInOrder, catalog: drillFindManyForUser, diagrams: diagramFindManyForUser,
+        });
+        res.setHeader('Cache-Control', 'private, no-store');
+        return res.json({ version: (0, training_summary_1.trainingSummaryVersion)(summary, timeZone), timeZone });
+    }
+    catch (error) {
+        console.error('[GET /trainings/:id/summary-version] failed', error);
+        return res.status(500).json({ error: 'Failed to fetch training summary version' });
+    }
+});
 app.get('/trainings/:id/summary.pdf', authMiddleware, async (req, res) => {
     if (!ensureStaff(req, res))
         return;
@@ -6166,7 +6191,8 @@ app.get('/trainings/:id/summary.pdf', authMiddleware, async (req, res) => {
         const date = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(training.date));
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="resume-seance-${date}.pdf"`);
-        res.setHeader('Cache-Control', 'private, no-store');
+        res.setHeader('X-Training-Summary-Version', (0, training_summary_1.trainingSummaryVersion)(summary, timeZone));
+        res.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate');
         return res.send(pdf);
     }
     catch (error) {

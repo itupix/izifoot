@@ -3,11 +3,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.TRAINING_SUMMARY_RENDERER_VERSION = void 0;
 exports.summaryTimeZone = summaryTimeZone;
+exports.trainingSummaryVersion = trainingSummaryVersion;
 exports.descriptionText = descriptionText;
 exports.loadTrainingSummary = loadTrainingSummary;
 exports.renderTrainingSummary = renderTrainingSummary;
 const pdfkit_1 = __importDefault(require("pdfkit"));
+const node_crypto_1 = require("node:crypto");
 const training_summary_diagram_1 = require("./training-summary-diagram");
 function summaryTimeZone(value) {
     if (value === undefined)
@@ -20,7 +23,31 @@ function summaryTimeZone(value) {
     catch {
         throw new Error('Invalid time zone');
     }
-    return value;
+    return new Intl.DateTimeFormat('fr-FR', { timeZone: value }).resolvedOptions().timeZone;
+}
+// Bump when rendering, fonts, or content semantics change to invalidate saved PDFs.
+exports.TRAINING_SUMMARY_RENDERER_VERSION = '2-columns-first-frame-v1';
+function canonicalJSON(value) {
+    if (value === undefined)
+        return 'null';
+    if (value instanceof Date)
+        return JSON.stringify(value.toISOString());
+    if (Array.isArray(value))
+        return `[${value.map(canonicalJSON).join(',')}]`;
+    if (value && typeof value === 'object')
+        return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(',')}}`;
+    return JSON.stringify(value);
+}
+function trainingSummaryVersion(summary, timeZone) {
+    const content = {
+        renderer: exports.TRAINING_SUMMARY_RENDERER_VERSION,
+        timeZone: summaryTimeZone(timeZone),
+        training: { id: summary.id, teamId: summary.teamId, clubId: summary.clubId, date: new Date(summary.date).toISOString(), endTime: summary.endTime ?? null, status: summary.status, observations: summary.observations ?? null, updatedAt: summary.updatedAt ?? null },
+        players: summary.players,
+        drills: summary.drills,
+        dependencies: summary.versionDependencies ?? [],
+    };
+    return (0, node_crypto_1.createHash)('sha256').update(canonicalJSON(content)).digest('hex');
 }
 function descriptionText(value) {
     return value.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
@@ -53,6 +80,11 @@ async function loadTrainingSummary(db, auth, training, io) {
     const byId = new Map(catalog.map((drill) => [drill.id, drill]));
     return {
         ...training,
+        versionDependencies: rows.map((row) => {
+            const selected = diagrams.find((diagram) => diagram.trainingDrillId === row.id)
+                ?? diagrams.find((diagram) => !diagram.trainingDrillId && diagram.drillId === row.drillId);
+            return { id: row.id, drillId: row.drillId, order: row.order, notes: row.notes ?? null, diagram: selected ? { id: selected.id, data: selected.data, updatedAt: selected.updatedAt } : null };
+        }),
         players: [...players.values()].sort((a, b) => a.localeCompare(b, 'fr')),
         drills: rows.map((row) => {
             const drill = byId.get(row.drillId);
