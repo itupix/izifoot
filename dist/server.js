@@ -3,6 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+const training_materials_1 = require("./training-materials");
 const training_summary_1 = require("./training-summary");
 require("dotenv/config");
 const express_1 = __importDefault(require("express"));
@@ -7158,14 +7159,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
         const attendancePlayers = attendance.map(a => a.player).filter(Boolean);
         const playersById = {};
         for (const pl of attendancePlayers) {
-            playersById[pl.id] = {
-                id: pl.id,
-                name: pl.name,
-                primary_position: pl.primary_position ?? null,
-                secondary_position: pl.secondary_position ?? null,
-                email: pl.email ?? null,
-                phone: pl.phone ?? null
-            };
+            upsertPlayerSummary(playersById, pl);
         }
         // Matches for this matchday (with teams and scorers first)
         const matchesRaw = await matchFindManyForUser(prisma, req.auth, {
@@ -7263,14 +7257,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
                 for (const p of t.players) {
                     const pl = p.player;
                     if (pl) {
-                        playersById[pl.id] = playersById[pl.id] || {
-                            id: pl.id,
-                            name: pl.name,
-                            primary_position: pl.primary_position ?? null,
-                            secondary_position: pl.secondary_position ?? null,
-                            email: pl.email ?? null,
-                            phone: pl.phone ?? null
-                        };
+                        upsertPlayerSummary(playersById, pl);
                         if (!convocatedMap[pl.id])
                             convocatedMap[pl.id] = playersById[pl.id];
                     }
@@ -7313,6 +7300,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
                 console.warn('[summary] failed to include full players list', e?.message || e);
             }
         }
+        await hydratePlayersByIdsForUser(prisma, req.auth, playersById, matches.flatMap((match) => match.scorers.flatMap((scorer) => [scorer.playerId, scorer.assistId ?? null])));
         // Mark presence/absence and convocation using attendance
         const attendanceMap = new Map();
         const convokeSet = new Set();
@@ -7354,15 +7342,16 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
                 status = 'non_convoque';
             return { player: pl, status, present: status === 'present' };
         });
-        // Add scorersDetailed to each match, resolving playerName from playersById
-        const matchesEnriched = matches.map(m => ({
-            ...m,
-            scorersDetailed: m.scorers.map((s) => ({
-                ...s,
-                playerName: playersById[s.playerId]?.name || null,
-                assistName: s.assistId ? (playersById[s.assistId]?.name || null) : null
-            }))
-        }));
+        // Keep scorer names directly on `scorers` for native clients and expose the
+        // detailed alias for older consumers.
+        const matchesEnriched = matches.map(m => {
+            const scorersWithNames = withHistoricalScorerNames(m.scorers, playersById);
+            return {
+                ...m,
+                scorers: scorersWithNames,
+                scorersDetailed: scorersWithNames,
+            };
+        });
         const stats = {
             matchesTotal: matchesEnriched.length,
             matchesPlayed: (0, match_status_1.countPlayedMatchesExcludingCancelled)(matchesEnriched),
@@ -7601,6 +7590,49 @@ async function assertPlayerIdsInMatchTeams(db, matchId, playerIds) {
     err.code = 'PLAYER_NOT_IN_MATCH_TEAMS';
     throw err;
 }
+function upsertPlayerSummary(target, player) {
+    if (!player?.id)
+        return;
+    target[player.id] = target[player.id] || {
+        id: player.id,
+        name: player.name,
+        primary_position: player.primary_position ?? null,
+        secondary_position: player.secondary_position ?? null,
+        email: player.email ?? null,
+        phone: player.phone ?? null,
+    };
+}
+async function hydratePlayersByIdsForUser(db, scopeOrUserId, target, playerIds) {
+    const missingIds = Array.from(new Set(playerIds.filter((playerId) => typeof playerId === 'string' && playerId.trim().length > 0))).filter((playerId) => !target[playerId]);
+    if (!missingIds.length)
+        return;
+    const players = await playerFindManyForUser(db, scopeOrUserId, {
+        where: { id: { in: missingIds } },
+        select: {
+            id: true,
+            name: true,
+            primary_position: true,
+            secondary_position: true,
+            email: true,
+            phone: true,
+        },
+    });
+    for (const player of players)
+        upsertPlayerSummary(target, player);
+}
+function withHistoricalScorerNames(scorers, playersById) {
+    return scorers.map((scorer) => ({
+        ...scorer,
+        playerName: typeof scorer.playerName === 'string' && scorer.playerName.trim()
+            ? scorer.playerName.trim()
+            : (playersById[scorer.playerId]?.name || null),
+        assistName: scorer.assistId
+            ? (typeof scorer.assistName === 'string' && scorer.assistName.trim()
+                ? scorer.assistName.trim()
+                : (playersById[scorer.assistId]?.name || null))
+            : null,
+    }));
+}
 async function getMatchDetailForUser(db, scopeOrUserId, id) {
     const match = await matchFindFirstForUser(db, scopeOrUserId, {
         where: { id },
@@ -7639,12 +7671,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         const pl = row.player;
         if (!pl)
             continue;
-        allPlayersById[pl.id] = allPlayersById[pl.id] || {
-            id: pl.id,
-            name: pl.name,
-            primary_position: pl.primary_position ?? null,
-            secondary_position: pl.secondary_position ?? null
-        };
+        upsertPlayerSummary(allPlayersById, pl);
     }
     const playersById = {};
     const teams = (match.teams || []).map((team) => ({
@@ -7656,12 +7683,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         }).map((row) => {
             const pl = row.player;
             if (pl) {
-                playersById[pl.id] = playersById[pl.id] || {
-                    id: pl.id,
-                    name: pl.name,
-                    primary_position: pl.primary_position ?? null,
-                    secondary_position: pl.secondary_position ?? null
-                };
+                upsertPlayerSummary(playersById, pl);
             }
             return {
                 playerId: row.playerId,
@@ -7670,6 +7692,13 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
             };
         })
     }));
+    const scorerRelatedPlayerIds = (match.scorers || []).flatMap((scorer) => [scorer.playerId, scorer.assistId ?? null]);
+    await hydratePlayersByIdsForUser(db, scopeOrUserId, allPlayersById, scorerRelatedPlayerIds);
+    for (const playerId of scorerRelatedPlayerIds) {
+        if (typeof playerId === 'string' && allPlayersById[playerId] && !playersById[playerId]) {
+            playersById[playerId] = allPlayersById[playerId];
+        }
+    }
     const scorers = (match.scorers || []).map((s) => ({
         id: s.id,
         playerId: s.playerId,
@@ -7715,6 +7744,26 @@ app.get('/matches', authMiddleware, async (req, res) => {
         take: pagination.take,
         skip: pagination.skip,
     });
+    const scorerPlayersById = {};
+    const allTeamIds = matches.flatMap((match) => (match.teams || []).map((team) => team.id));
+    const teamPlayers = allTeamIds.length ? await prisma.matchTeamPlayer.findMany({
+        where: { matchTeamId: { in: allTeamIds } },
+        select: {
+            player: {
+                select: {
+                    id: true,
+                    name: true,
+                    primary_position: true,
+                    secondary_position: true,
+                    email: true,
+                    phone: true,
+                },
+            },
+        },
+    }) : [];
+    for (const row of teamPlayers)
+        upsertPlayerSummary(scorerPlayersById, row.player);
+    await hydratePlayersByIdsForUser(prisma, req.auth, scorerPlayersById, matches.flatMap((match) => (match.scorers || []).flatMap((scorer) => [scorer.playerId, scorer.assistId ?? null])));
     const teamFormatById = await loadMatchTeamFormatLookup(prisma, matches.map((match) => match.teamId));
     let hasPlanningRotation = false;
     const hasPersistedRotationKey = matches.some((match) => typeof match.rotationGameKey === 'string' && match.rotationGameKey.trim().length > 0);
@@ -7739,6 +7788,7 @@ app.get('/matches', authMiddleware, async (req, res) => {
             const { plateauId, season, ...rest } = match;
             return withMatchTeamFormatAliases({
                 ...rest,
+                scorers: withHistoricalScorerNames(match.scorers || [], scorerPlayersById),
                 teamId: match.teamId ?? null,
                 date: match.date ?? match.createdAt,
                 matchdayId: plateauId ?? null,
@@ -8459,6 +8509,28 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req, res) =
     });
 });
 // Lister les exercices d'une séance (avec enrichissement à partir du catalogue Drill)
+// Equipment derived exclusively from accessible selected-exercise diagrams.
+app.get('/trainings/:id/materials', authMiddleware, async (req, res) => {
+    try {
+        const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } });
+        if (!training)
+            return res.status(404).json({ error: 'Training not found' });
+        const scope = { ...req.auth, teamId: training.teamId, clubId: training.clubId ?? req.auth.clubId };
+        const rows = await listTrainingDrillsInOrder(prisma, scope, training.id);
+        const diagrams = rows.length ? await diagramFindManyForUser(prisma, scope, {
+            where: { OR: [
+                    { trainingDrillId: { in: rows.map(row => row.id) } },
+                    { drillId: { in: rows.map(row => row.drillId) }, trainingDrillId: null },
+                ] },
+            orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+        }) : [];
+        return res.json((0, training_materials_1.trainingMaterials)(rows, diagrams));
+    }
+    catch (error) {
+        console.error('[GET /trainings/:id/materials] failed', error);
+        return res.status(500).json({ error: 'Failed to load training materials' });
+    }
+});
 app.get('/trainings/:id/drills', authMiddleware, async (req, res) => {
     const trainingId = req.params.id;
     const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: trainingId } });

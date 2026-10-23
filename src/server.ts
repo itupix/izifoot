@@ -1,3 +1,4 @@
+import { trainingMaterials } from './training-materials'
 import { summaryTimeZone, loadTrainingSummary, renderTrainingSummary, trainingSummaryVersion } from './training-summary'
 import 'dotenv/config'
 import express from 'express'
@@ -8957,6 +8958,27 @@ app.post('/trainings/:id/drills/generate-ai', authMiddleware, async (req: any, r
 })
 
 // Lister les exercices d'une séance (avec enrichissement à partir du catalogue Drill)
+// Equipment derived exclusively from accessible selected-exercise diagrams.
+app.get('/trainings/:id/materials', authMiddleware, async (req: any, res) => {
+  try {
+    const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: req.params.id } })
+    if (!training) return res.status(404).json({ error: 'Training not found' })
+    const scope = { ...req.auth, teamId: training.teamId, clubId: training.clubId ?? req.auth.clubId }
+    const rows = await listTrainingDrillsInOrder(prisma, scope, training.id)
+    const diagrams = rows.length ? await diagramFindManyForUser(prisma, scope, {
+      where: { OR: [
+        { trainingDrillId: { in: rows.map(row => row.id) } },
+        { drillId: { in: rows.map(row => row.drillId) }, trainingDrillId: null },
+      ] },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+    }) : []
+    return res.json(trainingMaterials(rows, diagrams))
+  } catch (error) {
+    console.error('[GET /trainings/:id/materials] failed', error)
+    return res.status(500).json({ error: 'Failed to load training materials' })
+  }
+})
+
 app.get('/trainings/:id/drills', authMiddleware, async (req: any, res) => {
   const trainingId = req.params.id
   const training = await trainingFindFirstForUser(prisma, req.auth, { where: { id: trainingId } })
