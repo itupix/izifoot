@@ -3,6 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+const championship_1 = require("./championship");
 const training_summary_1 = require("./training-summary");
 require("dotenv/config");
 const express_1 = __importDefault(require("express"));
@@ -7158,14 +7159,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
         const attendancePlayers = attendance.map(a => a.player).filter(Boolean);
         const playersById = {};
         for (const pl of attendancePlayers) {
-            playersById[pl.id] = {
-                id: pl.id,
-                name: pl.name,
-                primary_position: pl.primary_position ?? null,
-                secondary_position: pl.secondary_position ?? null,
-                email: pl.email ?? null,
-                phone: pl.phone ?? null
-            };
+            upsertPlayerSummary(playersById, pl);
         }
         // Matches for this matchday (with teams and scorers first)
         const matchesRaw = await matchFindManyForUser(prisma, req.auth, {
@@ -7263,14 +7257,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
                 for (const p of t.players) {
                     const pl = p.player;
                     if (pl) {
-                        playersById[pl.id] = playersById[pl.id] || {
-                            id: pl.id,
-                            name: pl.name,
-                            primary_position: pl.primary_position ?? null,
-                            secondary_position: pl.secondary_position ?? null,
-                            email: pl.email ?? null,
-                            phone: pl.phone ?? null
-                        };
+                        upsertPlayerSummary(playersById, pl);
                         if (!convocatedMap[pl.id])
                             convocatedMap[pl.id] = playersById[pl.id];
                     }
@@ -7313,6 +7300,7 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
                 console.warn('[summary] failed to include full players list', e?.message || e);
             }
         }
+        await hydratePlayersByIdsForUser(prisma, req.auth, playersById, matches.flatMap((match) => match.scorers.flatMap((scorer) => [scorer.playerId, scorer.assistId ?? null])));
         // Mark presence/absence and convocation using attendance
         const attendanceMap = new Map();
         const convokeSet = new Set();
@@ -7354,15 +7342,16 @@ app.get('/matchday/:id/summary', authMiddleware, async (req, res) => {
                 status = 'non_convoque';
             return { player: pl, status, present: status === 'present' };
         });
-        // Add scorersDetailed to each match, resolving playerName from playersById
-        const matchesEnriched = matches.map(m => ({
-            ...m,
-            scorersDetailed: m.scorers.map((s) => ({
-                ...s,
-                playerName: playersById[s.playerId]?.name || null,
-                assistName: s.assistId ? (playersById[s.assistId]?.name || null) : null
-            }))
-        }));
+        // Keep scorer names directly on `scorers` for native clients and expose the
+        // detailed alias for older consumers.
+        const matchesEnriched = matches.map(m => {
+            const scorersWithNames = withHistoricalScorerNames(m.scorers, playersById);
+            return {
+                ...m,
+                scorers: scorersWithNames,
+                scorersDetailed: scorersWithNames,
+            };
+        });
         const stats = {
             matchesTotal: matchesEnriched.length,
             matchesPlayed: (0, match_status_1.countPlayedMatchesExcludingCancelled)(matchesEnriched),
@@ -7601,6 +7590,49 @@ async function assertPlayerIdsInMatchTeams(db, matchId, playerIds) {
     err.code = 'PLAYER_NOT_IN_MATCH_TEAMS';
     throw err;
 }
+function upsertPlayerSummary(target, player) {
+    if (!player?.id)
+        return;
+    target[player.id] = target[player.id] || {
+        id: player.id,
+        name: player.name,
+        primary_position: player.primary_position ?? null,
+        secondary_position: player.secondary_position ?? null,
+        email: player.email ?? null,
+        phone: player.phone ?? null,
+    };
+}
+async function hydratePlayersByIdsForUser(db, scopeOrUserId, target, playerIds) {
+    const missingIds = Array.from(new Set(playerIds.filter((playerId) => typeof playerId === 'string' && playerId.trim().length > 0))).filter((playerId) => !target[playerId]);
+    if (!missingIds.length)
+        return;
+    const players = await playerFindManyForUser(db, scopeOrUserId, {
+        where: { id: { in: missingIds } },
+        select: {
+            id: true,
+            name: true,
+            primary_position: true,
+            secondary_position: true,
+            email: true,
+            phone: true,
+        },
+    });
+    for (const player of players)
+        upsertPlayerSummary(target, player);
+}
+function withHistoricalScorerNames(scorers, playersById) {
+    return scorers.map((scorer) => ({
+        ...scorer,
+        playerName: typeof scorer.playerName === 'string' && scorer.playerName.trim()
+            ? scorer.playerName.trim()
+            : (playersById[scorer.playerId]?.name || null),
+        assistName: scorer.assistId
+            ? (typeof scorer.assistName === 'string' && scorer.assistName.trim()
+                ? scorer.assistName.trim()
+                : (playersById[scorer.assistId]?.name || null))
+            : null,
+    }));
+}
 async function getMatchDetailForUser(db, scopeOrUserId, id) {
     const match = await matchFindFirstForUser(db, scopeOrUserId, {
         where: { id },
@@ -7639,12 +7671,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         const pl = row.player;
         if (!pl)
             continue;
-        allPlayersById[pl.id] = allPlayersById[pl.id] || {
-            id: pl.id,
-            name: pl.name,
-            primary_position: pl.primary_position ?? null,
-            secondary_position: pl.secondary_position ?? null
-        };
+        upsertPlayerSummary(allPlayersById, pl);
     }
     const playersById = {};
     const teams = (match.teams || []).map((team) => ({
@@ -7656,12 +7683,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         }).map((row) => {
             const pl = row.player;
             if (pl) {
-                playersById[pl.id] = playersById[pl.id] || {
-                    id: pl.id,
-                    name: pl.name,
-                    primary_position: pl.primary_position ?? null,
-                    secondary_position: pl.secondary_position ?? null
-                };
+                upsertPlayerSummary(playersById, pl);
             }
             return {
                 playerId: row.playerId,
@@ -7670,6 +7692,13 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
             };
         })
     }));
+    const scorerRelatedPlayerIds = (match.scorers || []).flatMap((scorer) => [scorer.playerId, scorer.assistId ?? null]);
+    await hydratePlayersByIdsForUser(db, scopeOrUserId, allPlayersById, scorerRelatedPlayerIds);
+    for (const playerId of scorerRelatedPlayerIds) {
+        if (typeof playerId === 'string' && allPlayersById[playerId] && !playersById[playerId]) {
+            playersById[playerId] = allPlayersById[playerId];
+        }
+    }
     const scorers = (match.scorers || []).map((s) => ({
         id: s.id,
         playerId: s.playerId,
@@ -7684,7 +7713,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         id: match.id,
         createdAt: match.createdAt,
         teamId: match.teamId ?? null,
-        date: match.date ?? match.createdAt,
+        date: match.type === 'CHAMPIONSHIP' ? match.date : match.date ?? match.createdAt,
         type: match.type,
         status,
         played: (0, match_status_1.derivePlayedFromStatus)(status),
@@ -7700,6 +7729,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         playersById
     }, teamFormat);
 }
+(0, championship_1.registerChampionshipRoutes)(app, { db: prisma, auth: authMiddleware, scope: applyScopeWhere, writeTeam: resolveTeamForWrite, season: resolveSeasonForClubId });
 app.get('/matches', authMiddleware, async (req, res) => {
     const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 });
     const { matchdayId } = req.query;
@@ -7715,6 +7745,26 @@ app.get('/matches', authMiddleware, async (req, res) => {
         take: pagination.take,
         skip: pagination.skip,
     });
+    const scorerPlayersById = {};
+    const allTeamIds = matches.flatMap((match) => (match.teams || []).map((team) => team.id));
+    const teamPlayers = allTeamIds.length ? await prisma.matchTeamPlayer.findMany({
+        where: { matchTeamId: { in: allTeamIds } },
+        select: {
+            player: {
+                select: {
+                    id: true,
+                    name: true,
+                    primary_position: true,
+                    secondary_position: true,
+                    email: true,
+                    phone: true,
+                },
+            },
+        },
+    }) : [];
+    for (const row of teamPlayers)
+        upsertPlayerSummary(scorerPlayersById, row.player);
+    await hydratePlayersByIdsForUser(prisma, req.auth, scorerPlayersById, matches.flatMap((match) => (match.scorers || []).flatMap((scorer) => [scorer.playerId, scorer.assistId ?? null])));
     const teamFormatById = await loadMatchTeamFormatLookup(prisma, matches.map((match) => match.teamId));
     let hasPlanningRotation = false;
     const hasPersistedRotationKey = matches.some((match) => typeof match.rotationGameKey === 'string' && match.rotationGameKey.trim().length > 0);
@@ -7739,8 +7789,9 @@ app.get('/matches', authMiddleware, async (req, res) => {
             const { plateauId, season, ...rest } = match;
             return withMatchTeamFormatAliases({
                 ...rest,
+                scorers: withHistoricalScorerNames(match.scorers || [], scorerPlayersById),
                 teamId: match.teamId ?? null,
-                date: match.date ?? match.createdAt,
+                date: match.type === 'CHAMPIONSHIP' ? match.date : match.date ?? match.createdAt,
                 matchdayId: plateauId ?? null,
                 seasonId: match.seasonId ?? season?.id ?? null,
                 season: season ? (0, season_1.toSeasonResponse)(season) : null,
@@ -7963,7 +8014,7 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
         || req.query.forceClearRotationKey === 'true'
         || req.body?.forceClearRotationKey === true;
     const schema = zod_1.z.object({
-        type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI']).optional(),
+        type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI', 'CHAMPIONSHIP']).optional(),
         status: zod_1.z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
         played: zod_1.z.boolean().optional(),
         matchdayId: zod_1.z.string().nullable().optional(),
@@ -8001,6 +8052,15 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                 const err = new Error('Match not found');
                 err.code = 'MATCH_NOT_FOUND';
                 throw err;
+            }
+            if ((existing.type === 'CHAMPIONSHIP' && ((payload.type !== undefined && payload.type !== 'CHAMPIONSHIP') || payload.matchdayId || (payload.opponentName !== undefined && payload.opponentName !== existing.opponentName))) || (existing.type !== 'CHAMPIONSHIP' && payload.type === 'CHAMPIONSHIP')) {
+                throw Object.assign(new Error('Championship identity must be managed from the championship calendar'), { code: 'MATCH_PAYLOAD_INVALID' });
+            }
+            if (existing.type === 'CHAMPIONSHIP' && payload.date) {
+                const championshipSeason = existing.seasonId ? await tx.season.findUnique({ where: { id: existing.seasonId } }) : null;
+                const kickoff = new Date(payload.date);
+                if (!championshipSeason || kickoff < championshipSeason.startDate || kickoff > championshipSeason.endDate)
+                    throw Object.assign(new Error('Kickoff must be within the championship season'), { code: 'MATCH_PAYLOAD_INVALID' });
             }
             const owningTeam = existing.teamId
                 ? await tx.team.findFirst({
@@ -8114,6 +8174,8 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                     : { disconnect: true };
             }
             matchPatch.date = nextDate;
+            if (existing.type === 'CHAMPIONSHIP')
+                nextSeasonId = existing.seasonId;
             matchPatch.season = nextSeasonId
                 ? { connect: { id: nextSeasonId } }
                 : { disconnect: true };
@@ -8215,6 +8277,8 @@ app.delete('/matches/:id', authMiddleware, async (req, res) => {
         const exists = await matchFindFirstForUser(prisma, req.auth, { where: { id } });
         if (!exists)
             return res.status(404).json({ error: 'Match not found' });
+        if (exists.type === 'CHAMPIONSHIP')
+            return res.status(409).json({ error: 'Manage championship fixtures from the championship calendar', code: 'CHAMPIONSHIP_MATCH_PROTECTED' });
         const teams = await prisma.matchTeam.findMany({ where: { matchId: id } });
         const teamIds = teams.map(t => t.id);
         await prisma.$transaction([
