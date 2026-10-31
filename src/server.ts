@@ -1,4 +1,5 @@
 import { trainingMaterials } from './training-materials'
+import { registerChampionshipRoutes } from './championship'
 import { summaryTimeZone, loadTrainingSummary, renderTrainingSummary, trainingSummaryVersion } from './training-summary'
 import 'dotenv/config'
 import express from 'express'
@@ -8141,7 +8142,7 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     id: match.id,
     createdAt: match.createdAt,
     teamId: match.teamId ?? null,
-    date: match.date ?? match.createdAt,
+    date: match.type === 'CHAMPIONSHIP' ? match.date : match.date ?? match.createdAt,
     type: match.type,
     status,
     played: derivePlayedFromStatus(status),
@@ -8157,6 +8158,8 @@ async function getMatchDetailForUser(db: any, scopeOrUserId: any, id: string) {
     playersById
   }, teamFormat)
 }
+
+registerChampionshipRoutes(app, { db: prisma, auth: authMiddleware, scope: applyScopeWhere, writeTeam: resolveTeamForWrite, season: resolveSeasonForClubId })
 
 app.get('/matches', authMiddleware, async (req: any, res) => {
   const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 })
@@ -8223,7 +8226,7 @@ app.get('/matches', authMiddleware, async (req: any, res) => {
         ...rest,
         scorers: withHistoricalScorerNames(match.scorers || [], scorerPlayersById),
         teamId: match.teamId ?? null,
-        date: match.date ?? match.createdAt,
+        date: match.type === 'CHAMPIONSHIP' ? match.date : match.date ?? match.createdAt,
         matchdayId: plateauId ?? null,
         seasonId: match.seasonId ?? season?.id ?? null,
         season: season ? toSeasonResponse(season) : null,
@@ -8438,7 +8441,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
     || req.query.forceClearRotationKey === 'true'
     || req.body?.forceClearRotationKey === true
   const schema = z.object({
-    type: z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI']).optional(),
+    type: z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI', 'CHAMPIONSHIP']).optional(),
     status: z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
     played: z.boolean().optional(),
     matchdayId: z.string().nullable().optional(),
@@ -8476,6 +8479,15 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
         const err: any = new Error('Match not found')
         err.code = 'MATCH_NOT_FOUND'
         throw err
+      }
+
+      if ((existing.type === 'CHAMPIONSHIP' && ((payload.type !== undefined && payload.type !== 'CHAMPIONSHIP') || payload.matchdayId || (payload.opponentName !== undefined && payload.opponentName !== existing.opponentName))) || (existing.type !== 'CHAMPIONSHIP' && payload.type === 'CHAMPIONSHIP')) {
+        throw Object.assign(new Error('Championship identity must be managed from the championship calendar'), { code: 'MATCH_PAYLOAD_INVALID' })
+      }
+      if (existing.type === 'CHAMPIONSHIP' && payload.date) {
+        const championshipSeason = existing.seasonId ? await tx.season.findUnique({where:{id:existing.seasonId}}) : null
+        const kickoff = new Date(payload.date)
+        if (!championshipSeason || kickoff < championshipSeason.startDate || kickoff > championshipSeason.endDate) throw Object.assign(new Error('Kickoff must be within the championship season'), {code:'MATCH_PAYLOAD_INVALID'})
       }
 
       const owningTeam = existing.teamId
@@ -8599,6 +8611,7 @@ app.put('/matches/:id', authMiddleware, async (req: any, res) => {
           : { disconnect: true }
       }
       matchPatch.date = nextDate
+      if (existing.type === 'CHAMPIONSHIP') nextSeasonId = existing.seasonId
       matchPatch.season = nextSeasonId
         ? { connect: { id: nextSeasonId } }
         : { disconnect: true }
@@ -8693,6 +8706,7 @@ app.delete('/matches/:id', authMiddleware, async (req: any, res) => {
   try {
     const exists = await matchFindFirstForUser(prisma, req.auth, { where: { id } })
     if (!exists) return res.status(404).json({ error: 'Match not found' })
+    if (exists.type === 'CHAMPIONSHIP') return res.status(409).json({ error: 'Manage championship fixtures from the championship calendar', code: 'CHAMPIONSHIP_MATCH_PROTECTED' })
 
     const teams = await prisma.matchTeam.findMany({ where: { matchId: id } })
     const teamIds = teams.map(t => t.id)

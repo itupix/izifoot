@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const training_materials_1 = require("./training-materials");
+const championship_1 = require("./championship");
 const training_summary_1 = require("./training-summary");
 require("dotenv/config");
 const express_1 = __importDefault(require("express"));
@@ -7713,7 +7714,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         id: match.id,
         createdAt: match.createdAt,
         teamId: match.teamId ?? null,
-        date: match.date ?? match.createdAt,
+        date: match.type === 'CHAMPIONSHIP' ? match.date : match.date ?? match.createdAt,
         type: match.type,
         status,
         played: (0, match_status_1.derivePlayedFromStatus)(status),
@@ -7729,6 +7730,7 @@ async function getMatchDetailForUser(db, scopeOrUserId, id) {
         playersById
     }, teamFormat);
 }
+(0, championship_1.registerChampionshipRoutes)(app, { db: prisma, auth: authMiddleware, scope: applyScopeWhere, writeTeam: resolveTeamForWrite, season: resolveSeasonForClubId });
 app.get('/matches', authMiddleware, async (req, res) => {
     const pagination = readPagination(req.query, { limit: 50, maxLimit: 200 });
     const { matchdayId } = req.query;
@@ -7790,7 +7792,7 @@ app.get('/matches', authMiddleware, async (req, res) => {
                 ...rest,
                 scorers: withHistoricalScorerNames(match.scorers || [], scorerPlayersById),
                 teamId: match.teamId ?? null,
-                date: match.date ?? match.createdAt,
+                date: match.type === 'CHAMPIONSHIP' ? match.date : match.date ?? match.createdAt,
                 matchdayId: plateauId ?? null,
                 seasonId: match.seasonId ?? season?.id ?? null,
                 season: season ? (0, season_1.toSeasonResponse)(season) : null,
@@ -8013,7 +8015,7 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
         || req.query.forceClearRotationKey === 'true'
         || req.body?.forceClearRotationKey === true;
     const schema = zod_1.z.object({
-        type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI']).optional(),
+        type: zod_1.z.enum(['ENTRAINEMENT', 'PLATEAU', 'MATCH', 'TOURNOI', 'CHAMPIONSHIP']).optional(),
         status: zod_1.z.enum(['PLANNED', 'PLAYED', 'CANCELLED']).optional(),
         played: zod_1.z.boolean().optional(),
         matchdayId: zod_1.z.string().nullable().optional(),
@@ -8051,6 +8053,15 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                 const err = new Error('Match not found');
                 err.code = 'MATCH_NOT_FOUND';
                 throw err;
+            }
+            if ((existing.type === 'CHAMPIONSHIP' && ((payload.type !== undefined && payload.type !== 'CHAMPIONSHIP') || payload.matchdayId || (payload.opponentName !== undefined && payload.opponentName !== existing.opponentName))) || (existing.type !== 'CHAMPIONSHIP' && payload.type === 'CHAMPIONSHIP')) {
+                throw Object.assign(new Error('Championship identity must be managed from the championship calendar'), { code: 'MATCH_PAYLOAD_INVALID' });
+            }
+            if (existing.type === 'CHAMPIONSHIP' && payload.date) {
+                const championshipSeason = existing.seasonId ? await tx.season.findUnique({ where: { id: existing.seasonId } }) : null;
+                const kickoff = new Date(payload.date);
+                if (!championshipSeason || kickoff < championshipSeason.startDate || kickoff > championshipSeason.endDate)
+                    throw Object.assign(new Error('Kickoff must be within the championship season'), { code: 'MATCH_PAYLOAD_INVALID' });
             }
             const owningTeam = existing.teamId
                 ? await tx.team.findFirst({
@@ -8164,6 +8175,8 @@ app.put('/matches/:id', authMiddleware, async (req, res) => {
                     : { disconnect: true };
             }
             matchPatch.date = nextDate;
+            if (existing.type === 'CHAMPIONSHIP')
+                nextSeasonId = existing.seasonId;
             matchPatch.season = nextSeasonId
                 ? { connect: { id: nextSeasonId } }
                 : { disconnect: true };
@@ -8265,6 +8278,8 @@ app.delete('/matches/:id', authMiddleware, async (req, res) => {
         const exists = await matchFindFirstForUser(prisma, req.auth, { where: { id } });
         if (!exists)
             return res.status(404).json({ error: 'Match not found' });
+        if (exists.type === 'CHAMPIONSHIP')
+            return res.status(409).json({ error: 'Manage championship fixtures from the championship calendar', code: 'CHAMPIONSHIP_MATCH_PROTECTED' });
         const teams = await prisma.matchTeam.findMany({ where: { matchId: id } });
         const teamIds = teams.map(t => t.id);
         await prisma.$transaction([
