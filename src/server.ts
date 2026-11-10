@@ -1,3 +1,4 @@
+import { buildTeamAttendanceReport, canReadTeamAttendance } from './team-attendance-report'
 import { trainingMaterials } from './training-materials'
 import { registerChampionshipRoutes } from './championship'
 import { summaryTimeZone, loadTrainingSummary, renderTrainingSummary, trainingSummaryVersion } from './training-summary'
@@ -7773,6 +7774,29 @@ app.get('/matchday/:id/summary', authMiddleware, async (req: any, res) => {
   } catch (e) {
     console.error('[GET /matchday/:id/summary] failed', e)
     return res.status(500).json({ error: 'Failed to fetch matchday summary' })
+  }
+})
+
+// Complete read-only attendance report for the selected team and season.
+app.get('/teams/:teamId/attendance-report', authMiddleware, async (req: any, res) => {
+  if (!['DIRECTION', 'COACH'].includes(req.auth?.role)) return res.status(403).json({ error: 'Attendance report requires coach or direction access' })
+  const query = z.object({ seasonId: z.string().trim().min(1) }).safeParse(req.query)
+  if (!query.success) return res.status(400).json({ error: 'seasonId is required' })
+  try {
+    const team = await prisma.team.findFirst({ where: { id: req.params.teamId, clubId: req.auth.clubId ?? '__no_club__' }, select: { id: true, clubId: true } })
+    if (!canReadTeamAttendance(req.auth, team)) return res.status(404).json({ error: 'Team not found' })
+    const season = await prisma.season.findFirst({ where: { id: query.data.seasonId, clubId: team!.clubId } })
+    if (!season) return res.status(404).json({ error: 'Season not found' })
+    // Exact team filters intentionally avoid legacy scope helpers that can overwrite teamId.
+    const [trainings, players] = await Promise.all([
+      prisma.training.findMany({ where: { teamId: team!.id, clubId: team!.clubId, seasonId: season.id }, select: { id: true, date: true, endTime: true, status: true } }),
+      prisma.player.findMany({ where: { teamId: team!.id, clubId: team!.clubId }, select: { id: true, name: true, first_name: true, last_name: true, is_active: true, createdAt: true, deactivated_at: true } }),
+    ])
+    const attendance = trainings.length ? await prisma.attendance.findMany({ where: { session_id: { in: trainings.map(t => t.id) }, session_type: { in: ['TRAINING', 'TRAINING_ABSENT'] }, playerId: { in: players.map(p => p.id) } }, select: { session_id: true, session_type: true, playerId: true } }) : []
+    return res.json(buildTeamAttendanceReport({ teamId: team!.id, season, trainings, players, attendance }))
+  } catch (error) {
+    console.error('[GET /teams/:teamId/attendance-report] failed', error)
+    return res.status(500).json({ error: 'Failed to load attendance report' })
   }
 })
 

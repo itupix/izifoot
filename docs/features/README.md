@@ -14,6 +14,7 @@ Repository role: API contract owner and business-logic authority for Izifoot.
 - `season-management-and-scoping.md`
 - `player-roster-and-parent-linking.md`
 - `training-lifecycle-attendance-and-roles.md`
+- `team-attendance-report.md`
 - `matchday-and-match-operations.md`
 - `drills-diagrams-ai-and-tactics.md`
 - `messaging-and-push-notifications.md`
