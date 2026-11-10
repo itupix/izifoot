@@ -22,7 +22,26 @@ All current season/selected team trainings are returned, ordered by date then id
 
 The existing `GET /clubs/me/seasons` API is unchanged but is not needed for this report. Web and iOS call the report without seasonId, display the response season label as plain text and provide no season picker. Empty roster text: « Aucun joueur dans l’effectif actuel. ». No season catalogue or historical fallback is used.
 
-Web and iOS must render the same server percentages and status meanings. Use — for null and explain “Présences / présences et absences renseignées ; séances non renseignées exclues”. Par mois: month > dated session > player statuses. Par joueur: searchable player > monthly/session details. Report does not mutate attendance.
+Web and iOS must render the same server percentages and status meanings. Use — for null and explain “Présences / présences et absences renseignées ; séances non renseignées exclues”. Par mois: selected month > table with alphabetical player rows and chronological training-date columns. Par joueur: searchable player > monthly/session details. Report does not mutate attendance.
+
+## Monthly matrix presentation contract
+
+No endpoint or payload changes are required for the monthly table. Use the existing current-active `players`, filter `trainings` by the server `month` key, and join `players[].attendances` by `trainingId`. Preserve server player/date order. Display each player’s monthly percentage from `players[].months[].summary`, not a client-calculated rate. The Par joueur view is unchanged.
+
+| Server status | Cell presentation | Meaning |
+| --- | --- | --- |
+| PRESENT | Green dot | Explicit saved presence |
+| ABSENT | Red dot | Explicit saved absence |
+| NOT_APPLICABLE | Grey dot | Outside roster according to known record dates |
+| UNRECORDED | Distinct hollow/question marker | Attendance not recorded; no absence or membership inference |
+| UPCOMING | Distinct clock marker | Future training; excluded from percentages |
+| CANCELLED | Distinct dash marker | Cancelled training; excluded from percentages |
+
+Every cell needs an accessible status label; color alone is insufficient. Date headers use Europe/Paris. The monthly table must keep unknown, future and cancelled cells visually distinct from the grey outside-roster dot. No missing cell may silently become ABSENT or NOT_APPLICABLE.
+
+### Historical membership limits
+
+The schema stores only current `Player.teamId`, `createdAt`, `is_active`, and `deactivated_at`. It has no team joining date, transfer history or inactive/reactivation intervals; reactivating a player clears the previous `deactivated_at`. Consequently, NOT_APPLICABLE is limited to past trainings before the player record was created or after the saved deactivation date, unless explicit attendance exists. It does not establish every historical membership interval. Suggested grey-cell label: « Hors effectif à cette date (selon les dates connues) ». UNRECORDED must not be interpreted as outside the roster. Current inactive players remain absent from rows and all totals, even if they participated earlier in the season.
 
 ## Validation
 
