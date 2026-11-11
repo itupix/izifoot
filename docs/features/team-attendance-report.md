@@ -27,3 +27,9 @@ Web and iOS must render the same server percentages and status meanings. Use —
 ## Validation
 
 `npm test` builds and runs backend tests, including report rate, calendar, eligibility and scope cases. No migration required.
+
+## API CONTRACT — monthly PDF
+
+`GET /teams/:teamId/attendance-report/pdf?month=YYYY-MM` requires an explicit valid calendar month. It uses the same authenticated DIRECTION/COACH scope, current club season, active-only roster, status rules and server monthly percentages as the JSON report. Missing/malformed month returns 400; month outside the current season returns 400 `{error:'Month is outside the current season'}`; missing/inaccessible team/club/season 404; unauthorized role 403; unauthenticated 401; unexpected errors 500. An allowed month without trainings produces a valid PDF with an empty-state message.
+
+Success: binary `application/pdf`, `Content-Disposition: attachment; filename="presences-YYYY-MM.pdf"`, `Cache-Control: private, no-store`. No request body or season selector. PDF includes the selected team, current season, French month, alphabetical active players, chronological dates without times, monthly server percentages and six-status legend. No counters, calculation helper or historical disclaimer. A4 landscape, at most five date columns per group, with repeated headers and all players/dates preserved across pages. Web downloads the file; iOS uses its system preview/share flow. Both clients must discard stale results after team/month changes.

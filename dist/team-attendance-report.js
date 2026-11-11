@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.canReadTeamAttendance = canReadTeamAttendance;
 exports.buildTeamAttendanceReport = buildTeamAttendanceReport;
 exports.resolveCurrentAttendanceSeason = resolveCurrentAttendanceSeason;
+exports.loadTeamAttendanceReport = loadTeamAttendanceReport;
 const season_1 = require("./season");
 const emptyStats = () => ({ presentCount: 0, absentCount: 0, unrecordedCount: 0, recordedCount: 0, attendanceRate: null });
 function stats(statuses) {
@@ -76,4 +77,22 @@ async function resolveCurrentAttendanceSeason(db, clubId, now, requestedSeasonId
     if (requestedSeasonId && requestedSeasonId !== season.id)
         return { status: 400, error: 'Only the current season is available' };
     return { season };
+}
+// Shared by JSON and PDF so authorization, roster and rates cannot diverge.
+async function loadTeamAttendanceReport(db, auth, teamId, requestedSeasonId, now = new Date()) {
+    if (!['DIRECTION', 'COACH'].includes(auth?.role))
+        return { status: 403, error: 'Attendance report requires coach or direction access' };
+    const team = await db.team.findFirst({ where: { id: teamId, clubId: auth.clubId ?? '__no_club__' }, select: { id: true, clubId: true, name: true } });
+    if (!canReadTeamAttendance(auth, team))
+        return { status: 404, error: 'Team not found' };
+    const resolved = await resolveCurrentAttendanceSeason(db, team.clubId, now, requestedSeasonId);
+    if (resolved.status !== undefined)
+        return resolved;
+    const season = resolved.season;
+    const [trainings, players] = await Promise.all([
+        db.training.findMany({ where: { teamId: team.id, clubId: team.clubId, seasonId: season.id }, select: { id: true, date: true, endTime: true, status: true } }),
+        db.player.findMany({ where: { teamId: team.id, clubId: team.clubId, is_active: true }, select: { id: true, name: true, first_name: true, last_name: true, is_active: true, createdAt: true, deactivated_at: true } }),
+    ]);
+    const attendance = trainings.length ? await db.attendance.findMany({ where: { session_id: { in: trainings.map((t) => t.id) }, session_type: { in: ['TRAINING', 'TRAINING_ABSENT'] }, playerId: { in: players.map((p) => p.id) } }, select: { session_id: true, session_type: true, playerId: true } }) : [];
+    return { team, report: buildTeamAttendanceReport({ teamId: team.id, season, trainings, players, attendance, now }) };
 }

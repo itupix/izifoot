@@ -1,4 +1,5 @@
-import { buildTeamAttendanceReport, canReadTeamAttendance, resolveCurrentAttendanceSeason } from './team-attendance-report'
+import { loadTeamAttendanceReport } from './team-attendance-report'
+import { validAttendanceMonth, attendanceMonthInSeason, renderMonthlyAttendancePdf } from './team-attendance-pdf'
 import { trainingMaterials } from './training-materials'
 import { registerChampionshipRoutes } from './championship'
 import { summaryTimeZone, loadTrainingSummary, renderTrainingSummary, trainingSummaryVersion } from './training-summary'
@@ -7783,22 +7784,31 @@ app.get('/teams/:teamId/attendance-report', authMiddleware, async (req: any, res
   const query = z.object({ seasonId: z.string().trim().min(1).optional() }).safeParse(req.query)
   if (!query.success) return res.status(400).json({ error: 'Invalid seasonId' })
   try {
-    const team = await prisma.team.findFirst({ where: { id: req.params.teamId, clubId: req.auth.clubId ?? '__no_club__' }, select: { id: true, clubId: true } })
-    if (!canReadTeamAttendance(req.auth, team)) return res.status(404).json({ error: 'Team not found' })
-    const now = new Date()
-    const resolved = await resolveCurrentAttendanceSeason(prisma, team!.clubId, now, query.data.seasonId)
-    if (resolved.status !== undefined) return res.status(resolved.status).json({ error: resolved.error })
-    const season = resolved.season
-    // Exact team filters intentionally avoid legacy scope helpers that can overwrite teamId.
-    const [trainings, players] = await Promise.all([
-      prisma.training.findMany({ where: { teamId: team!.id, clubId: team!.clubId, seasonId: season.id }, select: { id: true, date: true, endTime: true, status: true } }),
-      prisma.player.findMany({ where: { teamId: team!.id, clubId: team!.clubId, is_active: true }, select: { id: true, name: true, first_name: true, last_name: true, is_active: true, createdAt: true, deactivated_at: true } }),
-    ])
-    const attendance = trainings.length ? await prisma.attendance.findMany({ where: { session_id: { in: trainings.map(t => t.id) }, session_type: { in: ['TRAINING', 'TRAINING_ABSENT'] }, playerId: { in: players.map(p => p.id) } }, select: { session_id: true, session_type: true, playerId: true } }) : []
-    return res.json(buildTeamAttendanceReport({ teamId: team!.id, season, trainings, players, attendance, now }))
+    const result = await loadTeamAttendanceReport(prisma, req.auth, req.params.teamId, query.data.seasonId)
+    if (result.status !== undefined) return res.status(result.status).json({ error: result.error })
+    return res.json(result.report)
   } catch (error) {
     console.error('[GET /teams/:teamId/attendance-report] failed', error)
     return res.status(500).json({ error: 'Failed to load attendance report' })
+  }
+})
+
+app.get('/teams/:teamId/attendance-report/pdf', authMiddleware, async (req: any, res) => {
+  if (!['DIRECTION', 'COACH'].includes(req.auth?.role)) return res.status(403).json({ error: 'Attendance report requires coach or direction access' })
+  if (!validAttendanceMonth(req.query.month)) return res.status(400).json({ error: 'month must use YYYY-MM' })
+  const month = req.query.month
+  try {
+    const result = await loadTeamAttendanceReport(prisma, req.auth, req.params.teamId)
+    if (result.status !== undefined) return res.status(result.status).json({ error: result.error })
+    if (!attendanceMonthInSeason(month, result.report.season)) return res.status(400).json({ error: 'Month is outside the current season' })
+    const pdf = await renderMonthlyAttendancePdf(result.report, result.team.name, month)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="presences-${month}.pdf"`)
+    res.setHeader('Cache-Control', 'private, no-store')
+    return res.send(pdf)
+  } catch (error) {
+    console.error('[GET /teams/:teamId/attendance-report/pdf] failed', error)
+    return res.status(500).json({ error: 'Failed to generate attendance PDF' })
   }
 })
 
